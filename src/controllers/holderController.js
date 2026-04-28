@@ -54,7 +54,7 @@ exports.revokeQR = async (req, res) => {
 exports.resendQR = async (req, res) => {
   try {
     const { deliveryMethod } = req.body;
-
+    const primaryVenue = event.venue?.[0];
     const qrPass = await QRPass.findOne({ qrId: req.params.qrId })
       .populate("holderId")
       .populate("eventId")
@@ -91,7 +91,13 @@ exports.resendQR = async (req, res) => {
       qrId: qrPass.qrId,
       validFrom: qrPass.validFrom.toISOString(),
       validUntil: qrPass.validUntil.toISOString(),
-      venue: event.venue?.name || event.venue?.address || "",
+      venue:
+        event.venue
+          ?.map((v) => v.name)
+          .filter(Boolean)
+          .join(", ") ||
+        event.venue?.[0]?.name ||
+        "",
     };
 
     if (deliveryMethod === "whatsapp" || deliveryMethod === "both") {
@@ -271,6 +277,7 @@ exports.createHolder = async (req, res) => {
     if (!event) {
       return res.status(404).json({ error: "Event not found" });
     }
+    const primaryVenue = event.venue?.[0];
 
     const category = await Category.findById(catId).populate("entryPoints");
     if (!category) {
@@ -332,7 +339,13 @@ exports.createHolder = async (req, res) => {
         qrId: qrId,
         validFrom: validFrom.toISOString(),
         validUntil: validUntil.toISOString(),
-        venue: event.venue?.name || event.venue?.address,
+        venue:
+          event.venue
+            ?.map((v) => v.name)
+            .filter(Boolean)
+            .join(", ") ||
+          event.venue?.[0]?.name ||
+          "",
       };
 
       try {
@@ -723,6 +736,11 @@ async function processSingleRecord(
             qrId,
             validFrom: event.dateStart.toISOString(),
             validUntil: event.dateEnd.toISOString(),
+            venue:
+              event.venue
+                ?.map((v) => v.name)
+                .filter(Boolean)
+                .join(", ") || "",
           },
         );
         qrPass.deliveryStatus = "sent";

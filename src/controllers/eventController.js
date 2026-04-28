@@ -13,17 +13,31 @@ exports.createEvent = async (req, res) => {
     };
 
     const event = await Event.create(eventData);
+    const primaryVenue = event.venue?.[0];
+    const venueName = primaryVenue?.name || "ISKCON Temple";
 
     // Create default entry points
     const defaultEntryPoints = [
-      { name: "Venue Entry", stationLabel: "Main Gate", type: "venue_entry" },
-      { name: "Darshan", stationLabel: "Darshan Queue", type: "darshan" },
+      {
+        name: "Venue Entry",
+        stationLabel: `Main Gate - ${venueName}`,
+        type: "venue_entry",
+      },
+      {
+        name: "Darshan",
+        stationLabel: `Darshan Queue - ${venueName}`,
+        type: "darshan",
+      },
       {
         name: "Special Prasadam",
-        stationLabel: "Prasadam Counter",
+        stationLabel: `Prasadam Counter - ${venueName}`,
         type: "prasadam",
       },
-      { name: "Bahumana", stationLabel: "Bahumana Desk", type: "bahumana" },
+      {
+        name: "Bahumana",
+        stationLabel: `Bahumana Desk - ${venueName}`,
+        type: "bahumana",
+      },
     ];
 
     const entryPoints = await EntryPoint.insertMany(
@@ -157,6 +171,9 @@ exports.createPaidTier = async (req, res) => {
     if (!event) {
       return res.status(404).json({ error: "Event not found" });
     }
+    if (event.venue && !event.venues) {
+      event.venues = [event.venue];
+    }
 
     if (!Array.isArray(entryPoints) || entryPoints.length === 0) {
       return res
@@ -238,9 +255,12 @@ exports.getEventDetails = async (req, res) => {
       "createdBy",
       "name email",
     );
+    if (!event) return res.status(404).json({ error: "Event not found" });
 
-    if (!event) {
-      return res.status(404).json({ error: "Event not found" });
+    // COMPATIBILITY: If old format (single venue object), convert to array
+    const eventObj = event.toObject();
+    if (!Array.isArray(eventObj.venue)) {
+      eventObj.venue = eventObj.venue ? [eventObj.venue] : [];
     }
 
     const [entryPoints, categories, recentScans] = await Promise.all([

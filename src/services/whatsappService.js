@@ -3,7 +3,8 @@ const FormData = require("form-data");
 
 class WhatsAppService {
   constructor() {
-    this.baseUrl = process.env.WHATSAPP_API_URL || "https://wapi.flaxxa.com/api/v1";
+    this.baseUrl =
+      process.env.WHATSAPP_API_URL || "https://wapi.flaxxa.com/api/v1";
     this.token = process.env.WHATSAPP_API_KEY;
   }
 
@@ -16,13 +17,21 @@ class WhatsAppService {
 
     let dateStr = "Event Date";
     let timeStr = "Event Time";
-    
+
     if (passDetails.validFrom) {
       try {
         const d = new Date(passDetails.validFrom);
         if (!isNaN(d.getTime())) {
-          dateStr = d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
-          timeStr = d.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true });
+          dateStr = d.toLocaleDateString("en-IN", {
+            day: "numeric",
+            month: "short",
+            year: "numeric",
+          });
+          timeStr = d.toLocaleTimeString("en-IN", {
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true,
+          });
         }
       } catch (e) {
         console.log("Date parse error:", e.message);
@@ -46,20 +55,23 @@ class WhatsAppService {
     form.append("phone", phone);
     form.append("template_name", "common_qr_template");
     form.append("template_language", "en");
-    form.append("components", JSON.stringify([
-      {
-        type: "body",
-        parameters: [
-          { type: "text", text: holderName },                              // {{1}} Name
-          { type: "text", text: eventName },                               // {{2}} Event
-          { type: "text", text: dateStr },                                 // {{3}} Date
-          { type: "text", text: timeStr },                                 // {{4}} Time
-          { type: "text", text: venue },                                   // {{5}} Venue (DYNAMIC)
-          { type: "text", text: process.env.HELP_CONTACT || "8977761187" },// {{6}} Help
-          { type: "text", text: entries },                                 // {{7}} Access
-        ],
-      },
-    ]));
+    form.append(
+      "components",
+      JSON.stringify([
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: holderName }, // {{1}} Name
+            { type: "text", text: eventName }, // {{2}} Event
+            { type: "text", text: dateStr }, // {{3}} Date
+            { type: "text", text: timeStr }, // {{4}} Time
+            { type: "text", text: venue }, // {{5}} Venue (DYNAMIC)
+            { type: "text", text: process.env.HELP_CONTACT || "8977761187" }, // {{6}} Help
+            { type: "text", text: entries }, // {{7}} Access
+          ],
+        },
+      ]),
+    );
 
     form.append("header_attachment", imageBuffer, {
       filename: "QR-Pass.png",
@@ -72,7 +84,11 @@ class WhatsAppService {
       { headers: form.getHeaders(), timeout: 30000 },
     );
 
-    console.log("✅ Flaxxa response:", response.data?.status, response.data?.message_id);
+    console.log(
+      "✅ Flaxxa response:",
+      response.data?.status,
+      response.data?.message_id,
+    );
 
     return {
       success: true,
@@ -91,7 +107,9 @@ class WhatsAppService {
   formatEntryPoints(entryPoints) {
     if (!entryPoints || entryPoints.length === 0) return "N/A";
     return entryPoints
-      .map((ep) => (typeof ep === "string" ? ep : ep.name || ep.stationLabel || ""))
+      .map((ep) =>
+        typeof ep === "string" ? ep : ep.name || ep.stationLabel || "",
+      )
       .filter(Boolean)
       .join(", ");
   }

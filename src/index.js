@@ -117,6 +117,12 @@ mongoose
   .then(() => console.log("✅ Connected to MongoDB"))
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err.message);
+    setTimeout(() => {
+      console.log("🔄 Retrying MongoDB connection...");
+      mongoose
+        .connect(MONGODB_URI)
+        .catch((e) => console.error("❌ Retry failed:", e.message));
+    }, 5000);
     console.log("\n💡 Quick fix:");
     console.log("Run: sudo systemctl start mongodb");
     console.log("Or with Docker: docker run -d -p 27017:27017 mongo:7");

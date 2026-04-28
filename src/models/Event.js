@@ -20,14 +20,16 @@ const eventSchema = new mongoose.Schema({
     type: Date,
     required: true,
   },
-  venue: {
-    name: String,
-    address: String,
-    coordinates: {
-      lat: Number,
-      lng: Number,
+  venue: [
+    {
+      name: String,
+      address: String,
+      coordinates: {
+        lat: Number,
+        lng: Number,
+      },
     },
-  },
+  ],
   bannerImage: String,
   status: {
     type: String,
