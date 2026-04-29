@@ -32,13 +32,9 @@ const entryPointSchema = new mongoose.Schema({
     ref: "EntryPoint",
     default: null,
   },
-  maxCapacity: {
-    type: Number,
-    default: null,
-  },
-  currentCount: {
-    type: Number,
-    default: 0,
+  allowGroupCount: {
+    type: Boolean,
+    default: false,
   },
   multiEntryAllowed: {
     type: Boolean,

@@ -4,6 +4,9 @@ const Category = require("../models/Category");
 const QRPass = require("../models/QRPass");
 const PaidTier = require("../models/PaidTier");
 const HolderType = require("../models/HolderType");
+const Holder = require("../models/Holder");
+const ScanLog = require("../models/ScanLog");
+const FailedImport = require("../models/FailedImport");
 
 exports.createEvent = async (req, res) => {
   try {
@@ -20,22 +23,22 @@ exports.createEvent = async (req, res) => {
     const defaultEntryPoints = [
       {
         name: "Venue Entry",
-        stationLabel: `Main Gate - ${venueName}`,
+        stationLabel: `Main Gate `,
         type: "venue_entry",
       },
       {
         name: "Darshan",
-        stationLabel: `Darshan Queue - ${venueName}`,
+        stationLabel: `Darshan Queue `,
         type: "darshan",
       },
       {
         name: "Special Prasadam",
-        stationLabel: `Prasadam Counter - ${venueName}`,
+        stationLabel: `Prasadam Counter `,
         type: "prasadam",
       },
       {
         name: "Bahumana",
-        stationLabel: `Bahumana Desk - ${venueName}`,
+        stationLabel: `Bahumana Desk `,
         type: "bahumana",
       },
     ];
@@ -309,18 +312,39 @@ exports.updateEvent = async (req, res) => {
 
 exports.deleteEvent = async (req, res) => {
   try {
-    const event = await Event.findByIdAndDelete(req.params.id);
+    const eventId = req.params.id;
+    
+    const event = await Event.findByIdAndDelete(eventId);
+    if (!event) return res.status(404).json({ error: "Event not found" });
 
-    if (!event) {
-      return res.status(404).json({ error: "Event not found" });
-    }
+    // Find all related data first
+    const [entryPoints, holders] = await Promise.all([
+      EntryPoint.find({ eventId }),
+      Holder.find({ eventId }),
+    ]);
+    
+    const holderIds = holders.map(h => h._id);
+    const epIds = entryPoints.map(ep => ep._id);
 
-    // Delete related data
-    await EntryPoint.deleteMany({ eventId: req.params.id });
-    await Category.deleteMany({ eventId: req.params.id });
-    await HolderType.deleteMany({ eventId: req.params.id });
+    // Delete everything in parallel
+    await Promise.all([
+      EntryPoint.deleteMany({ eventId }),
+      Category.deleteMany({ eventId }),
+      HolderType.deleteMany({ eventId }),
+      Holder.deleteMany({ eventId }),
+      QRPass.deleteMany({ eventId }),
+      ScanLog.deleteMany({ epId: { $in: epIds } }),
+      ScanLog.deleteMany({ holderId: { $in: holderIds } }),
+      FailedImport.deleteMany({ eventId }),
+    ]);
 
-    res.json({ success: true, message: "Event deleted successfully" });
+    console.log(`🗑️ Deleted event ${eventId}: ${holderIds.length} holders, ${epIds.length} entry points`);
+    res.json({ 
+      success: true, 
+      message: "Event and all related data deleted",
+      holdersDeleted: holderIds.length,
+      entryPointsDeleted: epIds.length,
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to delete event" });
   }

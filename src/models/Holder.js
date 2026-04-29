@@ -25,6 +25,8 @@ const holderSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  preacher: String,
+  venueName: String,
   email: {
     type: String,
     lowercase: true,

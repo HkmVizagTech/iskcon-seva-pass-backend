@@ -84,7 +84,7 @@ exports.getVolunteers = async (req, res) => {
     const volunteers = await User.find(query)
       .select("-password")
       .populate("assignedEvents", "name eventCode")
-      .populate("assignedEntryPoints", "name stationLabel type")
+      .populate("assignedEntryPoints", "name stationLabel type allowGroupCount")
       .sort({ createdAt: -1 });
 
     res.json({ volunteers });
@@ -103,7 +103,7 @@ exports.getVolunteer = async (req, res) => {
     })
       .select("-password")
       .populate("assignedEvents", "name eventCode dateStart dateEnd venue")
-      .populate("assignedEntryPoints", "name stationLabel type location");
+      .populate("assignedEntryPoints", "name stationLabel type location allowGroupCount");
 
     if (!volunteer) {
       return res.status(404).json({ error: "Volunteer not found" });
@@ -150,7 +150,7 @@ exports.updateVolunteer = async (req, res) => {
     )
       .select("-password")
       .populate("assignedEvents", "name eventCode")
-      .populate("assignedEntryPoints", "name stationLabel type");
+      .populate("assignedEntryPoints", "name stationLabel type allowGroupCount");
 
     if (!volunteer) {
       return res.status(404).json({ error: "Volunteer not found" });
@@ -219,7 +219,7 @@ exports.volunteerLogin = async (req, res) => {
     }
 
     const volunteer = await User.findOne(query)
-      .populate("assignedEntryPoints", "name stationLabel type _id")
+      .populate("assignedEntryPoints", "name stationLabel type _id allowGroupCount")
       .populate("assignedEvents", "name eventCode _id");
 
     if (!volunteer) {

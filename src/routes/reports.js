@@ -23,5 +23,10 @@ router.get(
   authorize("super_admin", "event_admin"),
   reportController.exportReport,
 );
+router.get(
+  "/events/:eventId/holders-detail",
+  protect,
+  reportController.getHolderDetailsReport,
+);
 
 module.exports = router;

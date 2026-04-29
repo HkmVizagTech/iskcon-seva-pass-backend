@@ -31,11 +31,6 @@ const eventSchema = new mongoose.Schema({
     },
   ],
   bannerImage: String,
-  status: {
-    type: String,
-    enum: ["draft", "active", "completed", "cancelled"],
-    default: "draft",
-  },
   donorThreshold: {
     type: Number,
     default: 0,
@@ -69,6 +64,19 @@ const eventSchema = new mongoose.Schema({
   },
   updatedAt: Date,
 });
+
+eventSchema.pre("save", function () {
+  this.updatedAt = new Date();
+});
+
+eventSchema.virtual("status").get(function () {
+  const now = new Date();
+  if (now < this.dateStart) return "upcoming";
+  if (now >= this.dateStart && now <= this.dateEnd) return "active";
+  return "completed";
+});
+eventSchema.set("toJSON", { virtuals: true });
+eventSchema.set("toObject", { virtuals: true });
 
 eventSchema.pre("save", function () {
   this.updatedAt = new Date();

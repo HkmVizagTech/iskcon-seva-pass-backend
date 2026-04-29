@@ -48,34 +48,27 @@ exports.revokeQR = async (req, res) => {
   }
 };
 
-/**
- * Resend QR code via WhatsApp/Email
- */
 exports.resendQR = async (req, res) => {
   try {
     const { deliveryMethod } = req.body;
-    const primaryVenue = event.venue?.[0];
+
     const qrPass = await QRPass.findOne({ qrId: req.params.qrId })
       .populate("holderId")
       .populate("eventId")
       .populate("entryPoints");
 
-    if (!qrPass) {
-      return res.status(404).json({ error: "QR pass not found" });
-    }
-
-    if (!qrPass.holderId) {
-      return res.status(400).json({ error: "Holder not found for this QR" });
-    }
+    if (!qrPass) return res.status(404).json({ error: "QR pass not found" });
+    if (!qrPass.holderId)
+      return res.status(400).json({ error: "Holder not found" });
 
     const holder = qrPass.holderId;
-    const event = qrPass.eventId;
+    const evt = qrPass.eventId; // ← RENAMED to 'evt' to avoid conflict
     const entryPoints = qrPass.entryPoints;
 
     const payload = {
       qrId: qrPass.qrId,
-      eventId: event._id,
-      eventCode: event.eventCode,
+      eventId: evt._id,
+      eventCode: evt.eventCode,
       holderId: holder._id,
       holderName: holder.name,
       entryPoints: entryPoints.map((ep) => ep._id.toString()),
@@ -91,13 +84,7 @@ exports.resendQR = async (req, res) => {
       qrId: qrPass.qrId,
       validFrom: qrPass.validFrom.toISOString(),
       validUntil: qrPass.validUntil.toISOString(),
-      venue:
-        event.venue
-          ?.map((v) => v.name)
-          .filter(Boolean)
-          .join(", ") ||
-        event.venue?.[0]?.name ||
-        "",
+      venue: evt.venue,
     };
 
     if (deliveryMethod === "whatsapp" || deliveryMethod === "both") {
@@ -105,22 +92,9 @@ exports.resendQR = async (req, res) => {
         holder.phone || holder.whatsappNumber,
         qrImage,
         holder.name,
-        event.name,
+        evt.name,
         passDetails,
       );
-    }
-
-    if (deliveryMethod === "email" || deliveryMethod === "both") {
-      if (holder.email) {
-        const emailService = require("../services/emailService");
-        await emailService.sendQRPass(
-          holder.email,
-          qrImage,
-          holder.name,
-          event.name,
-          passDetails,
-        );
-      }
     }
 
     qrPass.deliveryMethod = deliveryMethod;
@@ -271,6 +245,8 @@ exports.createHolder = async (req, res) => {
       entryPoints,
       overrideReason,
       deliveryMethod,
+      preacher,
+      venueName,
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -300,6 +276,8 @@ exports.createHolder = async (req, res) => {
       lifetimeDonation: Number(lifetimeDonation || 0),
       issuedBy: req.user?._id || req.user?.userId,
       overrideReason,
+      preacher: preacher || "",
+      venueName: venueName || primaryVenue?.name || "",
     });
 
     const qrId = await qrService.generateQRId(
@@ -339,13 +317,7 @@ exports.createHolder = async (req, res) => {
         qrId: qrId,
         validFrom: validFrom.toISOString(),
         validUntil: validUntil.toISOString(),
-        venue:
-          event.venue
-            ?.map((v) => v.name)
-            .filter(Boolean)
-            .join(", ") ||
-          event.venue?.[0]?.name ||
-          "",
+        venue: venueName || event.venue?.[0]?.name || "",
       };
 
       try {
@@ -686,6 +658,8 @@ async function processSingleRecord(
         phone: formattedPhone,
         whatsappNumber: formattedPhone,
         holderType,
+        preacher: preacher || "",
+        venueName: venue || event.venue?.[0]?.name || "",
         notes:
           [sponsorSeva, sponsorCategory, preacher, venue, slot]
             .filter(Boolean)
@@ -736,11 +710,7 @@ async function processSingleRecord(
             qrId,
             validFrom: event.dateStart.toISOString(),
             validUntil: event.dateEnd.toISOString(),
-            venue:
-              event.venue
-                ?.map((v) => v.name)
-                .filter(Boolean)
-                .join(", ") || "",
+            venue: venue || event.venue?.[0]?.name || "",
           },
         );
         qrPass.deliveryStatus = "sent";

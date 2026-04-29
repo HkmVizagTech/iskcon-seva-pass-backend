@@ -4,45 +4,100 @@ const QRPass = require("../models/QRPass");
 const EntryPoint = require("../models/EntryPoint");
 const mongoose = require("mongoose");
 
+// ─── In-memory dedup map ──────────────────────────────────────────────────────
+// Prevents duplicate DB writes when the frontend sends two near-simultaneous
+// requests for the same QR + station (happens due to React Strict Mode or
+// html5-qrcode firing the callback on multiple frames before the scanner stops).
+const recentScans = new Map(); // dedupKey → Date.now()
+const DEDUP_WINDOW_MS = 5000; // 5 seconds is more than enough
+
+function isDuplicate(qrId, epId) {
+  const key = `${qrId}::${epId}`;
+  const now = Date.now();
+  const last = recentScans.get(key);
+
+  if (last && now - last < DEDUP_WINDOW_MS) {
+    return true; // duplicate
+  }
+
+  recentScans.set(key, now);
+
+  // Prune stale entries to avoid memory leak
+  if (recentScans.size > 500) {
+    for (const [k, ts] of recentScans.entries()) {
+      if (now - ts > DEDUP_WINDOW_MS * 2) recentScans.delete(k);
+    }
+  }
+
+  return false;
+}
+
 exports.scanQR = async (req, res) => {
   try {
     const {
-      qrData, qr_payload,
-      epId, ep_id,
-      stationLabel, station_label,
+      qrData,
+      qr_payload,
+      epId,
+      ep_id,
+      stationLabel,
+      station_label,
       deviceInfo,
-      client_scan_id, clientScanId,
+      groupCount,
+      client_scan_id,
+      clientScanId,
     } = req.body;
-    
+
     const incomingQrData = qrData || qr_payload;
     const incomingEpId = epId || ep_id;
     const incomingStationLabel = stationLabel || station_label || "";
+    const incomingGroupCount = groupCount || 1;
     const userId = req.user._id || req.user.userId;
 
     if (!incomingQrData || !incomingEpId) {
       return res.status(400).json({
-        success: false, result: "invalid",
+        success: false,
+        result: "invalid",
         message: "qr payload and ep id are required",
       });
     }
 
+    // ── Validate QR first so we have the real qrId ────────────────────────────
     const validation = await qrService.validateQR(incomingQrData, incomingEpId);
+    const scanQrId =
+      validation.payload?.q || validation.payload?.qrId || "unknown";
 
-    // Get QR ID from payload (short key 'q')
-    const scanQrId = validation.payload?.q || validation.payload?.qrId || "unknown";
-    
-    // Get FULL holderId from the QR pass document (not the short payload)
-    const fullHolderId = validation.qrPass?.holderId?._id || validation.qrPass?.holderId || null;
+    // ── Dedup check using real qrId + epId ────────────────────────────────────
+    if (isDuplicate(scanQrId, incomingEpId)) {
+      console.warn(
+        `[scan] Duplicate suppressed: ${scanQrId} @ ${incomingEpId}`,
+      );
+      // Return the same shape as a normal response so the client handles it fine.
+      // We intentionally do NOT write a second log entry.
+      return res.status(200).json({
+        success: false,
+        result: "duplicate",
+        message: "Duplicate scan ignored.",
+      });
+    }
 
-    const scanLog = await ScanLog.create({
+    // ── Get holderId from the DB document (not the short JWT payload) ─────────
+    const fullHolderId =
+      validation.qrPass?.holderId?._id || validation.qrPass?.holderId || null;
+
+    // ── Write ONE scan log ────────────────────────────────────────────────────
+    await ScanLog.create({
       qrId: scanQrId,
-      holderId: fullHolderId,  // Full ObjectId from DB document
+      holderId: fullHolderId,
       epId: incomingEpId,
       scannedBy: userId,
       stationLabel: incomingStationLabel,
       result: validation.valid ? "granted" : validation.reason,
       clientScanId: client_scan_id || clientScanId,
-      deviceInfo: { ...deviceInfo, ipAddress: req.ip },
+      deviceInfo: {
+        ...deviceInfo,
+        groupCount: incomingGroupCount,
+        ipAddress: req.ip,
+      },
     });
 
     if (!validation.valid) {
@@ -55,22 +110,22 @@ exports.scanQR = async (req, res) => {
       });
     }
 
-    // Use qrService.redeemQR which handles everything atomically
+    // ── Redeem + update counts ────────────────────────────────────────────────
     await qrService.redeemQR(
       scanQrId,
       incomingEpId,
       userId,
       incomingStationLabel,
       deviceInfo,
-      validation.qrPass
+      incomingGroupCount,
+      validation.qrPass,
     );
 
-    // Update entry point count
     await EntryPoint.findByIdAndUpdate(incomingEpId, {
-      $inc: { currentCount: 1 },
+      $inc: { currentCount: incomingGroupCount },
     });
 
-    res.json({
+    return res.json({
       success: true,
       result: "granted",
       holder_name: validation.holderName,
@@ -80,7 +135,8 @@ exports.scanQR = async (req, res) => {
   } catch (error) {
     console.error("Scan error:", error);
     res.status(500).json({
-      success: false, result: "invalid",
+      success: false,
+      result: "invalid",
       message: "Scan processing failed",
     });
   }
@@ -107,7 +163,9 @@ exports.getStationStats = async (req, res) => {
       },
       stats: {
         granted: stats.find((s) => s._id === "granted")?.count || 0,
-        denied: stats.filter((s) => s._id !== "granted").reduce((sum, s) => sum + s.count, 0),
+        denied: stats
+          .filter((s) => s._id !== "granted")
+          .reduce((sum, s) => sum + s.count, 0),
       },
     });
   } catch (error) {
@@ -117,7 +175,6 @@ exports.getStationStats = async (req, res) => {
 
 exports.getRecentScans = async (req, res) => {
   try {
-    const { eventId } = req.params;
     const limit = parseInt(req.query.limit) || 50;
     const scans = await ScanLog.find({ holderId: { $exists: true } })
       .populate("epId", "name stationLabel")
@@ -145,24 +202,43 @@ exports.getHolderScanHistory = async (req, res) => {
 exports.syncOfflineScans = async (req, res) => {
   try {
     const { scans } = req.body;
-    let synced = 0, duplicates = 0;
+    let synced = 0,
+      duplicates = 0;
     for (const scan of scans) {
       try {
         const clientId = scan.client_scan_id || scan.clientScanId;
         if (clientId) {
           const result = await ScanLog.updateOne(
             { clientScanId: clientId },
-            { $setOnInsert: { ...scan, clientScanId: clientId, scannedBy: req.user._id || req.user.userId, offlineSync: { isOffline: true, syncedAt: new Date() } } },
-            { upsert: true }
+            {
+              $setOnInsert: {
+                ...scan,
+                clientScanId: clientId,
+                scannedBy: req.user._id || req.user.userId,
+                offlineSync: { isOffline: true, syncedAt: new Date() },
+              },
+            },
+            { upsert: true },
           );
           result.upsertedCount > 0 ? synced++ : duplicates++;
         } else {
-          await ScanLog.create({ ...scan, scannedBy: req.user._id || req.user.userId, offlineSync: { isOffline: true, syncedAt: new Date() } });
+          await ScanLog.create({
+            ...scan,
+            scannedBy: req.user._id || req.user.userId,
+            offlineSync: { isOffline: true, syncedAt: new Date() },
+          });
           synced++;
         }
-      } catch (e) { console.error("Failed to sync scan:", e); }
+      } catch (e) {
+        console.error("Failed to sync scan:", e);
+      }
     }
-    res.json({ success: true, synced, duplicates, message: `Synced ${synced} scans` });
+    res.json({
+      success: true,
+      synced,
+      duplicates,
+      message: `Synced ${synced} scans`,
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to sync offline scans" });
   }

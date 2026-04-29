@@ -52,9 +52,9 @@ class QRService {
       const signedPayload = this.signPayload(payload);
 
       const qrImage = await QRCode.toDataURL(signedPayload, {
-        errorCorrectionLevel: "M",
-        margin: 4,
-        width: 400,
+        errorCorrectionLevel: "L",
+        margin: 2,
+        width: 350,
         color: {
           dark: "#000000",
           light: "#FFFFFF",
