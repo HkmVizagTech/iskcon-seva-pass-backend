@@ -61,46 +61,55 @@ exports.scanQR = async (req, res) => {
       });
     }
 
-    // ── Validate QR first so we have the real qrId ────────────────────────────
-    const validation = await qrService.validateQR(incomingQrData, incomingEpId);
-    const scanQrId =
-      validation.payload?.q || validation.payload?.qrId || "unknown";
+    // ✅ FIX 1: Extract qrId BEFORE validation for quick dedup check
+    let scanQrId = "pending";
+    try {
+      const decoded = jwt.decode(incomingQrData); // Quick decode without verification
+      scanQrId = decoded?.q || decoded?.qrId || incomingQrData.substring(0, 20);
+    } catch (e) {
+      scanQrId = incomingQrData.substring(0, 20);
+    }
 
-    // ── Dedup check using real qrId + epId ────────────────────────────────────
-    if (isDuplicate(scanQrId, incomingEpId)) {
-      console.warn(
-        `[scan] Duplicate suppressed: ${scanQrId} @ ${incomingEpId}`,
-      );
-      // Return the same shape as a normal response so the client handles it fine.
-      // We intentionally do NOT write a second log entry.
+    // ✅ FIX 2: Synchronous dedup check FIRST
+    const dupKey = `${scanQrId}::${incomingEpId}`;
+    const now = Date.now();
+    const lastScan = recentScans.get(dupKey);
+
+    if (lastScan && now - lastScan < DEDUP_WINDOW_MS) {
+      console.warn(`[DEDUP] Blocked duplicate: ${scanQrId} @ ${incomingEpId}`);
       return res.status(200).json({
         success: false,
         result: "duplicate",
-        message: "Duplicate scan ignored.",
+        message: "Duplicate scan ignored",
       });
     }
 
-    // ── Get holderId from the DB document (not the short JWT payload) ─────────
-    const fullHolderId =
-      validation.qrPass?.holderId?._id || validation.qrPass?.holderId || null;
+    // ✅ FIX 3: Mark as processing IMMEDIATELY (before async operations)
+    recentScans.set(dupKey, now);
 
-    // ── Write ONE scan log ────────────────────────────────────────────────────
-    await ScanLog.create({
-      qrId: scanQrId,
-      holderId: fullHolderId,
-      epId: incomingEpId,
-      scannedBy: userId,
-      stationLabel: incomingStationLabel,
-      result: validation.valid ? "granted" : validation.reason,
-      clientScanId: client_scan_id || clientScanId,
-      deviceInfo: {
-        ...deviceInfo,
-        groupCount: incomingGroupCount,
-        ipAddress: req.ip,
-      },
-    });
+    // Now do validation
+    const validation = await qrService.validateQR(incomingQrData, incomingEpId);
+    const validatedQrId =
+      validation.payload?.q || validation.payload?.qrId || scanQrId;
 
     if (!validation.valid) {
+      // Remove from dedup map since it wasn't a real scan
+      recentScans.delete(dupKey);
+
+      // Still log failed attempts
+      await ScanLog.create({
+        qrId: validatedQrId,
+        epId: incomingEpId,
+        scannedBy: userId,
+        stationLabel: incomingStationLabel,
+        result: validation.reason,
+        deviceInfo: {
+          ...deviceInfo,
+          groupCount: incomingGroupCount,
+          ipAddress: req.ip,
+        },
+      });
+
       return res.json({
         success: false,
         result: validation.reason,
@@ -110,26 +119,52 @@ exports.scanQR = async (req, res) => {
       });
     }
 
-    // ── Redeem + update counts ────────────────────────────────────────────────
-    await qrService.redeemQR(
-      scanQrId,
-      incomingEpId,
-      userId,
-      incomingStationLabel,
-      deviceInfo,
-      incomingGroupCount,
-      validation.qrPass,
-    );
+    // Get holderId
+    const fullHolderId =
+      validation.qrPass?.holderId?._id || validation.qrPass?.holderId || null;
 
-    await EntryPoint.findByIdAndUpdate(incomingEpId, {
-      $inc: { currentCount: incomingGroupCount },
-    });
+    // ✅ FIX 4: Create ScanLog AND update QRPass atomically
+    const [logEntry] = await Promise.all([
+      ScanLog.create({
+        qrId: validatedQrId,
+        holderId: fullHolderId,
+        epId: incomingEpId,
+        scannedBy: userId,
+        stationLabel: incomingStationLabel,
+        result: "granted",
+        groupCount: incomingGroupCount,
+        clientScanId: client_scan_id || clientScanId,
+        deviceInfo: {
+          ...deviceInfo,
+          groupCount: incomingGroupCount,
+          ipAddress: req.ip,
+        },
+      }),
+      // Update QRPass redemption history
+      qrService.redeemQR(
+        validatedQrId,
+        incomingEpId,
+        userId,
+        incomingStationLabel,
+        deviceInfo,
+        incomingGroupCount,
+        validation.qrPass,
+      ),
+      // Update entry point count
+      EntryPoint.findByIdAndUpdate(incomingEpId, {
+        $inc: { currentCount: incomingGroupCount },
+      }),
+    ]);
+
+    // Clean up dedup map after successful scan (keep for DEDUP_WINDOW_MS to prevent re-scans)
+    setTimeout(() => recentScans.delete(dupKey), DEDUP_WINDOW_MS);
 
     return res.json({
       success: true,
       result: "granted",
       holder_name: validation.holderName,
       holderName: validation.holderName,
+      groupCount: incomingGroupCount,
       message: "Access granted",
     });
   } catch (error) {

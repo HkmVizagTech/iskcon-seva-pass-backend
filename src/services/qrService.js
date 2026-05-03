@@ -80,25 +80,20 @@ class QRService {
         };
       }
 
-      // ✅ Parallel fetch — biggest speed win
       const [qrPass, entryPoint] = await Promise.all([
         QRPass.findOne({ qrId: payload.q, status: "active" })
-          .select("eventId entryPoints holderId redemptionHistory") // ✅ only needed fields
-          .populate("holderId", "name") // ✅ only name
-          .lean(), // ✅ plain JS, skips Mongoose overhead
+          .select("eventId entryPoints holderId redemptionHistory")
+          .populate("holderId", "name")
+          .lean(),
         EntryPoint.findById(epId)
           .select(
             "eventId linkedEpId maxCapacity currentCount multiEntryAllowed",
-          ) // ✅ only needed fields
+          )
           .lean(),
       ]);
 
       if (!qrPass) {
-        return {
-          valid: false,
-          reason: "invalid",
-          message: "Invalid or revoked QR",
-        };
+        return { valid: false, reason: "invalid", message: "Invalid QR" };
       }
 
       if (
@@ -108,7 +103,6 @@ class QRService {
         return { valid: false, reason: "invalid", message: "Wrong event" };
       }
 
-      // ✅ No populate needed — just compare IDs as strings
       const epIdStr = epId.toString();
       const hasEP = qrPass.entryPoints.some((ep) => ep.toString() === epIdStr);
       if (!hasEP) {
@@ -119,9 +113,23 @@ class QRService {
         };
       }
 
+      // ✅ FIX: Check already_used BEFORE any writes happen
+      if (!entryPoint.multiEntryAllowed) {
+        const used = qrPass.redemptionHistory?.some(
+          (rh) => rh.epId?.toString() === epIdStr && rh.result === "granted",
+        );
+        if (used) {
+          return {
+            valid: false,
+            reason: "already_used",
+            message: "Already scanned here",
+          };
+        }
+      }
+
       if (entryPoint.linkedEpId) {
-        const linked = qrPass.redemptionHistory.some(
-          (rh) => rh.epId.toString() === entryPoint.linkedEpId.toString(),
+        const linked = qrPass.redemptionHistory?.some(
+          (rh) => rh.epId?.toString() === entryPoint.linkedEpId.toString(),
         );
         if (!linked) {
           return {
@@ -133,26 +141,12 @@ class QRService {
       }
 
       if (
-        entryPoint.maxCapacity >= 0 &&
+        entryPoint.maxCapacity &&
         entryPoint.currentCount >= entryPoint.maxCapacity
       ) {
         return { valid: false, reason: "invalid", message: "Capacity full" };
       }
 
-      if (!entryPoint.multiEntryAllowed) {
-        const used = qrPass.redemptionHistory.some(
-          (rh) => rh.epId.toString() === epIdStr && rh.result === "granted",
-        );
-        if (used) {
-          return {
-            valid: false,
-            reason: "already_used",
-            message: "Already scanned",
-          };
-        }
-      }
-
-      // ✅ Pass qrPass forward so redeemQR doesn't re-fetch
       return {
         valid: true,
         payload,
@@ -171,9 +165,9 @@ class QRService {
     userId,
     stationLabel,
     deviceInfo = {},
+    groupCount = 1,
     prefetchedPass = null,
   ) {
-    // ✅ Use $push directly — avoids fetch → mutate → save round trip
     const qrPass = prefetchedPass
       ? await QRPass.findOneAndUpdate(
           { qrId, status: "active" },
@@ -185,6 +179,7 @@ class QRService {
                 scannedBy: userId,
                 stationLabel,
                 result: "granted",
+                groupCount: groupCount, // ✅ Add group count
               },
             },
           },
@@ -200,6 +195,7 @@ class QRService {
                 scannedBy: userId,
                 stationLabel,
                 result: "granted",
+                groupCount: groupCount, // ✅ Add group count
               },
             },
           },
@@ -208,7 +204,7 @@ class QRService {
 
     if (!qrPass) throw new Error("QR pass not found");
 
-    // ✅ All writes fire in parallel — ScanLog + capacity update together
+    // ✅ Use groupCount for incrementing
     await Promise.all([
       ScanLog.create({
         qrId,
@@ -217,12 +213,17 @@ class QRService {
         scannedBy: userId,
         stationLabel,
         result: "granted",
-        deviceInfo,
+        deviceInfo: {
+          ...deviceInfo,
+          groupCount: groupCount, // ✅ Store group count
+        },
       }),
-      EntryPoint.findByIdAndUpdate(epId, { $inc: { currentCount: 1 } }),
+      EntryPoint.findByIdAndUpdate(epId, {
+        $inc: { currentCount: groupCount }, // ✅ Increment by group count
+      }),
     ]);
 
-    return { success: true, holderName: qrPass.holderName || "" };
+    return { success: true, holderName: qrPass.holderName || "", groupCount };
   }
 
   async deliverQR(qrPass, deliveryMethod) {

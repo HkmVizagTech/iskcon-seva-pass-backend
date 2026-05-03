@@ -46,6 +46,14 @@ const scanLogSchema = new mongoose.Schema({
     deviceId: String,
     userAgent: String,
     ipAddress: String,
+    groupCount: {
+      type: Number,
+      default: 1,
+    },
+  },
+  groupCount: {
+    type: Number,
+    default: 1,
   },
   location: {
     lat: Number,
