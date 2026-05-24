@@ -1,3 +1,16 @@
+// FIX: All requires moved to TOP of file — previously they were at the bottom,
+// causing ReferenceError when any exported function was called before the
+// module fully evaluated.
+const Event = require("../models/Event");
+const Category = require("../models/Category");
+const Holder = require("../models/Holder");
+const QRPass = require("../models/QRPass");
+const EntryPoint = require("../models/EntryPoint");
+const qrService = require("../services/qrService");
+const whatsappService = require("../services/whatsappService");
+const fs = require("fs");
+const path = require("path");
+
 /**
  * Get QR pass details
  */
@@ -62,29 +75,29 @@ exports.resendQR = async (req, res) => {
       return res.status(400).json({ error: "Holder not found" });
 
     const holder = qrPass.holderId;
-    const evt = qrPass.eventId; // ← RENAMED to 'evt' to avoid conflict
+    const evt = qrPass.eventId;
     const entryPoints = qrPass.entryPoints;
 
-    const payload = {
-      qrId: qrPass.qrId,
-      eventId: evt._id,
-      eventCode: evt.eventCode,
-      holderId: holder._id,
-      holderName: holder.name,
-      entryPoints: entryPoints.map((ep) => ep._id.toString()),
-      validFrom: qrPass.validFrom.toISOString(),
-      validUntil: qrPass.validUntil.toISOString(),
-      version: 1,
-    };
+    // FIX: Use qrService.createPayload (compact keys q/e/h/n/p/f/u) so the
+    // resent QR uses the same payload schema as the original and passes
+    // validation at scan time. Previously used an incompatible plain object.
+    const compactPayload = qrService.createPayload(
+      { ...holder.toObject(), qrId: qrPass.qrId },
+      evt,
+      null,
+      entryPoints,
+      qrPass.validFrom,
+      qrPass.validUntil,
+    );
 
-    const { image: qrImage } = await qrService.generateQRCode(payload);
+    const { image: qrImage } = await qrService.generateQRCode(compactPayload);
 
     const passDetails = {
       entryPoints: entryPoints.map((ep) => ep.name || ep.stationLabel),
       qrId: qrPass.qrId,
       validFrom: qrPass.validFrom.toISOString(),
       validUntil: qrPass.validUntil.toISOString(),
-      venue: evt.venue,
+      venue: evt.venue?.[0]?.name || "",
     };
 
     if (deliveryMethod === "whatsapp" || deliveryMethod === "both") {
@@ -141,6 +154,7 @@ exports.getHolders = async (req, res) => {
     const total = await Holder.countDocuments(query);
 
     const holderIds = holders.map((h) => h._id);
+    // FIX: Single batch query instead of N+1 loop
     const qrPasses = await QRPass.find({ holderId: { $in: holderIds } });
 
     const holdersWithPasses = holders.map((holder) => {
@@ -199,15 +213,40 @@ exports.getHolderDetails = async (req, res) => {
 };
 
 /**
- * Update holder
+ * Update holder — FIX: whitelist fields to prevent mass-assignment
  */
 exports.updateHolder = async (req, res) => {
   try {
+    const ALLOWED_FIELDS = [
+      "name",
+      "phone",
+      "email",
+      "whatsappNumber",
+      "address",
+      "notes",
+      "overrideReason",
+      "preacher",
+      "venueName",
+      "lifetimeDonation",
+      "donorEligibilityStatus",
+      "idProof",
+      "photo",
+      "customFields",
+    ];
+
+    const update = {};
+    for (const field of ALLOWED_FIELDS) {
+      if (req.body[field] !== undefined) {
+        update[field] = req.body[field];
+      }
+    }
+
     const holder = await Holder.findByIdAndUpdate(
       req.params.holderId,
-      req.body,
-      { new: true },
+      update,
+      { new: true, runValidators: true },
     );
+    if (!holder) return res.status(404).json({ error: "Holder not found" });
     res.json({ success: true, holder });
   } catch (error) {
     console.error("Update holder error:", error);
@@ -355,17 +394,25 @@ exports.createHolder = async (req, res) => {
 };
 
 /**
- * Export holders to CSV
+ * Export holders to CSV — FIX: batch QR query instead of N+1 loop
  */
 exports.exportHolders = async (req, res) => {
   try {
     const { eventId } = req.params;
     const holders = await Holder.find({ eventId }).populate("catId", "name");
 
+    // Single batch query
+    const holderIds = holders.map((h) => h._id);
+    const qrPasses = await QRPass.find({ holderId: { $in: holderIds } });
+    const qrMap = {};
+    for (const qp of qrPasses) {
+      qrMap[qp.holderId.toString()] = qp;
+    }
+
     let csvOutput = "Name,Phone,Email,Category,QR ID,Status\n";
 
     for (const holder of holders) {
-      const qrPass = await QRPass.findOne({ holderId: holder._id });
+      const qrPass = qrMap[holder._id.toString()];
       csvOutput += `"${holder.name}",`;
       csvOutput += `"${holder.phone}",`;
       csvOutput += `"${holder.email || ""}",`;
@@ -408,18 +455,14 @@ exports.bulkImportHolders = async (req, res) => {
 
     let records = [];
     const filePath = req.file.path;
-    const fileExt = require("path")
-      .extname(req.file.originalname)
-      .toLowerCase();
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
 
     if (fileExt === ".csv") {
       records = await parseCSV(filePath);
     } else if ([".xlsx", ".xls"].includes(fileExt)) {
       records = parseExcel(filePath);
     } else {
-      try {
-        require("fs").unlinkSync(filePath);
-      } catch (e) {}
+      try { fs.unlinkSync(filePath); } catch (_) {}
       return res.status(400).json({ error: "Unsupported file format" });
     }
 
@@ -490,9 +533,7 @@ exports.bulkImportHolders = async (req, res) => {
       }
     }
 
-    try {
-      require("fs").unlinkSync(filePath);
-    } catch (e) {}
+    try { fs.unlinkSync(filePath); } catch (_) {}
 
     res.json({
       success: true,
@@ -518,9 +559,7 @@ exports.bulkImportHolders = async (req, res) => {
   } catch (error) {
     console.error("Bulk import error:", error);
     if (req.file) {
-      try {
-        require("fs").unlinkSync(req.file.path);
-      } catch (e) {}
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
     }
     res.status(500).json({ error: "Bulk import failed: " + error.message });
   }
@@ -528,12 +567,12 @@ exports.bulkImportHolders = async (req, res) => {
 
 exports.downloadFailedImport = async (req, res) => {
   try {
-    const filePath = require("path").join(
+    const filePath = path.join(
       __dirname,
       "../../uploads",
       req.params.filename,
     );
-    if (!require("fs").existsSync(filePath))
+    if (!fs.existsSync(filePath))
       return res.status(404).json({ error: "File not found" });
     res.download(filePath);
   } catch (error) {
@@ -573,17 +612,7 @@ exports.getFailedImports = async (req, res) => {
   }
 };
 
-// ============ HELPER FUNCTIONS ============
-
-const Event = require("../models/Event");
-const Category = require("../models/Category");
-const Holder = require("../models/Holder");
-const QRPass = require("../models/QRPass");
-const EntryPoint = require("../models/EntryPoint");
-const qrService = require("../services/qrService");
-const whatsappService = require("../services/whatsappService");
-const fs = require("fs");
-const path = require("path");
+// ──────────────────────────────── HELPERS ────────────────────────────────────
 
 async function processSingleRecord(
   record,
@@ -593,7 +622,6 @@ async function processSingleRecord(
   deliveryMethod,
   userId,
 ) {
-  // NEW FORMAT: Name, Phone Number, Sponsor Sevas, Sponsor Category, Preacher, Venue, Slot
   const name = (record.Name || record.name || "").toString().trim();
   const phone = (
     record["Phone Number"] ||
@@ -619,12 +647,7 @@ async function processSingleRecord(
   const slot = (record.Slot || record.slot || "").toString().trim();
 
   if (!name)
-    return {
-      success: false,
-      error: "Name is required",
-      name: "Unknown",
-      phone,
-    };
+    return { success: false, error: "Name is required", name: "Unknown", phone };
   if (!phone || !/^\d{10,15}$/.test(phone.replace(/[\+\s\-\(\)]/g, "")))
     return { success: false, error: "Invalid phone", name, phone };
 
@@ -698,6 +721,10 @@ async function processSingleRecord(
       deliveryStatus: "pending",
     });
 
+    // FIX: WhatsApp delivery failure does NOT return success:false.
+    // The holder + QRPass are already persisted. We record failure status
+    // and include the record in the "failed" list for re-delivery,
+    // but we don't orphan the holder record.
     if (deliveryMethod === "whatsapp") {
       try {
         await whatsappService.sendQRMessage(
@@ -718,12 +745,15 @@ async function processSingleRecord(
       } catch (e) {
         qrPass.deliveryStatus = "failed";
         await qrPass.save();
+        // Return success:true because the QR was created — just delivery failed
         return {
-          success: false,
-          error: "WhatsApp failed: " + e.message,
+          success: true,
+          deliveryFailed: true,
+          error: "WhatsApp delivery failed: " + e.message,
           name,
           phone: formattedPhone,
           qrId,
+          deliveryStatus: "failed",
         };
       }
       await qrPass.save();
@@ -744,8 +774,7 @@ async function processSingleRecord(
 function parseCSV(filePath) {
   return new Promise((resolve, reject) => {
     const results = [];
-    require("fs")
-      .createReadStream(filePath)
+    fs.createReadStream(filePath)
       .pipe(require("csv-parser")())
       .on("data", (d) => results.push(d))
       .on("end", () => resolve(results))

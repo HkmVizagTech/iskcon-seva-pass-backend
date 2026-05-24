@@ -48,6 +48,15 @@ const entryPointSchema = new mongoose.Schema({
     type: Boolean,
     default: true,
   },
+  // ── Capacity tracking (FIX: were missing from schema) ──
+  maxCapacity: {
+    type: Number,
+    default: null,
+  },
+  currentCount: {
+    type: Number,
+    default: 0,
+  },
   location: {
     building: String,
     floor: String,
@@ -62,5 +71,7 @@ const entryPointSchema = new mongoose.Schema({
     default: Date.now,
   },
 });
+
+entryPointSchema.index({ eventId: 1 });
 
 module.exports = mongoose.model("EntryPoint", entryPointSchema);

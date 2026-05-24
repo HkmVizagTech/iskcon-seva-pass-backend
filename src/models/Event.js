@@ -65,10 +65,13 @@ const eventSchema = new mongoose.Schema({
   updatedAt: Date,
 });
 
+// FIX: Only ONE pre-save hook (was duplicated, causing it to run twice)
 eventSchema.pre("save", function () {
   this.updatedAt = new Date();
 });
 
+// Computed status based on dates (virtual — cannot be filtered in DB queries;
+// use date range queries in getEvents instead)
 eventSchema.virtual("status").get(function () {
   const now = new Date();
   if (now < this.dateStart) return "upcoming";
@@ -77,9 +80,5 @@ eventSchema.virtual("status").get(function () {
 });
 eventSchema.set("toJSON", { virtuals: true });
 eventSchema.set("toObject", { virtuals: true });
-
-eventSchema.pre("save", function () {
-  this.updatedAt = new Date();
-});
 
 module.exports = mongoose.model("Event", eventSchema);

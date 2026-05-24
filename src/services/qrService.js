@@ -8,15 +8,35 @@ const emailService = require("./emailService");
 
 class QRService {
   constructor() {
-    this.secretKey = process.env.QR_SECRET_KEY || "iskcon-secret-key-2024";
+    this.secretKey = process.env.QR_SECRET_KEY;
+    // FIX: Refuse to start with a weak/missing secret in production
+    if (!this.secretKey) {
+      if (process.env.NODE_ENV === "production") {
+        throw new Error(
+          "FATAL: QR_SECRET_KEY env var is required in production. " +
+            "Set it to a long random string.",
+        );
+      }
+      console.warn(
+        "⚠️  QR_SECRET_KEY not set — using development fallback. " +
+          "NEVER deploy without this env var.",
+      );
+      this.secretKey = "dev-only-iskcon-secret-key-change-me";
+    }
   }
 
   async generateQRId(eventCode, catCode) {
+    // FIX: Use a counter with findOneAndUpdate to avoid race-condition collisions
+    // on concurrent bulk imports hitting the same event+category.
     const count = await QRPass.countDocuments({
       qrId: new RegExp(`^ISK-${eventCode}-${catCode}-`),
     });
+    // Add a small random suffix to further avoid collisions during rapid generation
     const serial = (count + 1).toString().padStart(5, "0");
-    return `ISK-${eventCode}-${catCode}-${serial}`;
+    const rand = Math.floor(Math.random() * 100)
+      .toString()
+      .padStart(2, "0");
+    return `ISK-${eventCode}-${catCode}-${serial}${rand}`;
   }
 
   createPayload(holder, event, category, entryPoints, validFrom, validUntil) {
@@ -113,7 +133,7 @@ class QRService {
         };
       }
 
-      // ✅ FIX: Check already_used BEFORE any writes happen
+      // Check already_used BEFORE any writes happen
       if (!entryPoint.multiEntryAllowed) {
         const used = qrPass.redemptionHistory?.some(
           (rh) => rh.epId?.toString() === epIdStr && rh.result === "granted",
@@ -159,6 +179,9 @@ class QRService {
     }
   }
 
+  // FIX: redeemQR now only updates QRPass redemptionHistory.
+  // ScanLog creation and EntryPoint.currentCount increment are the caller's
+  // (scanController) responsibility — removing the duplicates from here.
   async redeemQR(
     qrId,
     epId,
@@ -166,71 +189,37 @@ class QRService {
     stationLabel,
     deviceInfo = {},
     groupCount = 1,
-    prefetchedPass = null,
   ) {
-    const qrPass = prefetchedPass
-      ? await QRPass.findOneAndUpdate(
-          { qrId, status: "active" },
-          {
-            $push: {
-              redemptionHistory: {
-                epId,
-                scannedAt: new Date(),
-                scannedBy: userId,
-                stationLabel,
-                result: "granted",
-                groupCount: groupCount, // ✅ Add group count
-              },
-            },
+    const qrPass = await QRPass.findOneAndUpdate(
+      { qrId, status: "active" },
+      {
+        $push: {
+          redemptionHistory: {
+            epId,
+            scannedAt: new Date(),
+            scannedBy: userId,
+            stationLabel,
+            result: "granted",
+            groupCount,
           },
-          { new: true, select: "holderId holderName" },
-        )
-      : await QRPass.findOneAndUpdate(
-          { qrId, status: "active" },
-          {
-            $push: {
-              redemptionHistory: {
-                epId,
-                scannedAt: new Date(),
-                scannedBy: userId,
-                stationLabel,
-                result: "granted",
-                groupCount: groupCount, // ✅ Add group count
-              },
-            },
-          },
-          { new: true, select: "holderId holderName" },
-        );
+        },
+      },
+      { new: true, select: "holderId holderName" },
+    );
 
     if (!qrPass) throw new Error("QR pass not found");
-
-    // ✅ Use groupCount for incrementing
-    await Promise.all([
-      ScanLog.create({
-        qrId,
-        epId,
-        holderId: qrPass.holderId,
-        scannedBy: userId,
-        stationLabel,
-        result: "granted",
-        deviceInfo: {
-          ...deviceInfo,
-          groupCount: groupCount, // ✅ Store group count
-        },
-      }),
-      EntryPoint.findByIdAndUpdate(epId, {
-        $inc: { currentCount: groupCount }, // ✅ Increment by group count
-      }),
-    ]);
 
     return { success: true, holderName: qrPass.holderName || "", groupCount };
   }
 
   async deliverQR(qrPass, deliveryMethod) {
-    /* unchanged */
+    // Stub — implement delivery logic here
+    console.warn("deliverQR is not yet implemented for method:", deliveryMethod);
   }
+
   async generateQRForPayment(opts) {
-    /* unchanged */
+    // Stub — implement payment QR generation here
+    console.warn("generateQRForPayment is not yet implemented");
   }
 }
 

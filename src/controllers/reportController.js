@@ -5,116 +5,161 @@ const ScanLog = require("../models/ScanLog");
 const EntryPoint = require("../models/EntryPoint");
 const mongoose = require("mongoose");
 
-
-
 exports.getEventSummary = async (req, res) => {
   try {
     const { eventId } = req.params;
     const eventObjectId = new mongoose.Types.ObjectId(eventId);
 
-    const totalIssued = await QRPass.countDocuments({ eventId: eventObjectId });
-    const totalScanned = await ScanLog.countDocuments({ holderId: { $exists: true } });
+    // FIX: scope all queries to the specific event
 
-    // By Entry Point with ALL result types
+    const totalIssued = await QRPass.countDocuments({ eventId: eventObjectId });
+
+    // Get entry point IDs for this event, then filter scan logs
+    const eventEntryPoints = await EntryPoint.find({ eventId: eventObjectId }).select("_id");
+    const epIds = eventEntryPoints.map((ep) => ep._id);
+
+    const totalScanned = await ScanLog.countDocuments({
+      epId: { $in: epIds },
+      result: "granted",
+    });
+
+    // By Entry Point — scoped to this event's entry points
     const byEntryPoint = await ScanLog.aggregate([
-      { $match: { holderId: { $exists: true } } },
+      { $match: { epId: { $in: epIds } } },
       { $lookup: { from: "entrypoints", localField: "epId", foreignField: "_id", as: "ep" } },
       { $unwind: { path: "$ep", preserveNullAndEmptyArrays: true } },
-      { $group: { 
-        _id: { epId: "$epId", epName: "$ep.name", epLabel: "$ep.stationLabel" },
-        granted: { $sum: { $cond: [{ $eq: ["$result", "granted"] }, 1, 0] } },
-        already_used: { $sum: { $cond: [{ $eq: ["$result", "already_used"] }, 1, 0] } },
-        not_included: { $sum: { $cond: [{ $eq: ["$result", "not_included"] }, 1, 0] } },
-        invalid: { $sum: { $cond: [{ $eq: ["$result", "invalid"] }, 1, 0] } },
-      }},
-      { $sort: { granted: -1 } }
+      {
+        $group: {
+          _id: { epId: "$epId", epName: "$ep.name", epLabel: "$ep.stationLabel" },
+          granted: { $sum: { $cond: [{ $eq: ["$result", "granted"] }, 1, 0] } },
+          already_used: { $sum: { $cond: [{ $eq: ["$result", "already_used"] }, 1, 0] } },
+          not_included: { $sum: { $cond: [{ $eq: ["$result", "not_included"] }, 1, 0] } },
+          invalid: { $sum: { $cond: [{ $eq: ["$result", "invalid"] }, 1, 0] } },
+        },
+      },
+      { $sort: { granted: -1 } },
     ]);
 
-    // By Holder Type (successful scans)
+    // By Holder Type — scoped to holders of this event
     const byHolderType = await ScanLog.aggregate([
-      { $match: { holderId: { $exists: true }, result: "granted" } },
+      { $match: { epId: { $in: epIds }, result: "granted" } },
       { $lookup: { from: "holders", localField: "holderId", foreignField: "_id", as: "holder" } },
       { $unwind: { path: "$holder", preserveNullAndEmptyArrays: true } },
+      { $match: { "holder.eventId": eventObjectId } },
       { $group: { _id: "$holder.holderType", count: { $sum: 1 } } },
-      { $sort: { count: -1 } }
+      { $sort: { count: -1 } },
     ]);
 
-    // By Venue (successful scans)
+    // By Venue — scoped to this event
     const byVenue = await ScanLog.aggregate([
-      { $match: { holderId: { $exists: true }, result: "granted" } },
+      { $match: { epId: { $in: epIds }, result: "granted" } },
       { $lookup: { from: "holders", localField: "holderId", foreignField: "_id", as: "holder" } },
       { $unwind: { path: "$holder", preserveNullAndEmptyArrays: true } },
+      { $match: { "holder.eventId": eventObjectId } },
       { $group: { _id: { $ifNull: ["$holder.venueName", "$holder.customFields.venue"] }, count: { $sum: 1 } } },
       { $match: { _id: { $ne: null } } },
-      { $sort: { count: -1 } }
+      { $sort: { count: -1 } },
     ]);
 
     res.json({ totalIssued, totalScanned, byEntryPoint, byHolderType, byVenue });
   } catch (error) {
+    console.error("getEventSummary error:", error);
     res.status(500).json({ error: "Failed to fetch event summary" });
   }
 };
+
 exports.getHolderDetailsReport = async (req, res) => {
-  const { eventId } = req.params;
-  const { holderType, venue, preacher, entryPoint } = req.query;
+  try {
+    const { eventId } = req.params;
+    const { holderType, venue, preacher, entryPoint } = req.query;
 
-  const holders = await Holder.find({ eventId })
-    .populate("catId", "name")
-    .populate("issuedBy", "name");
+    const holderQuery = { eventId };
+    if (holderType) holderQuery.holderType = holderType;
+    if (venue) holderQuery.venueName = new RegExp(venue, "i");
+    if (preacher) holderQuery.preacher = new RegExp(preacher, "i");
 
-  // Get QR passes with scan history
-  const holderIds = holders.map((h) => h._id);
-  const qrPasses = await QRPass.find({ holderId: { $in: holderIds } }).populate(
-    "entryPoints",
-    "name stationLabel type",
-  );
+    const holders = await Holder.find(holderQuery)
+      .populate("catId", "name")
+      .populate("issuedBy", "name");
 
-  // Build report with scan progress per holder
-  const report = holders.map((holder) => {
-    const qrPass = qrPasses.find(
-      (qp) => qp.holderId?.toString() === holder._id.toString(),
+    const holderIds = holders.map((h) => h._id);
+
+    // FIX: scope QR passes to event — fetch with entryPoint filter if provided
+    const qrQuery = { holderId: { $in: holderIds } };
+    const qrPasses = await QRPass.find(qrQuery).populate(
+      "entryPoints",
+      "name stationLabel type",
     );
-    return {
-      holder: {
-        name: holder.name,
-        phone: holder.phone,
-        preacher: holder.preacher || holder.customFields?.preacher || "",
-        venue: holder.venueName || holder.customFields?.venue || "",
-      },
-      holderType: holder.catId?.name,
-      entryPoints: qrPass?.entryPoints || [],
-      scans: qrPass?.redemptionHistory || [],
-    };
-  });
 
-  res.json({ report });
+    // Filter by entryPoint after population if requested
+    const filteredPasses = entryPoint
+      ? qrPasses.filter((qp) =>
+          qp.entryPoints.some((ep) => ep._id.toString() === entryPoint),
+        )
+      : qrPasses;
+
+    const passMap = {};
+    for (const qp of filteredPasses) {
+      passMap[qp.holderId.toString()] = qp;
+    }
+
+    const report = holders
+      .filter((h) => !entryPoint || passMap[h._id.toString()])
+      .map((holder) => {
+        const qrPass = passMap[holder._id.toString()];
+        return {
+          holder: {
+            name: holder.name,
+            phone: holder.phone,
+            preacher: holder.preacher || holder.customFields?.preacher || "",
+            venue: holder.venueName || holder.customFields?.venue || "",
+          },
+          holderType: holder.catId?.name,
+          entryPoints: qrPass?.entryPoints || [],
+          scans: qrPass?.redemptionHistory || [],
+        };
+      });
+
+    res.json({ report });
+  } catch (error) {
+    console.error("getHolderDetailsReport error:", error);
+    res.status(500).json({ error: "Failed to fetch holder details report" });
+  }
 };
+
 exports.getScanLog = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { page = 1, limit = 50 } = req.query;
+    const { page = 1, limit = 50, result: resultFilter } = req.query;
 
-    const logs = await ScanLog.find({
-      holderId: { $exists: true },
-    })
-      .populate("epId", "name")
-      .populate("scannedBy", "name")
-      .populate("holderId", "name phone")
-      .sort({ scannedAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
+    // FIX: scope to event via entry points
+    const eventEntryPoints = await EntryPoint.find({ eventId }).select("_id");
+    const epIds = eventEntryPoints.map((ep) => ep._id);
 
-    const total = await ScanLog.countDocuments();
+    const query = { epId: { $in: epIds } };
+    if (resultFilter) query.result = resultFilter;
+
+    const [logs, total] = await Promise.all([
+      ScanLog.find(query)
+        .populate("epId", "name")
+        .populate("scannedBy", "name")
+        .populate("holderId", "name phone")
+        .sort({ scannedAt: -1 })
+        .limit(Number(limit))
+        .skip((Number(page) - 1) * Number(limit)),
+      ScanLog.countDocuments(query),
+    ]);
 
     res.json({
       logs,
       pagination: {
         total,
         page: parseInt(page),
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / Number(limit)),
       },
     });
   } catch (error) {
+    console.error("getScanLog error:", error);
     res.status(500).json({ error: "Failed to fetch scan log" });
   }
 };
@@ -172,7 +217,6 @@ exports.exportReport = async (req, res) => {
       .populate("holderId")
       .populate("entryPoints");
 
-    // Convert to CSV format
     let csv = "Name,Phone,Email,QR ID,Entry Points,Scans,Status\n";
 
     passes.forEach((pass) => {
@@ -201,18 +245,15 @@ exports.getDashboardStats = async (req, res) => {
     const totalEvents = await Event.countDocuments();
     const activePasses = await QRPass.countDocuments({ status: "active" });
     const totalHolders = await Holder.countDocuments();
-
-    const totalScans = await ScanLog.countDocuments();
+    const totalScans = await ScanLog.countDocuments({ result: "granted" });
     const totalPasses = await QRPass.countDocuments();
     const scanRate =
       totalPasses > 0 ? ((totalScans / totalPasses) * 100).toFixed(1) : 0;
 
-    // Holder type breakdown
     const holderTypeStats = await Holder.aggregate([
       { $group: { _id: "$holderType", count: { $sum: 1 } } },
     ]);
 
-    // Scans per entry point
     const scansByEP = await ScanLog.aggregate([
       { $match: { result: "granted" } },
       { $group: { _id: "$epId", count: { $sum: 1 } } },

@@ -4,9 +4,11 @@ const holderController = require("../controllers/holderController");
 const { protect, authorize } = require("../middleware/auth");
 const upload = require("../middleware/upload");
 
-// IMPORTANT: Put specific routes BEFORE parameterized routes
+// IMPORTANT: Specific routes MUST come before parameterised catch-alls
+// FIX: /download-failed/:filename and /failed-imports/:eventId were after
+// /:holderId, so Express matched them as holder IDs and returned 404.
 
-// QR operations (specific routes first)
+// QR operations
 router.get("/qr/:qrId", protect, holderController.getQRDetails);
 router.patch(
   "/qr/:qrId/revoke",
@@ -29,10 +31,27 @@ router.post(
   upload.single("file"),
   holderController.bulkImportHolders,
 );
+
+// FIX: moved before /:holderId to prevent route collision
 router.get(
-  "/events/:eventId/holders/export",
+  "/download-failed/:filename",
   protect,
-  holderController.exportHolders,
+  authorize("super_admin", "event_admin"),
+  holderController.downloadFailedImport,
+);
+
+// FIX: moved before /:holderId
+router.get(
+  "/category/:categoryId/entry-points",
+  protect,
+  holderController.getCategoryEntryPoints,
+);
+
+// FIX: moved before /:holderId
+router.get(
+  "/failed-imports/:eventId",
+  protect,
+  holderController.getFailedImports,
 );
 
 // Event-specific routes
@@ -43,8 +62,13 @@ router.post(
   holderController.createHolder,
 );
 router.get("/events/:eventId/holders", protect, holderController.getHolders);
+router.get(
+  "/events/:eventId/holders/export",
+  protect,
+  holderController.exportHolders,
+);
 
-// Holder-specific routes (parameterized routes LAST)
+// Parameterised catch-all routes LAST
 router.get("/:holderId", protect, holderController.getHolderDetails);
 router.patch(
   "/:holderId",
@@ -57,27 +81,6 @@ router.delete(
   protect,
   authorize("super_admin"),
   holderController.deleteHolder,
-);
-// Add this route for downloading failed import file
-router.get(
-  "/download-failed/:filename",
-  protect,
-  authorize("super_admin", "event_admin"),
-  holderController.downloadFailedImport,
-);
-
-// Get category entry points for preview
-router.get(
-  "/category/:categoryId/entry-points",
-  protect,
-  holderController.getCategoryEntryPoints,
-);
-
-// Get failed imports for an event
-router.get(
-  "/failed-imports/:eventId",
-  protect,
-  require("../controllers/holderController").getFailedImports,
 );
 
 module.exports = router;
