@@ -184,20 +184,36 @@ exports.getEventDetails = async (req, res) => {
 
 exports.updateEvent = async (req, res) => {
   try {
-    const updates = req.body;
-    delete updates._id;
-    delete updates.createdBy;
+    const body = req.body;
+
+    // FIX: Use $set so only the provided fields are updated.
+    // Previously spread the full body without $set, meaning any field absent
+    // from the payload (e.g. settings, bannerImage) was overwritten with
+    // undefined, clearing it in the database.
+    const ALLOWED = [
+      "name", "eventCode", "description",
+      "dateStart", "dateEnd", "venue",
+      "bannerImage", "donorThreshold", "settings",
+    ];
+
+    const $set = { updatedAt: new Date() };
+    for (const key of ALLOWED) {
+      if (body[key] !== undefined) {
+        $set[key] = body[key];
+      }
+    }
 
     const event = await Event.findByIdAndUpdate(
       req.params.id,
-      { ...updates, updatedAt: new Date() },
-      { new: true },
+      { $set },
+      { new: true, runValidators: true },
     );
 
     if (!event) return res.status(404).json({ error: "Event not found" });
 
     res.json({ success: true, event });
   } catch (error) {
+    console.error("Update event error:", error);
     res.status(500).json({ error: "Failed to update event" });
   }
 };
