@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken"); // FIX: was missing — caused ReferenceError on every scan
+const { startOfTodayIST } = require("../utils/dateUtils");
 const qrService = require("../services/qrService");
 const ScanLog = require("../models/ScanLog");
 const QRPass = require("../models/QRPass");
@@ -188,7 +189,9 @@ exports.getStationStats = async (req, res) => {
       {
         $match: {
           epId: new mongoose.Types.ObjectId(epId),
-          scannedAt: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) },
+          // FIX: was using UTC midnight (= 5:30 AM IST), so scans between
+          // 12:00–5:30 AM IST were excluded. Now uses real IST midnight.
+          scannedAt: { $gte: startOfTodayIST() },
         },
       },
       { $group: { _id: "$result", count: { $sum: 1 } } },

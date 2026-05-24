@@ -22,12 +22,18 @@ class WhatsAppService {
       try {
         const d = new Date(passDetails.validFrom);
         if (!isNaN(d.getTime())) {
+          // FIX: always format in IST regardless of server timezone (Cloud Run = UTC).
+          // Without timeZone: "Asia/Kolkata", a date stored as 02:30Z (= 8:00 IST)
+          // displayed as "2:30 am" on WhatsApp instead of "8:00 am".
+          const istOpts = { timeZone: "Asia/Kolkata" };
           dateStr = d.toLocaleDateString("en-IN", {
+            ...istOpts,
             day: "numeric",
             month: "short",
             year: "numeric",
           });
           timeStr = d.toLocaleTimeString("en-IN", {
+            ...istOpts,
             hour: "numeric",
             minute: "2-digit",
             hour12: true,
