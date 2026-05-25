@@ -79,4 +79,10 @@ const holderSchema = new mongoose.Schema({
   },
 });
 
+// FIX: unique index prevents race-condition duplicate QR passes
+// Two concurrent imports for the same phone+event will now get a clear E11000
+// instead of silently creating duplicate records
+holderSchema.index({ eventId: 1, phone: 1 }, { unique: true });
+holderSchema.index({ eventId: 1 });
+
 module.exports = mongoose.model("Holder", holderSchema);

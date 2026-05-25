@@ -9,6 +9,11 @@ const qrService = require("../services/qrService");
 exports.handleRazorpayWebhook = async (req, res) => {
   try {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    // FIX: guard missing secret — previously threw TypeError crashing the handler
+    if (!secret) {
+      console.error("RAZORPAY_WEBHOOK_SECRET is not configured");
+      return res.status(500).json({ error: "Webhook not configured" });
+    }
     const signature = req.headers["x-razorpay-signature"];
     const rawBody = req.rawBody
       ? req.rawBody
@@ -110,14 +115,24 @@ exports.handleRazorpayWebhook = async (req, res) => {
 
 exports.handleWhatsAppWebhook = async (req, res) => {
   try {
-    // Handle WhatsApp status updates
-    const { Body, From, MessageStatus } = req.body;
+    // Handle WhatsApp status updates (Twilio / Flaxxa status callback)
+    const { From, MessageStatus, MessageSid } = req.body;
 
-    // Update message status in database
-    await QRPass.updateOne(
-      { "delivery.phone": From },
-      { "delivery.whatsappStatus": MessageStatus },
-    );
+    // FIX: QRPass has no "delivery" subdoc — update deliveryStatus directly
+    // Match by the phone number stored on the holder
+    if (From && MessageStatus) {
+      const normalised = From.replace(/[^\d]/g, "");
+      const Holder = require("../models/Holder");
+      const holder = await Holder.findOne({ phone: normalised }).select("_id");
+      if (holder) {
+        const status = ["delivered", "read"].includes(MessageStatus) ? "delivered"
+                     : MessageStatus === "failed" ? "failed" : "sent";
+        await QRPass.updateMany(
+          { holderId: holder._id, status: "active" },
+          { $set: { deliveryStatus: status } },
+        );
+      }
+    }
 
     res.json({ received: true });
   } catch (error) {

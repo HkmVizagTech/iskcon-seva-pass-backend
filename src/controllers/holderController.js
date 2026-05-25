@@ -304,6 +304,20 @@ exports.createHolder = async (req, res) => {
     }
     const primaryVenue = event.venue?.[0];
 
+    // FIX: check for duplicate phone+event before creating
+    const normPhone = normalisePhone(phone) || phone;
+    const existingHolder = await Holder.findOne({ eventId, phone: normPhone });
+    if (existingHolder) {
+      const existingQR = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
+      if (existingQR) {
+        return res.status(409).json({
+          error: "A pass has already been issued to this phone number for this event",
+          qrId: existingQR.qrId,
+          holderId: existingHolder._id,
+        });
+      }
+    }
+
     const category = await Category.findById(catId).populate("entryPoints");
     if (!category) {
       return res.status(404).json({ error: "Category not found" });
@@ -685,22 +699,36 @@ async function processSingleRecord(
       };
 
     if (!holder) {
-      holder = await Holder.create({
-        eventId: event._id,
-        catId: category._id,
-        name,
-        phone: formattedPhone,
-        whatsappNumber: formattedPhone,
-        holderType,
-        preacher: preacher || "",
-        venueName: venue || event.venue?.[0]?.name || "",
-        notes:
-          [sponsorSeva, sponsorCategory, preacher, venue, slot]
-            .filter(Boolean)
-            .join(" | ") || undefined,
-        customFields: { sponsorSeva, sponsorCategory, preacher, venue, slot },
-        issuedBy: userId,
-      });
+      try {
+        holder = await Holder.create({
+          eventId: event._id,
+          catId: category._id,
+          name,
+          phone: formattedPhone,
+          whatsappNumber: formattedPhone,
+          holderType,
+          preacher: preacher || "",
+          venueName: venue || event.venue?.[0]?.name || "",
+          notes:
+            [sponsorSeva, sponsorCategory, preacher, venue, slot]
+              .filter(Boolean)
+              .join(" | ") || undefined,
+          customFields: { sponsorSeva, sponsorCategory, preacher, venue, slot },
+          issuedBy: userId,
+        });
+      } catch (createErr) {
+        // FIX: unique index race condition — another request already created this holder
+        if (createErr.code === 11000) {
+          holder = await Holder.findOne({ eventId: event._id, phone: formattedPhone });
+          if (!holder) throw createErr;
+          const existingQR = await QRPass.findOne({ holderId: holder._id, status: "active" });
+          if (existingQR) {
+            return { success: true, skipped: true, name, phone: formattedPhone, qrId: existingQR.qrId };
+          }
+        } else {
+          throw createErr;
+        }
+      }
     }
 
     const qrId = await qrService.generateQRId(

@@ -12,8 +12,13 @@ exports.createEvent = async (req, res) => {
   try {
     const eventData = {
       ...req.body,
+      // FIX: sanitise eventCode — strip spaces and special chars so QR IDs are always clean
+      eventCode: (req.body.eventCode || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
       createdBy: req.user._id || req.user.userId,
     };
+    if (!eventData.eventCode) {
+      return res.status(400).json({ error: "Event code is required and must contain letters or numbers" });
+    }
 
     // FIX: validate dateEnd > dateStart
     if (eventData.dateStart && eventData.dateEnd) {
@@ -140,26 +145,36 @@ exports.getEvents = async (req, res) => {
       .populate("createdBy", "name email")
       .sort({ dateStart: -1 });
 
-    const stats = await Promise.all(
-      events.map(async (event) => {
-        const qrCount = await QRPass.countDocuments({ eventId: event._id });
-        const scannedCount = await QRPass.countDocuments({
-          eventId: event._id,
-          "redemptionHistory.0": { $exists: true },
-        });
+    // FIX: single aggregation instead of 2N parallel countDocuments queries
+    const eventIds = events.map((e) => e._id);
+    const [totalAgg, scannedAgg] = await Promise.all([
+      QRPass.aggregate([
+        { $match: { eventId: { $in: eventIds } } },
+        { $group: { _id: "$eventId", count: { $sum: 1 } } },
+      ]),
+      QRPass.aggregate([
+        { $match: { eventId: { $in: eventIds }, "redemptionHistory.0": { $exists: true } } },
+        { $group: { _id: "$eventId", count: { $sum: 1 } } },
+      ]),
+    ]);
 
-        return {
-          ...event.toObject(),
-          stats: {
-            totalPasses: qrCount,
-            scannedPasses: scannedCount,
-            scanRate: qrCount ? ((scannedCount / qrCount) * 100).toFixed(1) : 0,
-          },
-        };
-      }),
-    );
+    const totalMap = Object.fromEntries(totalAgg.map((r) => [r._id.toString(), r.count]));
+    const scannedMap = Object.fromEntries(scannedAgg.map((r) => [r._id.toString(), r.count]));
 
-    res.json({ events: stats });
+    const eventsWithStats = events.map((event) => {
+      const total = totalMap[event._id.toString()] || 0;
+      const scanned = scannedMap[event._id.toString()] || 0;
+      return {
+        ...event.toObject(),
+        stats: {
+          totalPasses: total,
+          scannedPasses: scanned,
+          scanRate: total ? ((scanned / total) * 100).toFixed(1) : 0,
+        },
+      };
+    });
+
+    res.json({ events: eventsWithStats });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch events" });
   }
@@ -212,6 +227,10 @@ exports.updateEvent = async (req, res) => {
         $set[key] = body[key];
       }
     }
+    // FIX: sanitise eventCode if being updated
+    if ($set.eventCode) {
+      $set.eventCode = $set.eventCode.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    }
 
     // FIX: validate date order on update
     const startDate = $set.dateStart ? new Date($set.dateStart) : null;
@@ -227,6 +246,38 @@ exports.updateEvent = async (req, res) => {
     );
 
     if (!event) return res.status(404).json({ error: "Event not found" });
+
+    // FIX: if dates changed, bulk-regenerate signed payloads for all active QR passes
+    // so the JWT validFrom/validUntil reflect the new event dates at scan time
+    if ($set.dateStart || $set.dateEnd) {
+      try {
+        const passes = await QRPass.find({ eventId: event._id, status: "active" })
+          .populate("holderId", "name")
+          .populate("entryPoints");
+
+        const qrService = require("../services/qrService");
+        await Promise.all(
+          passes.map(async (pass) => {
+            const payload = qrService.createPayload(
+              { ...pass.holderId?.toObject?.() || {}, qrId: pass.qrId, _id: pass.holderId?._id },
+              event,
+              null,
+              pass.entryPoints,
+              event.dateStart,
+              event.dateEnd,
+            );
+            const { signedPayload } = await qrService.generateQRCode(payload);
+            await QRPass.findByIdAndUpdate(pass._id, {
+              $set: { payloadSigned: signedPayload, validFrom: event.dateStart, validUntil: event.dateEnd },
+            });
+          }),
+        );
+        console.log(`Re-signed ${passes.length} QR passes for event date update`);
+      } catch (regenErr) {
+        console.error("QR re-sign warning:", regenErr.message);
+        // Non-fatal — event is updated, passes will have old dates until re-signed
+      }
+    }
 
     res.json({ success: true, event });
   } catch (error) {

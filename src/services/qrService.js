@@ -92,17 +92,20 @@ class QRService {
       const payload = this.verifyPayload(qrData);
       const now = Math.floor(Date.now() / 1000);
 
-      if (now < payload.f || now > payload.u) {
-        return {
-          valid: false,
-          reason: "invalid",
-          message: "QR expired or not yet valid",
-        };
+      // FIX: allow ±5 min clock skew so volunteer devices slightly ahead/behind
+      // don't falsely reject valid passes at event start time
+      const CLOCK_SKEW_SECONDS = 300; // 5 minutes
+      if (now < payload.f - CLOCK_SKEW_SECONDS) {
+        return { valid: false, reason: "invalid", message: "Pass is not yet valid" };
+      }
+      if (now > payload.u + CLOCK_SKEW_SECONDS) {
+        return { valid: false, reason: "expired", message: "Pass has expired" };
       }
 
-      const [qrPass, entryPoint] = await Promise.all([
-        QRPass.findOne({ qrId: payload.q, status: "active" })
-          .select("eventId entryPoints holderId redemptionHistory")
+      // FIX: look up without status filter first to distinguish revoked/expired from invalid
+      const [qrPassAny, entryPoint] = await Promise.all([
+        QRPass.findOne({ qrId: payload.q })
+          .select("eventId entryPoints holderId redemptionHistory status")
           .populate("holderId", "name")
           .lean(),
         EntryPoint.findById(epId)
@@ -112,9 +115,20 @@ class QRService {
           .lean(),
       ]);
 
-      if (!qrPass) {
-        return { valid: false, reason: "invalid", message: "Invalid QR" };
+      // FIX: replace with specific messages per status
+      if (!qrPassAny) {
+        return { valid: false, reason: "invalid", message: "Invalid QR code" };
       }
+      if (qrPassAny.status === "revoked") {
+        return { valid: false, reason: "revoked", message: "Pass has been revoked" };
+      }
+      if (qrPassAny.status === "expired") {
+        return { valid: false, reason: "expired", message: "Pass has expired" };
+      }
+      if (qrPassAny.status !== "active") {
+        return { valid: false, reason: "invalid", message: "Pass is not active" };
+      }
+      const qrPass = qrPassAny;
 
       if (
         !entryPoint ||
@@ -200,7 +214,7 @@ class QRService {
             scannedBy: userId,
             stationLabel,
             result: "granted",
-            groupCount,
+            groupCount, // FIX: store groupCount in history for accurate headcount reports
           },
         },
       },

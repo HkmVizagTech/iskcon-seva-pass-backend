@@ -130,33 +130,33 @@ exports.getHolderDetailsReport = async (req, res) => {
 exports.getScanLog = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { page = 1, limit = 50, result: resultFilter } = req.query;
+    // FIX: cursor-based pagination instead of skip/limit
+    // skip(N) on large collections scans N documents — gets exponentially slower per page
+    // before= accepts the scannedAt ISO string of the last item from the previous page
+    const { before, limit = 50, result: resultFilter } = req.query;
 
-    // FIX: scope to event via entry points
     const eventEntryPoints = await EntryPoint.find({ eventId }).select("_id");
     const epIds = eventEntryPoints.map((ep) => ep._id);
 
     const query = { epId: { $in: epIds } };
     if (resultFilter) query.result = resultFilter;
+    // Cursor: only return records older than the cursor
+    if (before) query.scannedAt = { $lt: new Date(before) };
 
-    const [logs, total] = await Promise.all([
-      ScanLog.find(query)
-        .populate("epId", "name")
-        .populate("scannedBy", "name")
-        .populate("holderId", "name phone")
-        .sort({ scannedAt: -1 })
-        .limit(Number(limit))
-        .skip((Number(page) - 1) * Number(limit)),
-      ScanLog.countDocuments(query),
-    ]);
+    const logs = await ScanLog.find(query)
+      .populate("epId", "name")
+      .populate("scannedBy", "name")
+      .populate("holderId", "name phone")
+      .sort({ scannedAt: -1 })
+      .limit(Number(limit) + 1); // fetch one extra to detect hasMore
+
+    const hasMore = logs.length > Number(limit);
+    const results = hasMore ? logs.slice(0, Number(limit)) : logs;
+    const nextCursor = hasMore ? results[results.length - 1].scannedAt.toISOString() : null;
 
     res.json({
-      logs,
-      pagination: {
-        total,
-        page: parseInt(page),
-        pages: Math.ceil(total / Number(limit)),
-      },
+      logs: results,
+      pagination: { hasMore, nextCursor, limit: Number(limit) },
     });
   } catch (error) {
     console.error("getScanLog error:", error);
@@ -242,13 +242,21 @@ exports.exportReport = async (req, res) => {
 
 exports.getDashboardStats = async (req, res) => {
   try {
-    const totalEvents = await Event.countDocuments();
-    const activePasses = await QRPass.countDocuments({ status: "active" });
-    const totalHolders = await Holder.countDocuments();
-    const totalScans = await ScanLog.countDocuments({ result: "granted" });
-    const totalPasses = await QRPass.countDocuments();
-    const scanRate =
-      totalPasses > 0 ? ((totalScans / totalPasses) * 100).toFixed(1) : 0;
+    // FIX: scope counts to allowedEvents for event_admin — was returning global counts
+    const isAdmin = ["super_admin"].includes(req.user.role);
+    const scopedEventIds = isAdmin ? null : (req.user.allowedEvents || []);
+    const eventFilter = scopedEventIds ? { _id: { $in: scopedEventIds } } : {};
+    const qrFilter = scopedEventIds ? { eventId: { $in: scopedEventIds } } : {};
+    const holderFilter = scopedEventIds ? { eventId: { $in: scopedEventIds } } : {};
+
+    const [totalEvents, activePasses, totalHolders, totalScans, totalPasses] = await Promise.all([
+      Event.countDocuments(eventFilter),
+      QRPass.countDocuments({ ...qrFilter, status: "active" }),
+      Holder.countDocuments(holderFilter),
+      ScanLog.countDocuments({ result: "granted" }),
+      QRPass.countDocuments(qrFilter),
+    ]);
+    const scanRate = totalPasses > 0 ? ((totalScans / totalPasses) * 100).toFixed(1) : 0;
 
     const holderTypeStats = await Holder.aggregate([
       { $group: { _id: "$holderType", count: { $sum: 1 } } },

@@ -48,7 +48,8 @@ exports.scanQR = async (req, res) => {
     const incomingQrData = qrData || qr_payload;
     const incomingEpId = epId || ep_id;
     const incomingStationLabel = stationLabel || station_label || "";
-    const incomingGroupCount = Math.max(1, parseInt(groupCount) || 1);
+    // FIX: cap groupCount to prevent malicious/accidental huge increments
+    const incomingGroupCount = Math.min(Math.max(1, parseInt(groupCount) || 1), 50);
     const userId = req.user._id || req.user.userId;
     // FIX: will be overridden with DB value below if empty
 
