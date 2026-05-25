@@ -189,11 +189,15 @@ exports.deleteVolunteer = async (req, res) => {
 // Get available entry points for assigning to volunteers
 exports.getAvailableEntryPoints = async (req, res) => {
   try {
-    const { eventId } = req.query;
+    // FIX: accept multiple eventId params (?eventId=A&eventId=B)
+    // previously only supported a single eventId string
+    let { eventId } = req.query;
 
     const query = { isActive: true };
     if (eventId) {
-      query.eventId = eventId;
+      // eventId can be a string (single) or array (multiple)
+      const eventIds = Array.isArray(eventId) ? eventId : [eventId];
+      query.eventId = eventIds.length === 1 ? eventIds[0] : { $in: eventIds };
     }
 
     const entryPoints = await EntryPoint.find(query)

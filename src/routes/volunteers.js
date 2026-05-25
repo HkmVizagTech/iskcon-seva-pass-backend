@@ -6,6 +6,30 @@ const { protect, authorize } = require("../middleware/auth");
 // Volunteer login (public)
 router.post("/login", volunteerController.volunteerLogin);
 
+// FIX: /me endpoint so scanner can re-fetch its own assignments without logging out
+router.get("/me", protect, async (req, res) => {
+  try {
+    const User = require("../models/User");
+    const volunteer = await User.findOne({ _id: req.user._id, role: "volunteer" })
+      .select("-password")
+      .populate("assignedEntryPoints", "name stationLabel type _id allowGroupCount eventId")
+      .populate("assignedEvents", "name eventCode _id dateStart dateEnd");
+
+    if (!volunteer) return res.status(404).json({ error: "Volunteer not found" });
+
+    res.json({
+      volunteer: {
+        id: volunteer._id,
+        name: volunteer.name,
+        assignedEntryPoints: volunteer.assignedEntryPoints,
+        assignedEvents: volunteer.assignedEvents,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});
+
 // Admin routes - CRUD volunteers
 router.post(
   "/",
