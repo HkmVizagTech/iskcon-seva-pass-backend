@@ -9,15 +9,15 @@ const userSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-    required: true,
+    required: false,   // FIX: volunteers use phone login — email is optional
     unique: true,
     lowercase: true,
     trim: true,
-    sparse: true,
+    sparse: true,      // sparse index: allows multiple docs with no email
   },
   phone: {
     type: String,
-    required: true,
+    required: false,   // either email or phone must be present (validated at controller)
   },
   password: {
     type: String,
@@ -57,6 +57,11 @@ const userSchema = new mongoose.Schema({
     {
       type: mongoose.Schema.Types.ObjectId,
       ref: "EntryPoint",
+    },
+  ],
+  assignedVenues: [
+    {
+      type: Number,  // index into Event.venue array
     },
   ],
   canOverride: {

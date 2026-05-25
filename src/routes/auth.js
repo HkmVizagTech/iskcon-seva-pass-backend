@@ -15,9 +15,10 @@ router.get("/profile", protect, authController.getProfile);
 router.put("/profile", protect, authController.updateProfile);
 router.post("/change-password", protect, authController.changePassword);
 
-// Admin routes
-router.get("/users", protect, authController.getAllUsers);
-router.put("/users/:id", protect, authController.updateUser);
-router.delete("/users/:id", protect, authController.deleteUser);
+// Admin routes — FIX: add role guards (previously any authenticated user could manage users)
+const { authorize } = require("../middleware/auth");
+router.get("/users", protect, authorize("super_admin", "event_admin"), authController.getAllUsers);
+router.put("/users/:id", protect, authorize("super_admin"), authController.updateUser);
+router.delete("/users/:id", protect, authorize("super_admin"), authController.deleteUser);
 
 module.exports = router;

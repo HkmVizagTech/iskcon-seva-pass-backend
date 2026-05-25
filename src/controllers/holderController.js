@@ -1,3 +1,13 @@
+// FIX: All requires moved to TOP
+// ─── Helper: normalise phone to 91XXXXXXXXXX format ──────────────────────────
+function normalisePhone(phone) {
+  if (!phone) return undefined;
+  const digits = String(phone).replace(/[\+\s\-\(\)]/g, "");
+  if (digits.length === 10) return "91" + digits;
+  if (digits.length === 12 && digits.startsWith("91")) return digits;
+  if (digits.length === 11 && digits.startsWith("0")) return "91" + digits.slice(1);
+  return digits;
+}
 // FIX: All requires moved to TOP of file — previously they were at the bottom,
 // causing ReferenceError when any exported function was called before the
 // module fully evaluated.
@@ -308,12 +318,13 @@ exports.createHolder = async (req, res) => {
       eventId,
       catId,
       name,
-      phone,
+      phone: normalisePhone(phone) || phone,
       email,
-      whatsappNumber: phone,
+      whatsappNumber: normalisePhone(phone) || phone,
       holderType: holderType || "custom",
       lifetimeDonation: Number(lifetimeDonation || 0),
       issuedBy: req.user?._id || req.user?.userId,
+      // FIX: normalise phone so duplicate detection works across manual + bulk imports
       overrideReason,
       preacher: preacher || "",
       venueName: venueName || primaryVenue?.name || "",

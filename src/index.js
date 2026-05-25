@@ -129,6 +129,19 @@ mongoose
   });
 
 const PORT = process.env.PORT || 5000;
+
+// ─── Critical env var checks (fail fast in production) ───────────────────────
+if (process.env.NODE_ENV === "production") {
+  const required = ["JWT_SECRET", "QR_SECRET_KEY", "MONGODB_URI"];
+  for (const key of required) {
+    if (!process.env[key]) {
+      console.error(`FATAL: ${key} environment variable is required in production`);
+      process.exit(1);
+    }
+  }
+}
+
+
 app.listen(PORT, () => {
   console.log(`\n🚀 Server running on http://localhost:${PORT}`);
   console.log(`📡 Health check: http://localhost:${PORT}/health`);

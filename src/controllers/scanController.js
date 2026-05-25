@@ -50,6 +50,7 @@ exports.scanQR = async (req, res) => {
     const incomingStationLabel = stationLabel || station_label || "";
     const incomingGroupCount = Math.max(1, parseInt(groupCount) || 1);
     const userId = req.user._id || req.user.userId;
+    // FIX: will be overridden with DB value below if empty
 
     if (!incomingQrData || !incomingEpId) {
       return res.status(400).json({
@@ -96,6 +97,11 @@ exports.scanQR = async (req, res) => {
 
     // Full validation
     const validation = await qrService.validateQR(incomingQrData, incomingEpId);
+    // FIX: use DB station label as fallback so ScanLog.stationLabel is never blank
+    const finalStationLabel =
+      incomingStationLabel ||
+      validation.entryPoint?.stationLabel ||
+      incomingEpId;
     const validatedQrId =
       validation.payload?.q || validation.payload?.qrId || scanQrId;
 
@@ -108,7 +114,7 @@ exports.scanQR = async (req, res) => {
         qrId: validatedQrId,
         epId: incomingEpId,
         scannedBy: userId,
-        stationLabel: incomingStationLabel,
+        stationLabel: finalStationLabel,
         result: validation.reason,
         groupCount: incomingGroupCount,
         deviceInfo: {
@@ -138,7 +144,7 @@ exports.scanQR = async (req, res) => {
         holderId: fullHolderId,
         epId: incomingEpId,
         scannedBy: userId,
-        stationLabel: incomingStationLabel,
+        stationLabel: finalStationLabel,
         result: "granted",
         groupCount: incomingGroupCount,
         clientScanId: client_scan_id || clientScanId,
@@ -152,7 +158,7 @@ exports.scanQR = async (req, res) => {
         validatedQrId,
         incomingEpId,
         userId,
-        incomingStationLabel,
+        finalStationLabel,
         deviceInfo,
         incomingGroupCount,
       ),

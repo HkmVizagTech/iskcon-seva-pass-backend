@@ -56,4 +56,7 @@ const categorySchema = new mongoose.Schema({
   },
 });
 
+// FIX: enforce unique catCode per event to prevent duplicate QR ID collisions
+categorySchema.index({ eventId: 1, catCode: 1 }, { unique: true });
+
 module.exports = mongoose.model("Category", categorySchema);

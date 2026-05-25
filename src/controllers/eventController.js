@@ -15,6 +15,13 @@ exports.createEvent = async (req, res) => {
       createdBy: req.user._id || req.user.userId,
     };
 
+    // FIX: validate dateEnd > dateStart
+    if (eventData.dateStart && eventData.dateEnd) {
+      if (new Date(eventData.dateEnd) <= new Date(eventData.dateStart)) {
+        return res.status(400).json({ error: "End date must be after start date" });
+      }
+    }
+
     const event = await Event.create(eventData);
     const primaryVenue = event.venue?.[0];
 
@@ -61,6 +68,9 @@ exports.createEvent = async (req, res) => {
     });
   } catch (error) {
     console.error("Create event error:", error);
+    if (error.code === 11000) {
+      return res.status(409).json({ error: "Event code already exists. Use a different code." });
+    }
     res.status(500).json({ error: "Failed to create event" });
   }
 };
@@ -203,6 +213,13 @@ exports.updateEvent = async (req, res) => {
       }
     }
 
+    // FIX: validate date order on update
+    const startDate = $set.dateStart ? new Date($set.dateStart) : null;
+    const endDate = $set.dateEnd ? new Date($set.dateEnd) : null;
+    if (startDate && endDate && endDate <= startDate) {
+      return res.status(400).json({ error: "End date must be after start date" });
+    }
+
     const event = await Event.findByIdAndUpdate(
       req.params.id,
       { $set },
@@ -224,6 +241,9 @@ exports.deleteEvent = async (req, res) => {
 
     const event = await Event.findByIdAndDelete(eventId);
     if (!event) return res.status(404).json({ error: "Event not found" });
+
+    // FIX: revoke all active QR passes so holders get a clear "revoked" message at scan time
+    await QRPass.updateMany({ eventId, status: "active" }, { $set: { status: "revoked" } });
 
     const [entryPoints, holders] = await Promise.all([
       EntryPoint.find({ eventId }),

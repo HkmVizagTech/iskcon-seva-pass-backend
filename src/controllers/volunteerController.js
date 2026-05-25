@@ -12,6 +12,7 @@ exports.createVolunteer = async (req, res) => {
       password,
       assignedEventIds,
       assignedEntryPointIds,
+      assignedVenues, // FIX: now persisted (was ignored before, field added to User schema)
     } = req.body;
 
     // Check if email exists (if provided)
@@ -44,6 +45,7 @@ exports.createVolunteer = async (req, res) => {
       role: "volunteer",
       assignedEvents: assignedEventIds || [],
       assignedEntryPoints: assignedEntryPointIds || [],
+      assignedVenues: assignedVenues || [],
     });
 
     res.status(201).json({
@@ -137,6 +139,8 @@ exports.updateVolunteer = async (req, res) => {
     if (assignedEventIds) updateData.assignedEvents = assignedEventIds;
     if (assignedEntryPointIds)
       updateData.assignedEntryPoints = assignedEntryPointIds;
+    if (req.body.assignedVenues !== undefined)
+      updateData.assignedVenues = req.body.assignedVenues;
 
     // If password provided, it will be hashed by pre-save hook
     if (password) {
