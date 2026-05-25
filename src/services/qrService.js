@@ -2,36 +2,29 @@ const QRCode = require("qrcode");
 const jwt = require("jsonwebtoken");
 const QRPass = require("../models/QRPass");
 const EntryPoint = require("../models/EntryPoint");
+const Event = require("../models/Event");
 const ScanLog = require("../models/ScanLog");
-const whatsappService = require("./whatsappService");
-const emailService = require("./emailService");
 
 class QRService {
   constructor() {
     this.secretKey = process.env.QR_SECRET_KEY;
-    // FIX: Refuse to start with a weak/missing secret in production
     if (!this.secretKey) {
       if (process.env.NODE_ENV === "production") {
         throw new Error(
-          "FATAL: QR_SECRET_KEY env var is required in production. " +
-            "Set it to a long random string.",
+          "FATAL: QR_SECRET_KEY env var is required in production.",
         );
       }
       console.warn(
-        "⚠️  QR_SECRET_KEY not set — using development fallback. " +
-          "NEVER deploy without this env var.",
+        "⚠️  QR_SECRET_KEY not set — using development fallback. NEVER deploy without this.",
       );
       this.secretKey = "dev-only-iskcon-secret-key-change-me";
     }
   }
 
   async generateQRId(eventCode, catCode) {
-    // FIX: Use a counter with findOneAndUpdate to avoid race-condition collisions
-    // on concurrent bulk imports hitting the same event+category.
     const count = await QRPass.countDocuments({
       qrId: new RegExp(`^ISK-${eventCode}-${catCode}-`),
     });
-    // Add a small random suffix to further avoid collisions during rapid generation
     const serial = (count + 1).toString().padStart(5, "0");
     const rand = Math.floor(Math.random() * 100)
       .toString()
@@ -39,48 +32,57 @@ class QRService {
     return `ISK-${eventCode}-${catCode}-${serial}${rand}`;
   }
 
-  createPayload(holder, event, category, entryPoints, validFrom, validUntil) {
+  // ─── Payload only carries identity + entry point list ──────────────────────
+  // Dates are NOT embedded in the JWT.
+  // Validity is always checked against the live Event record in the DB.
+  // This means:
+  //   - Changing event dates immediately affects all existing QR passes
+  //   - No need to re-sign or regenerate QRs when dates change
+  //   - The JWT proves "this pass was legitimately issued", not "it's valid now"
+  createPayload(holder, event, category, entryPoints) {
     return {
-      q: holder.qrId,
-      e: event._id.toString().slice(-6),
-      h: holder._id.toString().slice(-6),
-      n: (holder.name || "").substring(0, 15),
-      p: entryPoints.map((ep) => ep._id.toString().slice(-4)),
-      f: Math.floor(new Date(validFrom).getTime() / 1000),
-      u: Math.floor(new Date(validUntil).getTime() / 1000),
+      q: holder.qrId,                                      // QR ID
+      e: event._id.toString().slice(-6),                   // event shortcode
+      h: holder._id.toString().slice(-6),                  // holder shortcode
+      n: (holder.name || "").substring(0, 15),             // holder name (display only)
+      p: entryPoints.map((ep) => ep._id.toString().slice(-4)), // entry point shortcodes
     };
   }
 
   signPayload(payload) {
     return jwt.sign(payload, this.secretKey, {
       algorithm: "HS256",
-      expiresIn: "7d",
+      // FIX: no expiresIn — JWT never expires by itself.
+      // Validity window is controlled entirely by Event.dateStart / Event.dateEnd
+      // in the DB, so changing event dates works without re-signing QRs.
       noTimestamp: true,
     });
   }
 
   verifyPayload(token) {
     try {
-      return jwt.verify(token, this.secretKey, { algorithms: ["HS256"] });
+      // ignoreExpiration: true because we removed expiresIn above.
+      // We also set it for backwards compatibility with old QRs that still
+      // carry the 7d exp field — those would otherwise fail jwt.verify()
+      // even when the event is still running.
+      return jwt.verify(token, this.secretKey, {
+        algorithms: ["HS256"],
+        ignoreExpiration: true,
+      });
     } catch (error) {
-      throw new Error("Invalid or expired QR code");
+      throw new Error("Invalid QR code signature");
     }
   }
 
   async generateQRCode(payload) {
     try {
       const signedPayload = this.signPayload(payload);
-
       const qrImage = await QRCode.toDataURL(signedPayload, {
         errorCorrectionLevel: "L",
         margin: 2,
         width: 350,
-        color: {
-          dark: "#000000",
-          light: "#FFFFFF",
-        },
+        color: { dark: "#000000", light: "#FFFFFF" },
       });
-
       return { image: qrImage, signedPayload };
     } catch (error) {
       throw new Error(`QR generation failed: ${error.message}`);
@@ -89,33 +91,20 @@ class QRService {
 
   async validateQR(qrData, epId) {
     try {
+      // Step 1: verify JWT signature only — proves it was legitimately issued
       const payload = this.verifyPayload(qrData);
-      const now = Math.floor(Date.now() / 1000);
 
-      // FIX: allow ±5 min clock skew so volunteer devices slightly ahead/behind
-      // don't falsely reject valid passes at event start time
-      const CLOCK_SKEW_SECONDS = 300; // 5 minutes
-      if (now < payload.f - CLOCK_SKEW_SECONDS) {
-        return { valid: false, reason: "invalid", message: "Pass is not yet valid" };
-      }
-      if (now > payload.u + CLOCK_SKEW_SECONDS) {
-        return { valid: false, reason: "expired", message: "Pass has expired" };
-      }
-
-      // FIX: look up without status filter first to distinguish revoked/expired from invalid
+      // Step 2: fetch QR pass + entry point in parallel
       const [qrPassAny, entryPoint] = await Promise.all([
         QRPass.findOne({ qrId: payload.q })
           .select("eventId entryPoints holderId redemptionHistory status")
           .populate("holderId", "name")
           .lean(),
         EntryPoint.findById(epId)
-          .select(
-            "eventId linkedEpId maxCapacity currentCount multiEntryAllowed",
-          )
+          .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed")
           .lean(),
       ]);
 
-      // FIX: replace with specific messages per status
       if (!qrPassAny) {
         return { valid: false, reason: "invalid", message: "Invalid QR code" };
       }
@@ -130,55 +119,66 @@ class QRService {
       }
       const qrPass = qrPassAny;
 
-      if (
-        !entryPoint ||
-        entryPoint.eventId.toString() !== qrPass.eventId.toString()
-      ) {
+      if (!entryPoint || entryPoint.eventId.toString() !== qrPass.eventId.toString()) {
         return { valid: false, reason: "invalid", message: "Wrong event" };
       }
 
-      const epIdStr = epId.toString();
-      const hasEP = qrPass.entryPoints.some((ep) => ep.toString() === epIdStr);
-      if (!hasEP) {
+      // Step 3: validate date window from the LIVE Event record — not from JWT payload
+      // This means updating event dates works immediately for all existing QR passes
+      // without needing to re-sign or regenerate them.
+      const event = await Event.findById(qrPass.eventId).select("dateStart dateEnd name").lean();
+      if (!event) {
+        return { valid: false, reason: "invalid", message: "Event not found" };
+      }
+
+      const now = new Date();
+      const CLOCK_SKEW_MS = 5 * 60 * 1000; // 5 minutes
+
+      if (now < new Date(event.dateStart) - CLOCK_SKEW_MS) {
         return {
           valid: false,
-          reason: "not_included",
-          message: "Not in your pass",
+          reason: "not_yet_valid",
+          message: `Event hasn't started yet (starts ${new Date(event.dateStart).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })})`,
+        };
+      }
+      if (now > new Date(event.dateEnd).getTime() + CLOCK_SKEW_MS) {
+        return {
+          valid: false,
+          reason: "expired",
+          message: `Event has ended`,
         };
       }
 
-      // Check already_used BEFORE any writes happen
+      // Step 4: check entry point access
+      const epIdStr = epId.toString();
+      const hasEP = qrPass.entryPoints.some((ep) => ep.toString() === epIdStr);
+      if (!hasEP) {
+        return { valid: false, reason: "not_included", message: "Not in your pass" };
+      }
+
+      // Step 5: check already used
       if (!entryPoint.multiEntryAllowed) {
         const used = qrPass.redemptionHistory?.some(
           (rh) => rh.epId?.toString() === epIdStr && rh.result === "granted",
         );
         if (used) {
-          return {
-            valid: false,
-            reason: "already_used",
-            message: "Already scanned here",
-          };
+          return { valid: false, reason: "already_used", message: "Already scanned here" };
         }
       }
 
+      // Step 6: check linked prerequisite
       if (entryPoint.linkedEpId) {
         const linked = qrPass.redemptionHistory?.some(
           (rh) => rh.epId?.toString() === entryPoint.linkedEpId.toString(),
         );
         if (!linked) {
-          return {
-            valid: false,
-            reason: "link_required",
-            message: "Scan prerequisite first",
-          };
+          return { valid: false, reason: "link_required", message: "Scan prerequisite first" };
         }
       }
 
-      if (
-        entryPoint.maxCapacity &&
-        entryPoint.currentCount >= entryPoint.maxCapacity
-      ) {
-        return { valid: false, reason: "invalid", message: "Capacity full" };
+      // Step 7: capacity check
+      if (entryPoint.maxCapacity && entryPoint.currentCount >= entryPoint.maxCapacity) {
+        return { valid: false, reason: "capacity_full", message: "Capacity full" };
       }
 
       return {
@@ -186,24 +186,17 @@ class QRService {
         payload,
         qrPass,
         entryPoint,
+        event,
         holderName: qrPass.holderId?.name || payload.n,
       };
     } catch (error) {
-      return { valid: false, reason: "invalid", message: "Invalid QR" };
+      return { valid: false, reason: "invalid", message: "Invalid QR code" };
     }
   }
 
-  // FIX: redeemQR now only updates QRPass redemptionHistory.
-  // ScanLog creation and EntryPoint.currentCount increment are the caller's
-  // (scanController) responsibility — removing the duplicates from here.
-  async redeemQR(
-    qrId,
-    epId,
-    userId,
-    stationLabel,
-    deviceInfo = {},
-    groupCount = 1,
-  ) {
+  // redeemQR — only updates QRPass redemptionHistory.
+  // ScanLog creation and EntryPoint.currentCount increment are the caller's responsibility.
+  async redeemQR(qrId, epId, userId, stationLabel, deviceInfo = {}, groupCount = 1) {
     const qrPass = await QRPass.findOneAndUpdate(
       { qrId, status: "active" },
       {
@@ -214,26 +207,22 @@ class QRService {
             scannedBy: userId,
             stationLabel,
             result: "granted",
-            groupCount, // FIX: store groupCount in history for accurate headcount reports
+            groupCount,
           },
         },
       },
       { new: true, select: "holderId holderName" },
     );
-
     if (!qrPass) throw new Error("QR pass not found");
-
     return { success: true, holderName: qrPass.holderName || "", groupCount };
   }
 
   async deliverQR(qrPass, deliveryMethod) {
-    // Stub — implement delivery logic here
-    console.warn("deliverQR is not yet implemented for method:", deliveryMethod);
+    console.warn("deliverQR not yet implemented for method:", deliveryMethod);
   }
 
   async generateQRForPayment(opts) {
-    // Stub — implement payment QR generation here
-    console.warn("generateQRForPayment is not yet implemented");
+    console.warn("generateQRForPayment not yet implemented");
   }
 }
 

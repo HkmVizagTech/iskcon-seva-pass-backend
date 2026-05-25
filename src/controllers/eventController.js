@@ -247,38 +247,9 @@ exports.updateEvent = async (req, res) => {
 
     if (!event) return res.status(404).json({ error: "Event not found" });
 
-    // FIX: if dates changed, bulk-regenerate signed payloads for all active QR passes
-    // so the JWT validFrom/validUntil reflect the new event dates at scan time
-    if ($set.dateStart || $set.dateEnd) {
-      try {
-        const passes = await QRPass.find({ eventId: event._id, status: "active" })
-          .populate("holderId", "name")
-          .populate("entryPoints");
-
-        const qrService = require("../services/qrService");
-        await Promise.all(
-          passes.map(async (pass) => {
-            const payload = qrService.createPayload(
-              { ...pass.holderId?.toObject?.() || {}, qrId: pass.qrId, _id: pass.holderId?._id },
-              event,
-              null,
-              pass.entryPoints,
-              event.dateStart,
-              event.dateEnd,
-            );
-            const { signedPayload } = await qrService.generateQRCode(payload);
-            await QRPass.findByIdAndUpdate(pass._id, {
-              $set: { payloadSigned: signedPayload, validFrom: event.dateStart, validUntil: event.dateEnd },
-            });
-          }),
-        );
-        console.log(`Re-signed ${passes.length} QR passes for event date update`);
-      } catch (regenErr) {
-        console.error("QR re-sign warning:", regenErr.message);
-        // Non-fatal — event is updated, passes will have old dates until re-signed
-      }
-    }
-
+    // NOTE: No need to re-sign QR passes when dates change.
+    // validateQR now reads event.dateStart/dateEnd from the live DB record,
+    // so all existing QR passes immediately respect the new dates.
     res.json({ success: true, event });
   } catch (error) {
     console.error("Update event error:", error);

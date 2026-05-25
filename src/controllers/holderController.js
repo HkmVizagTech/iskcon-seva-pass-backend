@@ -96,8 +96,6 @@ exports.resendQR = async (req, res) => {
       evt,
       null,
       entryPoints,
-      qrPass.validFrom,
-      qrPass.validUntil,
     );
 
     const { image: qrImage } = await qrService.generateQRCode(compactPayload);
@@ -348,16 +346,11 @@ exports.createHolder = async (req, res) => {
       event.eventCode,
       category.catCode,
     );
-    const validFrom = event.dateStart;
-    const validUntil = event.dateEnd;
-
     const payload = qrService.createPayload(
       { ...holder.toObject(), qrId },
       event,
       category,
       finalEntryPoints,
-      validFrom,
-      validUntil,
     );
 
     const { image: qrImage, signedPayload } =
@@ -741,8 +734,6 @@ async function processSingleRecord(
       event,
       category,
       entryPoints,
-      event.dateStart,
-      event.dateEnd,
     );
     const { image: qrImage, signedPayload } =
       await qrService.generateQRCode(payload);
