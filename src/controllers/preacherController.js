@@ -1,30 +1,86 @@
 const User = require("../models/User");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
-const ScanLog = require("../models/ScanLog");
-const EntryPoint = require("../models/EntryPoint");
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
 
-// ─── Admin: manage preachers ──────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function validateShortCode(code) {
+  if (!code) return null;
+  const clean = code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (clean.length < 2 || clean.length > 10) {
+    throw new Error("Short code must be 2–10 letters/numbers (e.g. MKGD)");
+  }
+  return clean;
+}
+
+/**
+ * Resolve a CSV preacher column value to a User _id.
+ * Tries shortCode first (exact, case-insensitive), then name (case-insensitive).
+ * Returns { preacherId, preacherName } or null if not found.
+ */
+async function resolvePreacherFromString(value, eventId) {
+  if (!value || !value.trim()) return null;
+  const v = value.trim();
+
+  // Try shortCode match (most reliable — e.g. "MKGD")
+  const byCode = await User.findOne({
+    role: "preacher",
+    shortCode: v.toUpperCase(),
+    ...(eventId ? { allowedEvents: eventId } : {}),
+  }).select("_id name shortCode");
+
+  if (byCode) return { preacherId: byCode._id, preacherName: byCode.name };
+
+  // Fallback: case-insensitive name match
+  const byName = await User.findOne({
+    role: "preacher",
+    name: new RegExp(`^${v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+    ...(eventId ? { allowedEvents: eventId } : {}),
+  }).select("_id name shortCode");
+
+  if (byName) return { preacherId: byName._id, preacherName: byName.name };
+
+  // Not found — store the raw string as preacher name, no preacherId link
+  return { preacherId: null, preacherName: v };
+}
+
+module.exports.resolvePreacherFromString = resolvePreacherFromString;
+
+// ─── Admin CRUD ───────────────────────────────────────────────────────────────
 
 exports.createPreacher = async (req, res) => {
   try {
-    const { name, email, phone, password, allowedEvents } = req.body;
+    const { name, email, phone, password, allowedEvents, shortCode } = req.body;
 
     if (!name) return res.status(400).json({ error: "Name is required" });
     if (!password || password.length < 6)
       return res.status(400).json({ error: "Password must be at least 6 characters" });
     if (!email && !phone)
       return res.status(400).json({ error: "Email or phone is required" });
+    if (!shortCode)
+      return res.status(400).json({ error: "Short code is required (e.g. MKGD)" });
+
+    let cleanCode;
+    try { cleanCode = validateShortCode(shortCode); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+
+    // Check shortCode uniqueness
+    const existing = await User.findOne({ shortCode: cleanCode });
+    if (existing)
+      return res.status(409).json({
+        error: `Short code '${cleanCode}' is already used by ${existing.name}`,
+      });
 
     if (email) {
-      const existing = await User.findOne({ email: email.toLowerCase() });
-      if (existing) return res.status(409).json({ error: "Email already registered" });
+      const existingEmail = await User.findOne({ email: email.toLowerCase() });
+      if (existingEmail) return res.status(409).json({ error: "Email already registered" });
     }
 
     const preacher = await User.create({
       name,
+      shortCode: cleanCode,
       email: email ? email.toLowerCase() : undefined,
       phone: phone || undefined,
       password,
@@ -38,6 +94,7 @@ exports.createPreacher = async (req, res) => {
       preacher: {
         id: preacher._id,
         name: preacher.name,
+        shortCode: preacher.shortCode,
         email: preacher.email,
         phone: preacher.phone,
         allowedEvents: preacher.allowedEvents,
@@ -45,7 +102,7 @@ exports.createPreacher = async (req, res) => {
     });
   } catch (error) {
     console.error("Create preacher error:", error);
-    if (error.code === 11000) return res.status(409).json({ error: "Email already registered" });
+    if (error.code === 11000) return res.status(409).json({ error: "Email or short code already in use" });
     res.status(500).json({ error: "Failed to create preacher" });
   }
 };
@@ -53,7 +110,7 @@ exports.createPreacher = async (req, res) => {
 exports.getPreachers = async (req, res) => {
   try {
     const { eventId } = req.query;
-    const query = { role: "preacher", isActive: true };
+    const query = { role: "preacher" };
     if (eventId) query.allowedEvents = eventId;
 
     const preachers = await User.find(query)
@@ -81,13 +138,30 @@ exports.getPreacher = async (req, res) => {
 
 exports.updatePreacher = async (req, res) => {
   try {
-    const { name, email, phone, allowedEvents, isActive } = req.body;
+    const { name, email, phone, allowedEvents, isActive, shortCode } = req.body;
     const $set = {};
     if (name !== undefined) $set.name = name;
     if (email !== undefined) $set.email = email.toLowerCase();
     if (phone !== undefined) $set.phone = phone;
     if (allowedEvents !== undefined) $set.allowedEvents = allowedEvents;
     if (isActive !== undefined) $set.isActive = isActive;
+
+    if (shortCode !== undefined) {
+      let cleanCode;
+      try { cleanCode = validateShortCode(shortCode); }
+      catch (e) { return res.status(400).json({ error: e.message }); }
+
+      // Check uniqueness — exclude self
+      const existing = await User.findOne({
+        shortCode: cleanCode,
+        _id: { $ne: req.params.id },
+      });
+      if (existing)
+        return res.status(409).json({
+          error: `Short code '${cleanCode}' is already used by ${existing.name}`,
+        });
+      $set.shortCode = cleanCode;
+    }
 
     const preacher = await User.findOneAndUpdate(
       { _id: req.params.id, role: "preacher" },
@@ -98,14 +172,13 @@ exports.updatePreacher = async (req, res) => {
     if (!preacher) return res.status(404).json({ error: "Preacher not found" });
     res.json({ success: true, preacher });
   } catch (error) {
-    if (error.code === 11000) return res.status(409).json({ error: "Email already in use" });
+    if (error.code === 11000) return res.status(409).json({ error: "Email or short code already in use" });
     res.status(500).json({ error: "Failed to update preacher" });
   }
 };
 
 exports.deletePreacher = async (req, res) => {
   try {
-    // Don't delete — just deactivate to preserve holder history
     const preacher = await User.findOneAndUpdate(
       { _id: req.params.id, role: "preacher" },
       { $set: { isActive: false } },
@@ -123,11 +196,9 @@ exports.resetPreacherPassword = async (req, res) => {
     const { password } = req.body;
     if (!password || password.length < 6)
       return res.status(400).json({ error: "Password must be at least 6 characters" });
-
     const preacher = await User.findOne({ _id: req.params.id, role: "preacher" });
     if (!preacher) return res.status(404).json({ error: "Preacher not found" });
-
-    preacher.password = password; // pre-save hook hashes it
+    preacher.password = password;
     await preacher.save();
     res.json({ success: true, message: "Password reset successfully" });
   } catch (error) {
@@ -173,6 +244,7 @@ exports.preacherLogin = async (req, res) => {
       preacher: {
         id: preacher._id,
         name: preacher.name,
+        shortCode: preacher.shortCode,
         role: "preacher",
         allowedEvents: preacher.allowedEvents,
       },
@@ -183,21 +255,22 @@ exports.preacherLogin = async (req, res) => {
   }
 };
 
-// ─── Preacher dashboard data (scoped to their name / preacherId) ─────────────
+// ─── Preacher dashboard data ──────────────────────────────────────────────────
 
 exports.getMyHolders = async (req, res) => {
   try {
     const { page = 1, limit = 20, search, eventId } = req.query;
     const preacherId = req.user._id;
     const preacherName = req.user.name;
-
-    // Scope to preacher's allowed events
-    const allowedEventIds = req.user.allowedEvents?.map((e) => e.toString()) || [];
+    const allowedEventIds = (req.user.allowedEvents || []).map((e) => e.toString());
 
     const query = {
       $or: [
         { preacherId },
-        { preacher: new RegExp(`^${preacherName}$`, "i") }, // backward compat with string
+        { preacher: new RegExp(`^${preacherName}$`, "i") },
+        ...(req.user.shortCode
+          ? [{ preacher: new RegExp(`^${req.user.shortCode}$`, "i") }]
+          : []),
       ],
     };
 
@@ -208,14 +281,10 @@ exports.getMyHolders = async (req, res) => {
     }
 
     if (search) {
+      const searchRgx = new RegExp(search, "i");
       query.$and = [
         { $or: query.$or },
-        {
-          $or: [
-            { name: new RegExp(search, "i") },
-            { phone: new RegExp(search, "i") },
-          ],
-        },
+        { $or: [{ name: searchRgx }, { phone: searchRgx }] },
       ];
       delete query.$or;
     }
@@ -230,20 +299,14 @@ exports.getMyHolders = async (req, res) => {
       Holder.countDocuments(query),
     ]);
 
-    // Batch fetch QR passes
     const holderIds = holders.map((h) => h._id);
     const qrPasses = await QRPass.find({ holderId: { $in: holderIds } }).select(
       "holderId qrId status redemptionHistory deliveryStatus",
     );
     const passMap = Object.fromEntries(qrPasses.map((p) => [p.holderId.toString(), p]));
 
-    const holdersWithPass = holders.map((h) => ({
-      ...h.toObject(),
-      qrPass: passMap[h._id.toString()] || null,
-    }));
-
     res.json({
-      holders: holdersWithPass,
+      holders: holders.map((h) => ({ ...h.toObject(), qrPass: passMap[h._id.toString()] || null })),
       pagination: { total, page: Number(page), pages: Math.ceil(total / Number(limit)) },
     });
   } catch (error) {
@@ -256,18 +319,23 @@ exports.getMyStats = async (req, res) => {
   try {
     const preacherId = req.user._id;
     const preacherName = req.user.name;
-    const allowedEventIds = req.user.allowedEvents?.map((e) => e.toString()) || [];
+    const allowedEventIds = (req.user.allowedEvents || []).map((e) => e.toString());
 
     const holderQuery = {
-      $or: [{ preacherId }, { preacher: new RegExp(`^${preacherName}$`, "i") }],
+      $or: [
+        { preacherId },
+        { preacher: new RegExp(`^${preacherName}$`, "i") },
+        ...(req.user.shortCode
+          ? [{ preacher: new RegExp(`^${req.user.shortCode}$`, "i") }]
+          : []),
+      ],
     };
     if (allowedEventIds.length > 0) holderQuery.eventId = { $in: allowedEventIds };
 
-    const holders = await Holder.find(holderQuery).select("_id eventId catId").lean();
+    const holders = await Holder.find(holderQuery).select("_id eventId").lean();
     const holderIds = holders.map((h) => h._id);
 
-    const [totalHolders, activePasses, scannedPasses] = await Promise.all([
-      Promise.resolve(holders.length),
+    const [activePasses, scannedPasses] = await Promise.all([
       QRPass.countDocuments({ holderId: { $in: holderIds }, status: "active" }),
       QRPass.countDocuments({
         holderId: { $in: holderIds },
@@ -275,14 +343,8 @@ exports.getMyStats = async (req, res) => {
       }),
     ]);
 
-    // By event breakdown
     const byEvent = await Holder.aggregate([
-      {
-        $match: {
-          $or: [{ preacherId }, { preacher: new RegExp(`^${preacherName}$`, "i") }],
-          ...(allowedEventIds.length > 0 ? { eventId: { $in: allowedEventIds.map(id => require("mongoose").Types.ObjectId.createFromHexString(id)) } } : {}),
-        },
-      },
+      { $match: holderQuery },
       { $group: { _id: "$eventId", count: { $sum: 1 } } },
       { $lookup: { from: "events", localField: "_id", foreignField: "_id", as: "event" } },
       { $unwind: { path: "$event", preserveNullAndEmptyArrays: true } },
@@ -290,7 +352,7 @@ exports.getMyStats = async (req, res) => {
     ]);
 
     res.json({
-      totalHolders,
+      totalHolders: holders.length,
       activePasses,
       scannedPasses,
       scanRate: activePasses > 0 ? ((scannedPasses / activePasses) * 100).toFixed(1) : 0,

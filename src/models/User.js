@@ -23,6 +23,16 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  // Short code for preachers (e.g. MKGD for Mukunda Gauranga Dasa)
+  // Used in CSV imports to identify the preacher column value
+  shortCode: {
+    type: String,
+    uppercase: true,
+    trim: true,
+    sparse: true,  // allows multiple null values (non-preachers)
+    index: true,
+  },
+
   role: {
     type: String,
     enum: [

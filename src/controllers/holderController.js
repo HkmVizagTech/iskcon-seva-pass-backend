@@ -1,4 +1,5 @@
 // FIX: All requires moved to TOP
+const { resolvePreacherFromString } = require("./preacherController");
 // ─── Helper: normalise phone to 91XXXXXXXXXX format ──────────────────────────
 function normalisePhone(phone) {
   if (!phone) return undefined;
@@ -8,6 +9,7 @@ function normalisePhone(phone) {
   if (digits.length === 11 && digits.startsWith("0")) return "91" + digits.slice(1);
   return digits;
 }
+// FIX: All requires moved to TOP
 // FIX: All requires moved to TOP of file — previously they were at the bottom,
 // causing ReferenceError when any exported function was called before the
 // module fully evaluated.
@@ -207,7 +209,8 @@ exports.getHolderDetails = async (req, res) => {
     const holder = await Holder.findById(req.params.holderId)
       .populate("catId")
       .populate("issuedBy", "name email")
-      .populate("eventId", "name eventCode dateStart dateEnd");
+      .populate("eventId", "name eventCode dateStart dateEnd")
+      .populate("preacherId", "name shortCode");
 
     if (!holder) {
       return res.status(404).json({ error: "Holder not found" });
@@ -674,7 +677,12 @@ async function processSingleRecord(
   )
     .toString()
     .trim();
-  const preacher = (record.Preacher || record.preacher || "").toString().trim();
+  const preacherRaw = (record.Preacher || record.preacher || "").toString().trim();
+  // Resolve preacher from CSV value — tries shortCode match first, then name
+  // e.g. "MKGD" in the Preacher column → links to Mukunda Gauranga Dasa's User record
+  const resolvedPreacher = await resolvePreacherFromString(preacherRaw, event._id);
+  const preacher = resolvedPreacher?.preacherName || preacherRaw;
+  const csvPreacherId = resolvedPreacher?.preacherId || null;
   const venue = (record.Venue || record.venue || "").toString().trim();
   const slot = (record.Slot || record.slot || "").toString().trim();
 
@@ -715,7 +723,8 @@ async function processSingleRecord(
           whatsappNumber: formattedPhone,
           holderType,
           preacher: preacher || "",
-          preacherId: bulkPreacherId || null,  // link to preacher User record
+          // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
+          preacherId: csvPreacherId || bulkPreacherId || null,
           venueName: venue || event.venue?.[0]?.name || "",
           notes:
             [sponsorSeva, sponsorCategory, preacher, venue, slot]
