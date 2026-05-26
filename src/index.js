@@ -77,6 +77,7 @@ app.use("/api/scan", require("./routes/scan"));
 app.use("/api/webhooks", require("./routes/webhooks"));
 app.use("/api/reports", require("./routes/reports"));
 app.use("/api/volunteers", require("./routes/volunteers"));
+app.use("/api/preachers", require("./routes/preachers"));
 
 // Health check
 app.get("/health", (req, res) => {

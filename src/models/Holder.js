@@ -25,7 +25,13 @@ const holderSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-  preacher: String,
+  preacher: String,           // free-text name (from CSV import / legacy)
+  preacherId: {               // reference to User with role "preacher" (when selected from dropdown)
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: false,
+    default: null,
+  },
   venueName: String,
   email: {
     type: String,
@@ -79,6 +85,7 @@ const holderSchema = new mongoose.Schema({
   },
 });
 
+holderSchema.index({ preacherId: 1 }); // for scoped preacher reports
 // FIX: unique index prevents race-condition duplicate QR passes
 // Two concurrent imports for the same phone+event will now get a clear E11000
 // instead of silently creating duplicate records

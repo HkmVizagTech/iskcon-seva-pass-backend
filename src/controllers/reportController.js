@@ -78,6 +78,14 @@ exports.getHolderDetailsReport = async (req, res) => {
     if (venue) holderQuery.venueName = new RegExp(venue, "i");
     if (preacher) holderQuery.preacher = new RegExp(preacher, "i");
 
+    // Scope preacher role to their own holders only
+    if (req.user.role === "preacher") {
+      holderQuery.$or = [
+        { preacherId: req.user._id },
+        { preacher: new RegExp(`^${req.user.name}$`, "i") },
+      ];
+    }
+
     const holders = await Holder.find(holderQuery)
       .populate("catId", "name")
       .populate("issuedBy", "name");

@@ -158,6 +158,7 @@ exports.getHolders = async (req, res) => {
     const holders = await Holder.find(query)
       .populate("catId", "name catCode color")
       .populate("issuedBy", "name")
+      .populate("preacherId", "name")
       .sort({ issuedAt: -1 })
       .limit(Number(limit))
       .skip((Number(page) - 1) * Number(limit));
@@ -237,6 +238,7 @@ exports.updateHolder = async (req, res) => {
       "notes",
       "overrideReason",
       "preacher",
+      "preacherId",  // allow updating preacher assignment
       "venueName",
       "lifetimeDonation",
       "donorEligibilityStatus",
@@ -296,6 +298,7 @@ exports.createHolder = async (req, res) => {
       overrideReason,
       deliveryMethod,
       preacher,
+      preacherId,  // ObjectId ref to User with role "preacher" (from dropdown)
       venueName,
     } = req.body;
 
@@ -342,6 +345,7 @@ exports.createHolder = async (req, res) => {
       // FIX: normalise phone so duplicate detection works across manual + bulk imports
       overrideReason,
       preacher: preacher || "",
+      preacherId: preacherId || null,  // link to preacher User record
       venueName: venueName || primaryVenue?.name || "",
     });
 
@@ -466,7 +470,7 @@ exports.bulkImportHolders = async (req, res) => {
   console.log("📦 BULK IMPORT - body:", JSON.stringify(req.body));
   try {
     const { eventId } = req.params;
-    const { categoryId, holderType, deliveryMethod = "whatsapp" } = req.body;
+    const { categoryId, holderType, deliveryMethod = "whatsapp", preacherId } = req.body;
 
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -510,6 +514,7 @@ exports.bulkImportHolders = async (req, res) => {
           holderType || "general",
           deliveryMethod,
           req.user?._id || req.user?.userId,
+          preacherId || null,
         );
         if (result.success) {
           results.success.push(result);
@@ -647,6 +652,7 @@ async function processSingleRecord(
   holderType,
   deliveryMethod,
   userId,
+  bulkPreacherId = null,
 ) {
   const name = (record.Name || record.name || "").toString().trim();
   const phone = (
@@ -709,6 +715,7 @@ async function processSingleRecord(
           whatsappNumber: formattedPhone,
           holderType,
           preacher: preacher || "",
+          preacherId: bulkPreacherId || null,  // link to preacher User record
           venueName: venue || event.venue?.[0]?.name || "",
           notes:
             [sponsorSeva, sponsorCategory, preacher, venue, slot]

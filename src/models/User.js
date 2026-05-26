@@ -30,6 +30,7 @@ const userSchema = new mongoose.Schema({
       "event_admin",
       "campaign_manager",
       "volunteer",
+      "preacher",   // can log in and view only their own assigned holders/reports
       "self",
     ],
     default: "volunteer",
