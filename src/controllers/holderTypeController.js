@@ -1,4 +1,5 @@
 const HolderType = require("../models/HolderType");
+const Category = require("../models/Category");
 
 exports.getHolderTypes = async (req, res) => {
   try {
@@ -22,6 +23,8 @@ exports.createHolderType = async (req, res) => {
     });
     res.status(201).json(holderType);
   } catch (error) {
+    if (error.code === 11000)
+      return res.status(409).json({ error: "A holder type with this code already exists" });
     res.status(500).json({ error: "Failed to create holder type" });
   }
 };
@@ -29,17 +32,18 @@ exports.createHolderType = async (req, res) => {
 exports.updateHolderType = async (req, res) => {
   try {
     const { name, code, description, icon, color } = req.body;
-    const updateData = {};
-    if (name) updateData.name = name;
-    if (code) updateData.code = code.toUpperCase();
-    if (description !== undefined) updateData.description = description;
-    if (icon) updateData.icon = icon;
-    if (color) updateData.color = color;
+    // FIX: use $set so fields absent from request are not wiped
+    const $set = {};
+    if (name) $set.name = name;
+    if (code) $set.code = code.toUpperCase();
+    if (description !== undefined) $set.description = description;
+    if (icon) $set.icon = icon;
+    if (color) $set.color = color;
 
     const holderType = await HolderType.findByIdAndUpdate(
       req.params.htId,
-      updateData,
-      { new: true },
+      { $set },
+      { new: true, runValidators: true },
     );
     if (!holderType)
       return res.status(404).json({ error: "Holder type not found" });
@@ -51,7 +55,20 @@ exports.updateHolderType = async (req, res) => {
 
 exports.deleteHolderType = async (req, res) => {
   try {
-    await HolderType.findByIdAndDelete(req.params.htId);
+    // FIX: cascade check — categories that reference this holder type become orphaned
+    const categoryCount = await Category.countDocuments({
+      holderTypeId: req.params.htId,
+    });
+    if (categoryCount > 0) {
+      return res.status(409).json({
+        error: `Cannot delete: ${categoryCount} category(ies) use this holder type. Reassign or delete them first.`,
+        categoryCount,
+      });
+    }
+
+    const holderType = await HolderType.findByIdAndDelete(req.params.htId);
+    if (!holderType)
+      return res.status(404).json({ error: "Holder type not found" });
     res.json({ success: true, message: "Holder type deleted" });
   } catch (error) {
     res.status(500).json({ error: "Failed to delete holder type" });

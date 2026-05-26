@@ -149,8 +149,8 @@ exports.updateVolunteer = async (req, res) => {
 
     const volunteer = await User.findOneAndUpdate(
       { _id: req.params.id, role: "volunteer" },
-      updateData,
-      { new: true },
+      { $set: updateData }, // FIX: was missing $set — Mongoose was replacing top-level fields
+      { new: true, runValidators: true },
     )
       .select("-password")
       .populate("assignedEvents", "name eventCode")
@@ -221,7 +221,11 @@ exports.volunteerLogin = async (req, res) => {
     if (email) {
       query.email = email.toLowerCase();
     } else if (phone) {
-      query.phone = phone;
+      // FIX: normalise phone so login works regardless of format user types
+      // Volunteers are stored as 91XXXXXXXXXX — raw "9876543210" would fail lookup
+      const digits = String(phone).replace(/[\+\s\-\(\)]/g, "");
+      const normPhone = digits.length === 10 ? "91" + digits : digits;
+      query.$or = [{ phone: normPhone }, { phone: digits }, { phone: phone }];
     } else {
       return res.status(400).json({ error: "Email or phone is required" });
     }

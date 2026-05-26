@@ -240,29 +240,27 @@ exports.getStationStats = async (req, res) => {
 
 exports.getRecentScans = async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 50;
-    const { eventId } = req.params;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const { eventId } = req.params; // optional — from /scan/events/:eventId/recent
+    const resultFilter = req.query.result; // optional — filter by result type
 
-    // Build match: if eventId provided scope to that event via EntryPoint lookup
-    // For the dashboard "recent scans" widget we do a simple global query
     const query = { holderId: { $exists: true } };
+    if (resultFilter) query.result = resultFilter;
 
     const scans = await ScanLog.find(query)
-      .populate("epId", "name stationLabel eventId")
+      .populate({ path: "epId", select: "name stationLabel eventId",
+        populate: { path: "eventId", select: "name eventCode" } })
       .populate("scannedBy", "name")
       .populate("holderId", "name phone")
       .sort({ scannedAt: -1 })
-      .limit(limit);
+      .limit(limit * 3); // fetch more so filter still returns enough
 
-    // Filter to event if requested
+    // Filter to event if route param provided
     const filtered = eventId
-      ? scans.filter(
-          (s) =>
-            s.epId?.eventId && s.epId.eventId.toString() === eventId.toString(),
-        )
+      ? scans.filter(s => s.epId?.eventId?._id?.toString() === eventId)
       : scans;
 
-    res.json({ scans: filtered });
+    res.json({ scans: filtered.slice(0, limit) });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch recent scans" });
   }

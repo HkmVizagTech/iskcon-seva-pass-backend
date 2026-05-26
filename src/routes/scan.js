@@ -18,6 +18,9 @@ router.get(
   scanController.getHolderScanHistory,
 );
 
+// Recent scans — for dashboard live feed widget (no eventId filter)
+router.get("/recent", protect, scanController.getRecentScans);
+
 // Offline sync
 router.post("/sync", protect, scanController.syncOfflineScans);
 

@@ -36,9 +36,17 @@ class EmailService {
   }
 
   generateEmailTemplate(holderName, eventName, passDetails, qrImage) {
-    const entries = passDetails.entryPoints
+    const entries = (passDetails.entryPoints || [])
       .map((ep) => `<li>${ep}</li>`)
       .join("");
+
+    // FIX: format dates in IST, not raw ISO strings
+    const istOpts = { timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true };
+    const fmtDate = (d) => {
+      try { return new Date(d).toLocaleString("en-IN", istOpts); } catch { return d || ""; }
+    };
+    const validFromStr = fmtDate(passDetails.validFrom);
+    const validUntilStr = fmtDate(passDetails.validUntil);
 
     return `
       <!DOCTYPE html>
@@ -75,7 +83,7 @@ class EmailService {
             <div class="details">
               <h3>Pass Details:</h3>
               <ul>${entries}</ul>
-              <p><strong>Valid:</strong> ${passDetails.validFrom} to ${passDetails.validUntil}</p>
+              <p><strong>Valid:</strong> ${validFromStr} to ${validUntilStr}</p>
             </div>
 
             <p>Please show this QR code at the respective entry points during the event.</p>
