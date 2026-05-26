@@ -91,6 +91,9 @@ exports.resendQR = async (req, res) => {
     // FIX: Use qrService.createPayload (compact keys q/e/h/n/p/f/u) so the
     // resent QR uses the same payload schema as the original and passes
     // validation at scan time. Previously used an incompatible plain object.
+    const validFrom = qrPass.validFrom || evt.dateStart;
+    const validUntil = qrPass.validUntil || evt.dateEnd;
+
     const compactPayload = qrService.createPayload(
       { ...holder.toObject(), qrId: qrPass.qrId },
       evt,
@@ -346,6 +349,11 @@ exports.createHolder = async (req, res) => {
       event.eventCode,
       category.catCode,
     );
+    // validFrom/validUntil stored in QRPass for display purposes only.
+    // Scan validation reads live event dates from DB — not these stored values.
+    const validFrom = event.dateStart;
+    const validUntil = event.dateEnd;
+
     const payload = qrService.createPayload(
       { ...holder.toObject(), qrId },
       event,
