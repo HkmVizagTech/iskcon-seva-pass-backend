@@ -86,7 +86,7 @@ exports.scanQR = async (req, res) => {
       }
     }
 
-    // Synchronous dedup check
+    // Synchronous in-memory dedup check (same process, 5s window)
     if (isDuplicate(dupKey)) {
       console.warn(`[DEDUP] Blocked duplicate: ${scanQrId} @ ${incomingEpId}`);
       return res.status(200).json({
@@ -94,6 +94,22 @@ exports.scanQR = async (req, res) => {
         result: "duplicate",
         message: "Duplicate scan ignored",
       });
+    }
+
+    // DB-level dedup: if clientScanId was already recorded, return the original result
+    // This blocks network retries and scanner double-fires from creating two records
+    const incomingClientScanId = client_scan_id || clientScanId;
+    if (incomingClientScanId) {
+      const existing = await ScanLog.findOne({ clientScanId: incomingClientScanId })
+        .select("result")
+        .lean();
+      if (existing) {
+        return res.status(200).json({
+          success: existing.result === "granted",
+          result: "duplicate",
+          message: "Duplicate scan ignored",
+        });
+      }
     }
 
     // Full validation
