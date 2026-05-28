@@ -134,20 +134,34 @@ class QRService {
       const now = new Date();
       const CLOCK_SKEW_MS = 5 * 60 * 1000; // 5 minutes
 
-      if (now < new Date(event.dateStart) - CLOCK_SKEW_MS) {
-        return {
-          valid: false,
-          reason: "not_yet_valid",
-          message: `Event hasn't started yet (starts ${new Date(event.dateStart).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })})`,
-        };
+      // FIX: only enforce date window when BOTH dates are set and valid.
+      // If dateStart/dateEnd is null (QR issued before event dates were configured),
+      // new Date(null) = epoch (1970) which always fails the "event has ended" check.
+      // Skip date validation when dates are not properly set — the pass is considered
+      // valid as long as it's active in the DB.
+      const hasValidStart = event.dateStart && !isNaN(new Date(event.dateStart).getTime());
+      const hasValidEnd = event.dateEnd && !isNaN(new Date(event.dateEnd).getTime());
+
+      if (hasValidStart && hasValidEnd) {
+        const startMs = new Date(event.dateStart).getTime();
+        const endMs = new Date(event.dateEnd).getTime();
+
+        if (now.getTime() < startMs - CLOCK_SKEW_MS) {
+          return {
+            valid: false,
+            reason: "not_yet_valid",
+            message: `Event hasn't started yet (starts ${new Date(event.dateStart).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })})`,
+          };
+        }
+        if (now.getTime() > endMs + CLOCK_SKEW_MS) {
+          return {
+            valid: false,
+            reason: "expired",
+            message: "Event has ended",
+          };
+        }
       }
-      if (now > new Date(event.dateEnd).getTime() + CLOCK_SKEW_MS) {
-        return {
-          valid: false,
-          reason: "expired",
-          message: `Event has ended`,
-        };
-      }
+      // If dates not set yet, date check is skipped — QR is valid
 
       // Step 4: check entry point access
       const epIdStr = epId.toString();
