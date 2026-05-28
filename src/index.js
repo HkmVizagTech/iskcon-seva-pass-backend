@@ -78,6 +78,7 @@ app.use("/api/webhooks", require("./routes/webhooks"));
 app.use("/api/reports", require("./routes/reports"));
 app.use("/api/volunteers", require("./routes/volunteers"));
 app.use("/api/preachers", require("./routes/preachers"));
+app.use("/api/integration", require("./routes/integration"));
 
 // Health check
 app.get("/health", (req, res) => {
@@ -134,6 +135,11 @@ const PORT = process.env.PORT || 5000;
 // ─── Critical env var checks (fail fast in production) ───────────────────────
 if (process.env.NODE_ENV === "production") {
   const required = ["JWT_SECRET", "QR_SECRET_KEY", "MONGODB_URI"];
+  // Optional but logged as warnings if missing
+  const recommended = ["INTEGRATION_API_KEY", "THIRD_PARTY_API_URL", "THIRD_PARTY_API_KEY"];
+  for (const key of recommended) {
+    if (!process.env[key]) console.warn(`⚠️  ${key} not set — third-party integration disabled`);
+  }
   for (const key of required) {
     if (!process.env[key]) {
       console.error(`FATAL: ${key} environment variable is required in production`);

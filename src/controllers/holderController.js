@@ -1,5 +1,6 @@
 // FIX: All requires moved to TOP
 const { resolvePreacherFromString } = require("./preacherController");
+const thirdPartyService = require("../services/thirdPartyService");
 // ─── Helper: normalise phone to 91XXXXXXXXXX format ──────────────────────────
 function normalisePhone(phone) {
   if (!phone) return undefined;
@@ -410,6 +411,14 @@ exports.createHolder = async (req, res) => {
       await qrPass.save();
     }
 
+    // ── Push to third-party system (non-blocking) ──
+    thirdPartyService.pushHolder({
+      holder,
+      qrPass,
+      qrImageBase64: qrImage,
+      event,
+    }).catch((e) => console.error("[ThirdParty] createHolder push failed:", e.message));
+
     res.status(201).json({
       success: true,
       holder,
@@ -812,6 +821,14 @@ async function processSingleRecord(
       }
       await qrPass.save();
     }
+
+    // ── Push to third-party system (non-blocking) ──
+    thirdPartyService.pushHolder({
+      holder,
+      qrPass,
+      qrImageBase64: qrImage,
+      event,
+    }).catch((e) => console.error("[ThirdParty] bulkImport push failed:", e.message));
 
     return {
       success: true,

@@ -25,6 +25,12 @@ const holderSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  source: {
+    type: String,
+    enum: ["admin", "bulk_import", "third_party", "self"],
+    default: "admin",
+  }, // track where this holder was created from
+
   preacher: String,           // free-text name (from CSV import / legacy)
   preacherId: {               // reference to User with role "preacher" (when selected from dropdown)
     type: mongoose.Schema.Types.ObjectId,
