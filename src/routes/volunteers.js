@@ -23,19 +23,18 @@ router.get("/me", protect, async (req, res) => {
 
     if (!volunteer) return res.status(404).json({ error: "Volunteer not found" });
 
-    // Show every assigned station that still has a valid linked event.
-    // We do NOT hide stations just because the event window has passed —
-    // volunteers may scan before/after official times, and admins assign
-    // stations for events with various date configs. Only hide a station if:
-    //   1. The station was explicitly deactivated (isActive === false), or
-    //   2. Its event was deleted (eventId no longer resolves)
-    // Show every assigned station that exists and is active.
-    // We keep stations even if the event didn't fully populate, so volunteers
-    // never lose access to assigned stations.
+    // Only return stations that belong to an event the volunteer is assigned to.
+    // Stations from old/removed events are orphans and should not appear.
+    const assignedEventIds = new Set(
+      (volunteer.assignedEvents || []).map((e) => e.toString())
+    );
+
     const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
       if (!ep || !ep._id) return false;
       if (ep.isActive === false) return false;
-      return true;
+      // Station's event must be in the volunteer's assignedEvents
+      const epEventId = ep.eventId?._id ? ep.eventId._id.toString() : (ep.eventId || "").toString();
+      return assignedEventIds.has(epEventId);
     });
 
     // Build the events list from the stations' events (deduplicated).
@@ -81,6 +80,15 @@ router.get("/me", protect, async (req, res) => {
       ...ev,
       _id: ev._id.toString(),
     }));
+
+    // Background cleanup: if orphaned IDs were found, purge them from the DB
+    const cleanEpIds = activeStations.map((ep) => ep._id);
+    if (cleanEpIds.length < (volunteer.assignedEntryPoints || []).length) {
+      User.updateOne(
+        { _id: volunteer._id },
+        { $set: { assignedEntryPoints: cleanEpIds } }
+      ).catch((err) => console.error("EP cleanup error:", err));
+    }
 
     res.json({
       volunteer: {

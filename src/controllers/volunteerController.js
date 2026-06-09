@@ -299,15 +299,17 @@ exports.volunteerLogin = async (req, res) => {
       { expiresIn: "12h" },
     );
 
-    // FIX: derive active stations directly from each station's own populated event.
-    // A station shows only if it's active AND its event hasn't ended (+24h grace),
-    // or the event has no end date configured yet.
-    // Show every assigned station that exists and is active (lenient — keep even
-    // if event didn't fully populate, so volunteers never lose station access)
+    // Only return stations belonging to the volunteer's assigned events.
+    // Orphan stations from old events are excluded.
+    const assignedEventIds = new Set(
+      (volunteer.assignedEvents || []).map((e) => e.toString())
+    );
+
     const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
       if (!ep || !ep._id) return false;
       if (ep.isActive === false) return false;
-      return true;
+      const epEventId = ep.eventId?._id ? ep.eventId._id.toString() : (ep.eventId || "").toString();
+      return assignedEventIds.has(epEventId);
     });
 
     // Build the events list from the active stations' events (deduplicated)
