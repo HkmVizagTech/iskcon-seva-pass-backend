@@ -132,4 +132,53 @@ router.delete(
   volunteerController.deleteVolunteer,
 );
 
+// TEMP DEBUG: shows raw assignment data + why each station is filtered
+router.get("/me/debug", protect, async (req, res) => {
+  try {
+    const User = require("../models/User");
+    const volunteer = await User.findOne({ _id: req.user._id, role: "volunteer" })
+      .select("-password")
+      .populate({
+        path: "assignedEntryPoints",
+        select: "name stationLabel type _id allowGroupCount eventId isActive",
+        populate: { path: "eventId", select: "name eventCode _id dateStart dateEnd" },
+      });
+
+    if (!volunteer) return res.status(404).json({ error: "Volunteer not found" });
+
+    const now = new Date();
+    const GRACE_MS = 24 * 60 * 60 * 1000;
+
+    const diagnosis = (volunteer.assignedEntryPoints || []).map((ep) => {
+      if (!ep) return { station: "NULL ENTRY POINT", shown: false, reason: "entry point is null" };
+      const ev = ep.eventId;
+      let shown = true, reason = "shown";
+      if (ep.isActive === false) { shown = false; reason = "station.isActive is false"; }
+      else if (!ev) { shown = false; reason = "station has NO linked event (eventId null/not found)"; }
+      else if (ev.dateEnd && new Date(ev.dateEnd).getTime() + GRACE_MS <= now.getTime()) {
+        shown = false; reason = `event ended on ${ev.dateEnd} (past + 24h grace)`;
+      }
+      return {
+        station: ep.stationLabel || ep.name,
+        stationId: ep._id?.toString(),
+        isActive: ep.isActive,
+        event: ev ? ev.name : "NO EVENT",
+        eventCode: ev?.eventCode,
+        eventEnd: ev?.dateEnd || "not set",
+        shown,
+        reason,
+      };
+    });
+
+    res.json({
+      volunteerName: volunteer.name,
+      totalAssigned: volunteer.assignedEntryPoints?.length || 0,
+      now: now.toISOString(),
+      stations: diagnosis,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;
