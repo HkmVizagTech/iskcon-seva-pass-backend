@@ -93,7 +93,7 @@ app.get("/health", (req, res) => {
 
 // Version — used to verify Railway deployed the latest commit
 app.get("/version", (req, res) => {
-  res.json({ build: "v3-stable", time: new Date().toISOString() });
+  res.json({ build: "v3-debug", time: new Date().toISOString() });
 });
 
 // Test route
@@ -107,6 +107,45 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({
     error: err.message || "Internal server error",
   });
+});
+
+// Diagnostic endpoint — no auth, keyed. Remove after debugging.
+app.get("/api/debug/volunteer", async (req, res) => {
+  if (req.query.key !== "hkm2026") return res.status(403).json({ error: "bad key" });
+  try {
+    const User = require("./models/User");
+    const EntryPoint = require("./models/EntryPoint");
+    const { email, phone } = req.query;
+    const query = { role: "volunteer" };
+    if (email) query.email = email;
+    else if (phone) {
+      const digits = String(phone).replace(/[\+\s\-\(\)]/g, "");
+      const normPhone = digits.length === 10 ? "91" + digits : digits;
+      query.$or = [{ phone: normPhone }, { phone: digits }, { phone }];
+    } else {
+      // List all volunteers briefly
+      const all = await User.find({ role: "volunteer" }).select("name email phone assignedEntryPoints assignedEvents");
+      return res.json({ volunteers: all });
+    }
+    const vol = await User.findOne(query).select("-password")
+      .populate({ path: "assignedEntryPoints", populate: { path: "eventId", select: "name eventCode" } })
+      .populate("assignedEvents", "name eventCode");
+    if (!vol) return res.json({ error: "not found", query });
+    // Also check raw IDs vs what populated
+    const raw = await User.findOne(query).select("assignedEntryPoints assignedEvents").lean();
+    const rawEpIds = raw?.assignedEntryPoints || [];
+    const resolvedEps = await EntryPoint.find({ _id: { $in: rawEpIds } }).select("name stationLabel eventId isActive");
+    res.json({
+      volunteer: { id: vol._id, name: vol.name, email: vol.email, phone: vol.phone },
+      rawEpIds,
+      rawEventIds: raw?.assignedEvents || [],
+      resolvedEntryPoints: resolvedEps,
+      populatedEntryPoints: vol.assignedEntryPoints,
+      populatedEvents: vol.assignedEvents,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 404 handler
