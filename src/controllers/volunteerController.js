@@ -83,7 +83,7 @@ exports.getVolunteers = async (req, res) => {
 
     const volunteersRaw = await User.find(query)
       .select("-password")
-      .populate("assignedEvents", "name eventCode")
+      .populate("assignedEvents", "name eventCode venue")
       .populate({
         path: "assignedEntryPoints",
         select: "name stationLabel type allowGroupCount eventId",

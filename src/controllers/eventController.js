@@ -7,6 +7,7 @@ const HolderType = require("../models/HolderType");
 const Holder = require("../models/Holder");
 const ScanLog = require("../models/ScanLog");
 const FailedImport = require("../models/FailedImport");
+const User = require("../models/User");
 
 exports.createEvent = async (req, res) => {
   try {
@@ -284,6 +285,13 @@ exports.deleteEvent = async (req, res) => {
       ScanLog.deleteMany({ epId: { $in: epIds } }),
       ScanLog.deleteMany({ holderId: { $in: holderIds } }),
       FailedImport.deleteMany({ eventId }),
+      // FIX: clean volunteer assignments — remove this event's entry points and event ID
+      // from every volunteer. Without this, deleted-event stations become orphans that
+      // accumulate in volunteer records and show up as phantom stations in the scanner.
+      User.updateMany(
+        { assignedEntryPoints: { $in: epIds } },
+        { $pull: { assignedEntryPoints: { $in: epIds }, assignedEvents: event._id } }
+      ),
     ]);
 
     res.json({
