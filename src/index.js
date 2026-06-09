@@ -93,7 +93,7 @@ app.get("/health", (req, res) => {
 
 // Version — used to verify Railway deployed the latest commit
 app.get("/version", (req, res) => {
-  res.json({ build: "v4-clean-stations", time: new Date().toISOString() });
+  res.json({ build: "v4-cleanup", time: new Date().toISOString() });
 });
 
 // Test route
@@ -135,14 +135,49 @@ app.get("/api/debug/volunteer", async (req, res) => {
     const raw = await User.findOne(query).select("assignedEntryPoints assignedEvents").lean();
     const rawEpIds = raw?.assignedEntryPoints || [];
     const resolvedEps = await EntryPoint.find({ _id: { $in: rawEpIds } }).select("name stationLabel eventId isActive");
+
+    // Simulate what /me and login would now return (filtered by assignedEvents)
+    const assignedEventIds = new Set((raw?.assignedEvents || []).map(e => e.toString()));
+    const filteredStations = resolvedEps.filter(ep => assignedEventIds.has(ep.eventId.toString()));
+
     res.json({
       volunteer: { id: vol._id, name: vol.name, email: vol.email, phone: vol.phone },
       rawEpIds,
       rawEventIds: raw?.assignedEvents || [],
       resolvedEntryPoints: resolvedEps,
-      populatedEntryPoints: vol.assignedEntryPoints,
+      filteredStations_whatScannerGets: filteredStations,
       populatedEvents: vol.assignedEvents,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// One-shot cleanup: purge orphaned entry point IDs from ALL volunteers
+app.post("/api/debug/cleanup-volunteers", async (req, res) => {
+  if (req.query.key !== "hkm2026") return res.status(403).json({ error: "bad key" });
+  try {
+    const User = require("./models/User");
+    const EntryPoint = require("./models/EntryPoint");
+    const volunteers = await User.find({ role: "volunteer" }).select("name assignedEntryPoints assignedEvents");
+    const results = [];
+    for (const vol of volunteers) {
+      const rawCount = (vol.assignedEntryPoints || []).length;
+      const assignedEventIds = new Set((vol.assignedEvents || []).map(e => e.toString()));
+      // Find which entry points actually exist AND belong to an assigned event
+      const validEps = await EntryPoint.find({
+        _id: { $in: vol.assignedEntryPoints || [] },
+        eventId: { $in: Array.from(assignedEventIds) },
+      }).select("_id");
+      const cleanIds = validEps.map(ep => ep._id);
+      if (cleanIds.length < rawCount) {
+        await User.updateOne({ _id: vol._id }, { $set: { assignedEntryPoints: cleanIds } });
+        results.push({ name: vol.name, before: rawCount, after: cleanIds.length, cleaned: true });
+      } else {
+        results.push({ name: vol.name, count: rawCount, cleaned: false });
+      }
+    }
+    res.json({ results });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
