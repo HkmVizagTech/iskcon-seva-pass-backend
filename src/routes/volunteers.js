@@ -129,4 +129,35 @@ router.delete(
   volunteerController.deleteVolunteer,
 );
 
+// TEMP DEBUG — remove after diagnosis
+router.get("/me/debug", protect, async (req, res) => {
+  try {
+    const User = require("../models/User");
+    const v = await User.findOne({ _id: req.user._id, role: "volunteer" })
+      .select("-password")
+      .populate({
+        path: "assignedEntryPoints",
+        select: "name stationLabel _id eventId isActive",
+        populate: { path: "eventId", select: "name eventCode _id" },
+      });
+    if (!v) return res.status(404).json({ error: "not found", userId: req.user._id });
+    res.json({
+      volunteerId: v._id.toString(),
+      name: v.name,
+      email: v.email,
+      rawAssignedCount: v.assignedEntryPoints?.length || 0,
+      stations: (v.assignedEntryPoints || []).map((ep) => ({
+        id: ep?._id?.toString(),
+        label: ep?.stationLabel,
+        isActive: ep?.isActive,
+        eventResolved: !!ep?.eventId,
+        eventName: ep?.eventId?.name || "EVENT NOT FOUND",
+        rawEventId: ep?.eventId?._id?.toString() || ep?.eventId?.toString() || "null",
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
