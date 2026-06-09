@@ -153,6 +153,55 @@ app.get("/api/debug/volunteer", async (req, res) => {
   }
 });
 
+// Scan diagnostic — test what validateQR returns for a specific QR pass
+app.get("/api/debug/test-scan", async (req, res) => {
+  if (req.query.key !== "hkm2026") return res.status(403).json({ error: "bad key" });
+  try {
+    const QRPass = require("./models/QRPass");
+    const EntryPoint = require("./models/EntryPoint");
+    const Event = require("./models/Event");
+    const qrService = require("./services/qrService");
+    
+    // Find the most recent QR pass
+    const latestPass = await QRPass.findOne().sort({ createdAt: -1 })
+      .populate("holderId", "name phone")
+      .populate("eventId", "name eventCode dateStart dateEnd");
+    
+    if (!latestPass) return res.json({ error: "No QR passes found" });
+    
+    // Find entry points for this event
+    const eps = await EntryPoint.find({ eventId: latestPass.eventId._id }).select("name stationLabel type");
+    
+    // Try to validate the QR token
+    let validationResult = null;
+    if (latestPass.qrToken && eps.length > 0) {
+      validationResult = await qrService.validateQR(latestPass.qrToken, eps[0]._id.toString());
+    }
+    
+    res.json({
+      latestPass: {
+        qrId: latestPass.qrId,
+        status: latestPass.status,
+        hasQrToken: !!latestPass.qrToken,
+        qrTokenLength: latestPass.qrToken?.length || 0,
+        holderName: latestPass.holderId?.name,
+        event: latestPass.eventId?.name,
+        eventCode: latestPass.eventId?.eventCode,
+        eventDates: {
+          start: latestPass.eventId?.dateStart,
+          end: latestPass.eventId?.dateEnd,
+        },
+        entryPoints: latestPass.entryPoints,
+        createdAt: latestPass.createdAt,
+      },
+      eventEntryPoints: eps,
+      validationResult,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 // One-shot cleanup: purge orphaned entry point IDs from ALL volunteers
 app.post("/api/debug/cleanup-volunteers", async (req, res) => {
   if (req.query.key !== "hkm2026") return res.status(403).json({ error: "bad key" });
