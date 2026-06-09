@@ -23,18 +23,16 @@ exports.createVolunteer = async (req, res) => {
       }
     }
 
-    // Validate entry points belong to assigned events
+    // FIX: keep ONLY entry points that exist AND belong to an assigned event
+    let validEpIds = [];
     if (assignedEntryPointIds && assignedEntryPointIds.length > 0) {
+      const uniqueIds = [...new Set(assignedEntryPointIds.map(String))];
+      const eventIds = (assignedEventIds || []).map(String);
       const entryPoints = await EntryPoint.find({
-        _id: { $in: assignedEntryPointIds },
-        eventId: { $in: assignedEventIds || [] },
-      });
-
-      if (entryPoints.length !== assignedEntryPointIds.length) {
-        return res.status(400).json({
-          error: "Some entry points don't belong to the assigned events",
-        });
-      }
+        _id: { $in: uniqueIds },
+        ...(eventIds.length > 0 ? { eventId: { $in: eventIds } } : {}),
+      }).select("_id");
+      validEpIds = entryPoints.map((ep) => ep._id);
     }
 
     const volunteer = await User.create({
@@ -44,9 +42,7 @@ exports.createVolunteer = async (req, res) => {
       password,
       role: "volunteer",
       assignedEvents: assignedEventIds || [],
-      assignedEntryPoints: assignedEntryPointIds
-        ? [...new Set(assignedEntryPointIds.map(String))]  // FIX: dedup on save
-        : [],
+      assignedEntryPoints: validEpIds,
       assignedVenues: assignedVenues || [],
     });
 
@@ -85,11 +81,35 @@ exports.getVolunteers = async (req, res) => {
       ];
     }
 
-    const volunteers = await User.find(query)
+    const volunteersRaw = await User.find(query)
       .select("-password")
       .populate("assignedEvents", "name eventCode")
-      .populate("assignedEntryPoints", "name stationLabel type allowGroupCount")
+      .populate({
+        path: "assignedEntryPoints",
+        select: "name stationLabel type allowGroupCount eventId",
+        populate: { path: "eventId", select: "_id name eventCode" },
+      })
       .sort({ createdAt: -1 });
+
+    // FIX: clean the displayed stations — only those with a valid event,
+    // and dedup by _id. This removes orphaned/duplicate IDs from old data
+    // so the list view matches what the edit modal shows.
+    const volunteers = volunteersRaw.map((v) => {
+      const obj = v.toObject();
+      const assignedEventIds = new Set((obj.assignedEvents || []).map((e) => (e._id || e).toString()));
+      const seen = new Set();
+      obj.assignedEntryPoints = (obj.assignedEntryPoints || []).filter((ep) => {
+        if (!ep || !ep._id) return false;
+        const id = ep._id.toString();
+        if (seen.has(id)) return false;        // dedup
+        seen.add(id);
+        if (!ep.eventId) return false;          // orphaned (event deleted)
+        // keep only if its event is one the volunteer is assigned to
+        const epEventId = (ep.eventId._id || ep.eventId).toString();
+        return assignedEventIds.has(epEventId);
+      });
+      return obj;
+    });
 
     res.json({ volunteers });
   } catch (error) {
@@ -139,8 +159,25 @@ exports.updateVolunteer = async (req, res) => {
     if (phone) updateData.phone = phone;
     if (typeof isActive === "boolean") updateData.isActive = isActive;
     if (assignedEventIds) updateData.assignedEvents = assignedEventIds;
-    if (assignedEntryPointIds)
-      updateData.assignedEntryPoints = [...new Set(assignedEntryPointIds.map(String))]; // FIX: dedup
+
+    if (assignedEntryPointIds) {
+      // FIX: validate entry points against the DB. Keep ONLY entry points that:
+      //   1. Actually exist in the database (not deleted/orphaned)
+      //   2. Belong to one of the assigned events
+      // This purges stale/duplicate IDs that accumulated from deleted events
+      // or old re-assignments — the cause of "12 stations showing for 1 event".
+      const EntryPoint = require("../models/EntryPoint");
+      const uniqueIds = [...new Set(assignedEntryPointIds.map(String))];
+      const eventIds = (assignedEventIds || []).map(String);
+
+      const validEps = await EntryPoint.find({
+        _id: { $in: uniqueIds },
+        ...(eventIds.length > 0 ? { eventId: { $in: eventIds } } : {}),
+      }).select("_id");
+
+      updateData.assignedEntryPoints = validEps.map((ep) => ep._id);
+    }
+
     if (req.body.assignedVenues !== undefined)
       updateData.assignedVenues = req.body.assignedVenues;
 
