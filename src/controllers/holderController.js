@@ -384,12 +384,15 @@ exports.createHolder = async (req, res) => {
       deliveryMethod: deliveryMethod || "none",
     });
 
+    let deliveryStatus = "pending";
+    let deliveryError = null;
+
     if (deliveryMethod && deliveryMethod !== "none") {
       const passDetails = {
         entryPoints: finalEntryPoints.map((ep) => ep.name || ep.stationLabel),
         qrId: qrId,
-        validFrom: validFrom.toISOString(),
-        validUntil: validUntil.toISOString(),
+        validFrom: validFrom ? validFrom.toISOString() : "",
+        validUntil: validUntil ? validUntil.toISOString() : "",
         venue: venueName || event.venue?.[0]?.name || "",
       };
 
@@ -405,8 +408,12 @@ exports.createHolder = async (req, res) => {
         }
         qrPass.deliveryStatus = "sent";
         qrPass.deliveredAt = new Date();
+        deliveryStatus = "sent";
       } catch (error) {
+        console.error("WhatsApp send error:", error.message, error.response?.data);
         qrPass.deliveryStatus = "failed";
+        deliveryStatus = "failed";
+        deliveryError = error.message;
       }
       await qrPass.save();
     }
@@ -427,6 +434,8 @@ exports.createHolder = async (req, res) => {
         qrImage,
         validFrom,
         validUntil,
+        deliveryStatus,
+        deliveryError,
       },
     });
   } catch (error) {
