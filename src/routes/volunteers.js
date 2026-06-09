@@ -134,4 +134,74 @@ router.delete(
   volunteerController.deleteVolunteer,
 );
 
+// DIAGNOSTIC — open in browser: /api/volunteers/diagnose?key=hkmvizag2026&q=mkgd@hkmvizag.org
+router.get("/diagnose", async (req, res) => {
+  try {
+    if (req.query.key !== "hkmvizag2026") {
+      return res.status(403).json({ error: "bad key" });
+    }
+    const User = require("../models/User");
+    const EntryPoint = require("../models/EntryPoint");
+    const Event = require("../models/Event");
+
+    const q = (req.query.q || "").toString().trim();
+    if (!q) return res.json({ error: "pass ?q=email-or-phone" });
+
+    // Find the volunteer by email or phone (any format)
+    const digits = q.replace(/[\+\s\-\(\)]/g, "");
+    const norm = digits.length === 10 ? "91" + digits : digits;
+    const volunteer = await User.findOne({
+      role: "volunteer",
+      $or: [
+        { email: q.toLowerCase() },
+        { phone: norm }, { phone: digits }, { phone: q },
+      ],
+    }).select("-password").lean();
+
+    if (!volunteer) {
+      // List all volunteers so we can see what exists
+      const all = await User.find({ role: "volunteer" })
+        .select("name email phone assignedEntryPoints assignedEvents").lean();
+      return res.json({
+        found: false,
+        searchedFor: q,
+        allVolunteers: all.map((v) => ({
+          name: v.name, email: v.email, phone: v.phone,
+          epCount: v.assignedEntryPoints?.length || 0,
+          eventCount: v.assignedEvents?.length || 0,
+        })),
+      });
+    }
+
+    // For each assigned EP id, look it up directly and check its event
+    const epIds = (volunteer.assignedEntryPoints || []).map((x) => x.toString());
+    const eps = await EntryPoint.find({ _id: { $in: epIds } })
+      .select("name stationLabel eventId isActive").lean();
+    const foundEpIds = new Set(eps.map((e) => e._id.toString()));
+
+    // Check which event each EP points to and whether that event exists
+    const eventIds = [...new Set(eps.map((e) => e.eventId?.toString()).filter(Boolean))];
+    const events = await Event.find({ _id: { $in: eventIds } }).select("name eventCode").lean();
+    const eventSet = new Set(events.map((e) => e._id.toString()));
+
+    res.json({
+      found: true,
+      volunteer: { id: volunteer._id, name: volunteer.name, email: volunteer.email, phone: volunteer.phone, isActive: volunteer.isActive },
+      assignedEntryPointIds_inUserRecord: epIds.length,
+      entryPointsThatActuallyExist: eps.length,
+      missingEntryPointIds: epIds.filter((id) => !foundEpIds.has(id)),
+      assignedEventIds_inUserRecord: (volunteer.assignedEvents || []).map((x) => x.toString()),
+      stationDetail: eps.map((ep) => ({
+        label: ep.stationLabel || ep.name,
+        isActive: ep.isActive,
+        eventId: ep.eventId?.toString() || "NULL",
+        eventExists: ep.eventId ? eventSet.has(ep.eventId.toString()) : false,
+        eventName: events.find((e) => e._id.toString() === ep.eventId?.toString())?.name || "EVENT MISSING",
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack });
+  }
+});
+
 module.exports = router;
