@@ -231,8 +231,8 @@ exports.volunteerLogin = async (req, res) => {
     }
 
     const volunteer = await User.findOne(query)
-      .populate("assignedEntryPoints", "name stationLabel type _id allowGroupCount")
-      .populate("assignedEvents", "name eventCode _id");
+      .populate("assignedEntryPoints", "name stationLabel type _id allowGroupCount eventId")
+      .populate("assignedEvents", "name eventCode _id dateStart dateEnd");
 
     if (!volunteer) {
       return res.status(401).json({ error: "Invalid credentials" });
@@ -257,14 +257,39 @@ exports.volunteerLogin = async (req, res) => {
       { expiresIn: "12h" },
     );
 
+    // FIX: Only return entry points for ACTIVE or UPCOMING events.
+    // Previously returned all assigned stations including past events,
+    // so a volunteer would see stations from KKD 2024 alongside KKD 2025.
+    const now = new Date();
+    const activeEventIds = new Set(
+      (volunteer.assignedEvents || [])
+        .filter((ev) => {
+          // Include if event has no end date yet (dates not configured)
+          if (!ev.dateEnd) return true;
+          // Include if event hasn't ended yet (active or upcoming)
+          return new Date(ev.dateEnd).getTime() + 24 * 60 * 60 * 1000 > now.getTime();
+        })
+        .map((ev) => ev._id.toString()),
+    );
+
+    const filteredStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
+      // Keep stations whose eventId is in the active/upcoming set
+      const epEventId = ep.eventId?.toString() || "";
+      return activeEventIds.has(epEventId);
+    });
+
+    const filteredEvents = (volunteer.assignedEvents || []).filter((ev) =>
+      activeEventIds.has(ev._id.toString()),
+    );
+
     res.json({
       success: true,
       token,
       volunteer: {
         id: volunteer._id,
         name: volunteer.name,
-        assignedEntryPoints: volunteer.assignedEntryPoints,
-        assignedEvents: volunteer.assignedEvents,
+        assignedEntryPoints: filteredStations,
+        assignedEvents: filteredEvents,
       },
     });
   } catch (error) {

@@ -17,12 +17,28 @@ router.get("/me", protect, async (req, res) => {
 
     if (!volunteer) return res.status(404).json({ error: "Volunteer not found" });
 
+    // FIX: same filter as volunteerLogin — only active/upcoming event stations
+    const now = new Date();
+    const activeEventIds = new Set(
+      (volunteer.assignedEvents || [])
+        .filter((ev) => !ev.dateEnd || new Date(ev.dateEnd).getTime() + 86400000 > now.getTime())
+        .map((ev) => ev._id.toString()),
+    );
+
+    const filteredStations = (volunteer.assignedEntryPoints || []).filter((ep) =>
+      activeEventIds.has(ep.eventId?.toString() || ""),
+    );
+
+    const filteredEvents = (volunteer.assignedEvents || []).filter((ev) =>
+      activeEventIds.has(ev._id.toString()),
+    );
+
     res.json({
       volunteer: {
         id: volunteer._id,
         name: volunteer.name,
-        assignedEntryPoints: volunteer.assignedEntryPoints,
-        assignedEvents: volunteer.assignedEvents,
+        assignedEntryPoints: filteredStations,
+        assignedEvents: filteredEvents,
       },
     });
   } catch (error) {
