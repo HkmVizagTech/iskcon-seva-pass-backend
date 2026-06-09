@@ -265,15 +265,11 @@ exports.volunteerLogin = async (req, res) => {
     // FIX: derive active stations directly from each station's own populated event.
     // A station shows only if it's active AND its event hasn't ended (+24h grace),
     // or the event has no end date configured yet.
-    const now = new Date();
-    const GRACE_MS = 24 * 60 * 60 * 1000;
-
+    // Show every assigned station with a valid linked event (see /me route note)
     const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
       if (!ep || ep.isActive === false) return false;
-      const ev = ep.eventId;
-      if (!ev) return false;
-      if (!ev.dateEnd) return true;
-      return new Date(ev.dateEnd).getTime() + GRACE_MS > now.getTime();
+      if (!ep.eventId) return false;
+      return true;
     });
 
     // Build the events list from the active stations' events (deduplicated)

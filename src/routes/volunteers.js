@@ -23,19 +23,16 @@ router.get("/me", protect, async (req, res) => {
 
     if (!volunteer) return res.status(404).json({ error: "Volunteer not found" });
 
-    const now = new Date();
-    const GRACE_MS = 24 * 60 * 60 * 1000; // 24h grace after event ends
-
-    // FIX: derive active stations directly from each station's own populated event.
-    // Don't depend on assignedEvents being in sync. A station shows only if:
-    //   1. The station itself is active (isActive !== false)
-    //   2. Its event exists AND (has no end date yet OR hasn't ended + grace)
+    // Show every assigned station that still has a valid linked event.
+    // We do NOT hide stations just because the event window has passed —
+    // volunteers may scan before/after official times, and admins assign
+    // stations for events with various date configs. Only hide a station if:
+    //   1. The station was explicitly deactivated (isActive === false), or
+    //   2. Its event was deleted (eventId no longer resolves)
     const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
       if (!ep || ep.isActive === false) return false;
-      const ev = ep.eventId;
-      if (!ev) return false; // orphaned station — hide it
-      if (!ev.dateEnd) return true; // dates not configured yet — keep
-      return new Date(ev.dateEnd).getTime() + GRACE_MS > now.getTime();
+      if (!ep.eventId) return false; // event deleted — orphaned station
+      return true;
     });
 
     // Build the events list from the active stations' events (deduplicated)
@@ -131,54 +128,5 @@ router.delete(
   authorize("super_admin"),
   volunteerController.deleteVolunteer,
 );
-
-// TEMP DEBUG: shows raw assignment data + why each station is filtered
-router.get("/me/debug", protect, async (req, res) => {
-  try {
-    const User = require("../models/User");
-    const volunteer = await User.findOne({ _id: req.user._id, role: "volunteer" })
-      .select("-password")
-      .populate({
-        path: "assignedEntryPoints",
-        select: "name stationLabel type _id allowGroupCount eventId isActive",
-        populate: { path: "eventId", select: "name eventCode _id dateStart dateEnd" },
-      });
-
-    if (!volunteer) return res.status(404).json({ error: "Volunteer not found" });
-
-    const now = new Date();
-    const GRACE_MS = 24 * 60 * 60 * 1000;
-
-    const diagnosis = (volunteer.assignedEntryPoints || []).map((ep) => {
-      if (!ep) return { station: "NULL ENTRY POINT", shown: false, reason: "entry point is null" };
-      const ev = ep.eventId;
-      let shown = true, reason = "shown";
-      if (ep.isActive === false) { shown = false; reason = "station.isActive is false"; }
-      else if (!ev) { shown = false; reason = "station has NO linked event (eventId null/not found)"; }
-      else if (ev.dateEnd && new Date(ev.dateEnd).getTime() + GRACE_MS <= now.getTime()) {
-        shown = false; reason = `event ended on ${ev.dateEnd} (past + 24h grace)`;
-      }
-      return {
-        station: ep.stationLabel || ep.name,
-        stationId: ep._id?.toString(),
-        isActive: ep.isActive,
-        event: ev ? ev.name : "NO EVENT",
-        eventCode: ev?.eventCode,
-        eventEnd: ev?.dateEnd || "not set",
-        shown,
-        reason,
-      };
-    });
-
-    res.json({
-      volunteerName: volunteer.name,
-      totalAssigned: volunteer.assignedEntryPoints?.length || 0,
-      now: now.toISOString(),
-      stations: diagnosis,
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
 module.exports = router;
