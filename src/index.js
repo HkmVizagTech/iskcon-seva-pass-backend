@@ -174,16 +174,16 @@ app.get("/api/debug/test-scan", async (req, res) => {
     
     // Try to validate the QR token
     let validationResult = null;
-    if (latestPass.qrToken && eps.length > 0) {
-      validationResult = await qrService.validateQR(latestPass.qrToken, eps[0]._id.toString());
+    if (latestPass.payloadSigned && eps.length > 0) {
+      validationResult = await qrService.validateQR(latestPass.payloadSigned, eps[0]._id.toString());
     }
     
     res.json({
       latestPass: {
         qrId: latestPass.qrId,
         status: latestPass.status,
-        hasQrToken: !!latestPass.qrToken,
-        qrTokenLength: latestPass.qrToken?.length || 0,
+        hasPayloadSigned: !!latestPass.payloadSigned,
+        payloadSignedLength: latestPass.payloadSigned?.length || 0,
         holderName: latestPass.holderId?.name,
         event: latestPass.eventId?.name,
         eventCode: latestPass.eventId?.eventCode,
