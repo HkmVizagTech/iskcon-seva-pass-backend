@@ -89,10 +89,11 @@ app.get("/health", (req, res) => {
       mongoose.connection.readyState === 1 ? "connected" : "disconnected",
     redis: redis && redis.status === "ready" ? "connected" : "disconnected",
   });
-
-app.get("/version", (req, res) => {
-  res.json({ build: "scanner-stations-fix-v2", deployedCommit: "DEPLOY_MARKER", time: new Date().toISOString() });
 });
+
+// Version — used to verify Railway deployed the latest commit
+app.get("/version", (req, res) => {
+  res.json({ build: "v3-stable", time: new Date().toISOString() });
 });
 
 // Test route
