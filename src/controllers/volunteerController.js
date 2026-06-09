@@ -298,24 +298,29 @@ exports.volunteerLogin = async (req, res) => {
         return true;
       })
       .map((ep) => ({
-        _id: ep._id,
+        _id: ep._id.toString(),
         name: ep.name,
         stationLabel: ep.stationLabel,
         type: ep.type,
         allowGroupCount: ep.allowGroupCount,
-        eventId: ep.eventId?._id || ep.eventId,
+        eventId: (ep.eventId?._id || ep.eventId).toString(),  // ALWAYS plain string
         eventName: ep.eventId?.name || "",
         eventCode: ep.eventId?.eventCode || "",
       }));
+
+    const eventsForScanner = Array.from(eventMap.values()).map((ev) => ({
+      ...ev,
+      _id: ev._id.toString(),
+    }));
 
     res.json({
       success: true,
       token,
       volunteer: {
-        id: volunteer._id,
+        id: volunteer._id.toString(),
         name: volunteer.name,
         assignedEntryPoints: stationsForScanner,
-        assignedEvents: Array.from(eventMap.values()),
+        assignedEvents: eventsForScanner,
       },
     });
   } catch (error) {

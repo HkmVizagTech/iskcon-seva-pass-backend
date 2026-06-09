@@ -64,22 +64,28 @@ router.get("/me", protect, async (req, res) => {
         return true;
       })
       .map((ep) => ({
-        _id: ep._id,
+        _id: ep._id.toString(),
         name: ep.name,
         stationLabel: ep.stationLabel,
         type: ep.type,
         allowGroupCount: ep.allowGroupCount,
-        eventId: ep.eventId?._id || ep.eventId,
-        eventName: ep.eventId?.name || "",       // FIX: include event name for display
+        eventId: (ep.eventId?._id || ep.eventId).toString(),  // ALWAYS a plain string
+        eventName: ep.eventId?.name || "",
         eventCode: ep.eventId?.eventCode || "",
       }));
 
+    // Also stringify all event _ids
+    const eventsForScanner = Array.from(eventMap.values()).map((ev) => ({
+      ...ev,
+      _id: ev._id.toString(),
+    }));
+
     res.json({
       volunteer: {
-        id: volunteer._id,
+        id: volunteer._id.toString(),
         name: volunteer.name,
         assignedEntryPoints: stationsForScanner,
-        assignedEvents: Array.from(eventMap.values()),
+        assignedEvents: eventsForScanner,
       },
     });
   } catch (error) {
