@@ -29,23 +29,28 @@ router.get("/me", protect, async (req, res) => {
     // stations for events with various date configs. Only hide a station if:
     //   1. The station was explicitly deactivated (isActive === false), or
     //   2. Its event was deleted (eventId no longer resolves)
+    // Show every assigned station that exists and is active.
+    // We keep stations even if the event didn't fully populate, so volunteers
+    // never lose access to assigned stations.
     const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
-      if (!ep || ep.isActive === false) return false;
-      if (!ep.eventId) return false; // event deleted — orphaned station
+      if (!ep || !ep._id) return false;
+      if (ep.isActive === false) return false;
       return true;
     });
 
-    // Build the events list from the active stations' events (deduplicated)
+    // Build the events list from the stations' events (deduplicated).
+    // If a station's event didn't resolve, group it under a placeholder.
     const eventMap = new Map();
     for (const ep of activeStations) {
       const ev = ep.eventId;
-      if (ev && !eventMap.has(ev._id.toString())) {
-        eventMap.set(ev._id.toString(), {
-          _id: ev._id,
-          name: ev.name,
-          eventCode: ev.eventCode,
-          dateStart: ev.dateStart,
-          dateEnd: ev.dateEnd,
+      const evId = ev?._id ? ev._id.toString() : "unknown";
+      if (!eventMap.has(evId)) {
+        eventMap.set(evId, {
+          _id: evId,
+          name: ev?.name || "Event",
+          eventCode: ev?.eventCode || "",
+          dateStart: ev?.dateStart,
+          dateEnd: ev?.dateEnd,
         });
       }
     }
@@ -66,7 +71,7 @@ router.get("/me", protect, async (req, res) => {
         stationLabel: ep.stationLabel,
         type: ep.type,
         allowGroupCount: ep.allowGroupCount,
-        eventId: (ep.eventId?._id || ep.eventId).toString(),  // ALWAYS a plain string
+        eventId: (ep.eventId?._id ? ep.eventId._id.toString() : "unknown"),  // plain string, fallback
         eventName: ep.eventId?.name || "",
         eventCode: ep.eventId?.eventCode || "",
       }));
@@ -128,36 +133,5 @@ router.delete(
   authorize("super_admin"),
   volunteerController.deleteVolunteer,
 );
-
-// TEMP DEBUG — remove after diagnosis
-router.get("/me/debug", protect, async (req, res) => {
-  try {
-    const User = require("../models/User");
-    const v = await User.findOne({ _id: req.user._id, role: "volunteer" })
-      .select("-password")
-      .populate({
-        path: "assignedEntryPoints",
-        select: "name stationLabel _id eventId isActive",
-        populate: { path: "eventId", select: "name eventCode _id" },
-      });
-    if (!v) return res.status(404).json({ error: "not found", userId: req.user._id });
-    res.json({
-      volunteerId: v._id.toString(),
-      name: v.name,
-      email: v.email,
-      rawAssignedCount: v.assignedEntryPoints?.length || 0,
-      stations: (v.assignedEntryPoints || []).map((ep) => ({
-        id: ep?._id?.toString(),
-        label: ep?.stationLabel,
-        isActive: ep?.isActive,
-        eventResolved: !!ep?.eventId,
-        eventName: ep?.eventId?.name || "EVENT NOT FOUND",
-        rawEventId: ep?.eventId?._id?.toString() || ep?.eventId?.toString() || "null",
-      })),
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 module.exports = router;

@@ -302,10 +302,11 @@ exports.volunteerLogin = async (req, res) => {
     // FIX: derive active stations directly from each station's own populated event.
     // A station shows only if it's active AND its event hasn't ended (+24h grace),
     // or the event has no end date configured yet.
-    // Show every assigned station with a valid linked event (see /me route note)
+    // Show every assigned station that exists and is active (lenient — keep even
+    // if event didn't fully populate, so volunteers never lose station access)
     const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
-      if (!ep || ep.isActive === false) return false;
-      if (!ep.eventId) return false;
+      if (!ep || !ep._id) return false;
+      if (ep.isActive === false) return false;
       return true;
     });
 
@@ -313,10 +314,11 @@ exports.volunteerLogin = async (req, res) => {
     const eventMap = new Map();
     for (const ep of activeStations) {
       const ev = ep.eventId;
-      if (ev && !eventMap.has(ev._id.toString())) {
-        eventMap.set(ev._id.toString(), {
-          _id: ev._id, name: ev.name, eventCode: ev.eventCode,
-          dateStart: ev.dateStart, dateEnd: ev.dateEnd,
+      const evId = ev?._id ? ev._id.toString() : "unknown";
+      if (!eventMap.has(evId)) {
+        eventMap.set(evId, {
+          _id: evId, name: ev?.name || "Event", eventCode: ev?.eventCode || "",
+          dateStart: ev?.dateStart, dateEnd: ev?.dateEnd,
         });
       }
     }
