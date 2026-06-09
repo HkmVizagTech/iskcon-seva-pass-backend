@@ -10,38 +10,69 @@ router.post("/login", volunteerController.volunteerLogin);
 router.get("/me", protect, async (req, res) => {
   try {
     const User = require("../models/User");
+    const Event = require("../models/Event");
+    const EntryPoint = require("../models/EntryPoint");
+
     const volunteer = await User.findOne({ _id: req.user._id, role: "volunteer" })
       .select("-password")
-      .populate("assignedEntryPoints", "name stationLabel type _id allowGroupCount eventId")
-      .populate("assignedEvents", "name eventCode _id dateStart dateEnd");
+      .populate({
+        path: "assignedEntryPoints",
+        select: "name stationLabel type _id allowGroupCount eventId isActive",
+        populate: { path: "eventId", select: "name eventCode _id dateStart dateEnd" },
+      });
 
     if (!volunteer) return res.status(404).json({ error: "Volunteer not found" });
 
-    // FIX: same filter as volunteerLogin — only active/upcoming event stations
     const now = new Date();
-    const activeEventIds = new Set(
-      (volunteer.assignedEvents || [])
-        .filter((ev) => !ev.dateEnd || new Date(ev.dateEnd).getTime() + 86400000 > now.getTime())
-        .map((ev) => ev._id.toString()),
-    );
+    const GRACE_MS = 24 * 60 * 60 * 1000; // 24h grace after event ends
 
-    const filteredStations = (volunteer.assignedEntryPoints || []).filter((ep) =>
-      activeEventIds.has(ep.eventId?.toString() || ""),
-    );
+    // FIX: derive active stations directly from each station's own populated event.
+    // Don't depend on assignedEvents being in sync. A station shows only if:
+    //   1. The station itself is active (isActive !== false)
+    //   2. Its event exists AND (has no end date yet OR hasn't ended + grace)
+    const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
+      if (!ep || ep.isActive === false) return false;
+      const ev = ep.eventId;
+      if (!ev) return false; // orphaned station — hide it
+      if (!ev.dateEnd) return true; // dates not configured yet — keep
+      return new Date(ev.dateEnd).getTime() + GRACE_MS > now.getTime();
+    });
 
-    const filteredEvents = (volunteer.assignedEvents || []).filter((ev) =>
-      activeEventIds.has(ev._id.toString()),
-    );
+    // Build the events list from the active stations' events (deduplicated)
+    const eventMap = new Map();
+    for (const ep of activeStations) {
+      const ev = ep.eventId;
+      if (ev && !eventMap.has(ev._id.toString())) {
+        eventMap.set(ev._id.toString(), {
+          _id: ev._id,
+          name: ev.name,
+          eventCode: ev.eventCode,
+          dateStart: ev.dateStart,
+          dateEnd: ev.dateEnd,
+        });
+      }
+    }
+
+    // Flatten station eventId back to just the id (scanner expects this shape)
+    const stationsForScanner = activeStations.map((ep) => ({
+      _id: ep._id,
+      name: ep.name,
+      stationLabel: ep.stationLabel,
+      type: ep.type,
+      allowGroupCount: ep.allowGroupCount,
+      eventId: ep.eventId?._id || ep.eventId,
+    }));
 
     res.json({
       volunteer: {
         id: volunteer._id,
         name: volunteer.name,
-        assignedEntryPoints: filteredStations,
-        assignedEvents: filteredEvents,
+        assignedEntryPoints: stationsForScanner,
+        assignedEvents: Array.from(eventMap.values()),
       },
     });
   } catch (error) {
+    console.error("/volunteers/me error:", error);
     res.status(500).json({ error: "Failed to fetch profile" });
   }
 });

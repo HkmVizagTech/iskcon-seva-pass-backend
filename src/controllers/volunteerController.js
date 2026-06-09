@@ -231,8 +231,11 @@ exports.volunteerLogin = async (req, res) => {
     }
 
     const volunteer = await User.findOne(query)
-      .populate("assignedEntryPoints", "name stationLabel type _id allowGroupCount eventId")
-      .populate("assignedEvents", "name eventCode _id dateStart dateEnd");
+      .populate({
+        path: "assignedEntryPoints",
+        select: "name stationLabel type _id allowGroupCount eventId isActive",
+        populate: { path: "eventId", select: "name eventCode _id dateStart dateEnd" },
+      });
 
     if (!volunteer) {
       return res.status(401).json({ error: "Invalid credentials" });
@@ -257,30 +260,40 @@ exports.volunteerLogin = async (req, res) => {
       { expiresIn: "12h" },
     );
 
-    // FIX: Only return entry points for ACTIVE or UPCOMING events.
-    // Previously returned all assigned stations including past events,
-    // so a volunteer would see stations from KKD 2024 alongside KKD 2025.
+    // FIX: derive active stations directly from each station's own populated event.
+    // A station shows only if it's active AND its event hasn't ended (+24h grace),
+    // or the event has no end date configured yet.
     const now = new Date();
-    const activeEventIds = new Set(
-      (volunteer.assignedEvents || [])
-        .filter((ev) => {
-          // Include if event has no end date yet (dates not configured)
-          if (!ev.dateEnd) return true;
-          // Include if event hasn't ended yet (active or upcoming)
-          return new Date(ev.dateEnd).getTime() + 24 * 60 * 60 * 1000 > now.getTime();
-        })
-        .map((ev) => ev._id.toString()),
-    );
+    const GRACE_MS = 24 * 60 * 60 * 1000;
 
-    const filteredStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
-      // Keep stations whose eventId is in the active/upcoming set
-      const epEventId = ep.eventId?.toString() || "";
-      return activeEventIds.has(epEventId);
+    const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
+      if (!ep || ep.isActive === false) return false;
+      const ev = ep.eventId;
+      if (!ev) return false;
+      if (!ev.dateEnd) return true;
+      return new Date(ev.dateEnd).getTime() + GRACE_MS > now.getTime();
     });
 
-    const filteredEvents = (volunteer.assignedEvents || []).filter((ev) =>
-      activeEventIds.has(ev._id.toString()),
-    );
+    // Build the events list from the active stations' events (deduplicated)
+    const eventMap = new Map();
+    for (const ep of activeStations) {
+      const ev = ep.eventId;
+      if (ev && !eventMap.has(ev._id.toString())) {
+        eventMap.set(ev._id.toString(), {
+          _id: ev._id, name: ev.name, eventCode: ev.eventCode,
+          dateStart: ev.dateStart, dateEnd: ev.dateEnd,
+        });
+      }
+    }
+
+    const stationsForScanner = activeStations.map((ep) => ({
+      _id: ep._id,
+      name: ep.name,
+      stationLabel: ep.stationLabel,
+      type: ep.type,
+      allowGroupCount: ep.allowGroupCount,
+      eventId: ep.eventId?._id || ep.eventId,
+    }));
 
     res.json({
       success: true,
@@ -288,8 +301,8 @@ exports.volunteerLogin = async (req, res) => {
       volunteer: {
         id: volunteer._id,
         name: volunteer.name,
-        assignedEntryPoints: filteredStations,
-        assignedEvents: filteredEvents,
+        assignedEntryPoints: stationsForScanner,
+        assignedEvents: Array.from(eventMap.values()),
       },
     });
   } catch (error) {
