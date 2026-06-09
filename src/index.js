@@ -153,6 +153,30 @@ app.get("/api/debug/volunteer", async (req, res) => {
   }
 });
 
+// Env var diagnostic
+app.get("/api/debug/env-check", async (req, res) => {
+  if (req.query.key !== "hkm2026") return res.status(403).json({ error: "bad key" });
+  res.json({
+    whatsapp: {
+      configured: !!process.env.WHATSAPP_API_KEY,
+      apiUrl: process.env.WHATSAPP_API_URL || "https://wapi.flaxxa.com/api/v1 (default)",
+      keyPrefix: process.env.WHATSAPP_API_KEY ? process.env.WHATSAPP_API_KEY.substring(0, 8) + "..." : "NOT SET",
+    },
+    auth: {
+      jwtSecretSet: !!process.env.JWT_SECRET,
+      qrSecretSet: !!process.env.QR_SECRET_KEY,
+    },
+    cors: {
+      allowedOrigins: process.env.ALLOWED_ORIGINS || "NOT SET (only localhost allowed!)",
+    },
+    thirdParty: {
+      syncEnabled: process.env.THIRD_PARTY_SYNC_ENABLED || "false",
+      apiUrl: process.env.THIRD_PARTY_API_URL ? "set" : "NOT SET",
+    },
+    helpContact: process.env.HELP_CONTACT || "NOT SET",
+  });
+});
+
 // Scan diagnostic — test what validateQR returns for a specific QR pass
 app.get("/api/debug/test-scan", async (req, res) => {
   if (req.query.key !== "hkm2026") return res.status(403).json({ error: "bad key" });
