@@ -44,7 +44,9 @@ exports.createVolunteer = async (req, res) => {
       password,
       role: "volunteer",
       assignedEvents: assignedEventIds || [],
-      assignedEntryPoints: assignedEntryPointIds || [],
+      assignedEntryPoints: assignedEntryPointIds
+        ? [...new Set(assignedEntryPointIds.map(String))]  // FIX: dedup on save
+        : [],
       assignedVenues: assignedVenues || [],
     });
 
@@ -138,7 +140,7 @@ exports.updateVolunteer = async (req, res) => {
     if (typeof isActive === "boolean") updateData.isActive = isActive;
     if (assignedEventIds) updateData.assignedEvents = assignedEventIds;
     if (assignedEntryPointIds)
-      updateData.assignedEntryPoints = assignedEntryPointIds;
+      updateData.assignedEntryPoints = [...new Set(assignedEntryPointIds.map(String))]; // FIX: dedup
     if (req.body.assignedVenues !== undefined)
       updateData.assignedVenues = req.body.assignedVenues;
 
@@ -286,14 +288,25 @@ exports.volunteerLogin = async (req, res) => {
       }
     }
 
-    const stationsForScanner = activeStations.map((ep) => ({
-      _id: ep._id,
-      name: ep.name,
-      stationLabel: ep.stationLabel,
-      type: ep.type,
-      allowGroupCount: ep.allowGroupCount,
-      eventId: ep.eventId?._id || ep.eventId,
-    }));
+    // FIX: dedup stations by _id
+    const seenStationIds = new Set();
+    const stationsForScanner = activeStations
+      .filter((ep) => {
+        const id = ep._id.toString();
+        if (seenStationIds.has(id)) return false;
+        seenStationIds.add(id);
+        return true;
+      })
+      .map((ep) => ({
+        _id: ep._id,
+        name: ep.name,
+        stationLabel: ep.stationLabel,
+        type: ep.type,
+        allowGroupCount: ep.allowGroupCount,
+        eventId: ep.eventId?._id || ep.eventId,
+        eventName: ep.eventId?.name || "",
+        eventCode: ep.eventId?.eventCode || "",
+      }));
 
     res.json({
       success: true,

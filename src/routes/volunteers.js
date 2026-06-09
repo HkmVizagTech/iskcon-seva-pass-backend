@@ -54,14 +54,25 @@ router.get("/me", protect, async (req, res) => {
     }
 
     // Flatten station eventId back to just the id (scanner expects this shape)
-    const stationsForScanner = activeStations.map((ep) => ({
-      _id: ep._id,
-      name: ep.name,
-      stationLabel: ep.stationLabel,
-      type: ep.type,
-      allowGroupCount: ep.allowGroupCount,
-      eventId: ep.eventId?._id || ep.eventId,
-    }));
+    // FIX: dedup stations by _id — same entry point may have been assigned twice
+    const seenStationIds = new Set();
+    const stationsForScanner = activeStations
+      .filter((ep) => {
+        const id = ep._id.toString();
+        if (seenStationIds.has(id)) return false;
+        seenStationIds.add(id);
+        return true;
+      })
+      .map((ep) => ({
+        _id: ep._id,
+        name: ep.name,
+        stationLabel: ep.stationLabel,
+        type: ep.type,
+        allowGroupCount: ep.allowGroupCount,
+        eventId: ep.eventId?._id || ep.eventId,
+        eventName: ep.eventId?.name || "",       // FIX: include event name for display
+        eventCode: ep.eventId?.eventCode || "",
+      }));
 
     res.json({
       volunteer: {
