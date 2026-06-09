@@ -89,6 +89,10 @@ app.get("/health", (req, res) => {
       mongoose.connection.readyState === 1 ? "connected" : "disconnected",
     redis: redis && redis.status === "ready" ? "connected" : "disconnected",
   });
+
+app.get("/version", (req, res) => {
+  res.json({ build: "scanner-stations-fix-v2", deployedCommit: "DEPLOY_MARKER", time: new Date().toISOString() });
+});
 });
 
 // Test route
