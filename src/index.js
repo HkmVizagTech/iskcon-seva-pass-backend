@@ -70,6 +70,7 @@ app.use("/uploads", express.static(uploadDir));
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
+app.use("/api/events/:eventId/seva-slots", require("./routes/sevaSlots"));
 app.use("/api/events", require("./routes/events"));
 app.use("/api/holders", require("./routes/holders"));
 app.use("/api/qr", require("./routes/qr"));
@@ -79,7 +80,6 @@ app.use("/api/reports", require("./routes/reports"));
 app.use("/api/volunteers", require("./routes/volunteers"));
 app.use("/api/preachers", require("./routes/preachers"));
 app.use("/api/integration", require("./routes/integration"));
-app.use("/api/events/:eventId/seva-slots", require("./routes/sevaSlots"));
 
 // Health check
 app.get("/health", (req, res) => {
@@ -94,7 +94,7 @@ app.get("/health", (req, res) => {
 
 // Version — used to verify Railway deployed the latest commit
 app.get("/version", (req, res) => {
-  res.json({ build: "production-v6-seva-slot-model", time: new Date().toISOString() });
+  res.json({ build: "production-v7-route-fix", time: new Date().toISOString() });
 });
 
 // Test route
