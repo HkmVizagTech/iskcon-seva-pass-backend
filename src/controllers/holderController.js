@@ -312,18 +312,48 @@ exports.createHolder = async (req, res) => {
     }
     const primaryVenue = event.venue?.[0];
 
-    // FIX: check for duplicate phone+event before creating
     const normPhone = normalisePhone(phone) || phone;
-    const existingHolder = await Holder.findOne({ eventId, phone: normPhone });
-    if (existingHolder) {
-      const existingQR = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
-      if (existingQR) {
+    const incomingSubCat = (req.body.subCategory || "").toString().trim().toUpperCase();
+
+    // ── Duplicate check: same phone + same event ──
+    // Rule: one QR per seva slot (subCategory).
+    //   • Same phone + same subCategory (or both empty) → BLOCK (duplicate seva slot)
+    //   • Same phone + different subCategory           → ALLOW (different seva slot = new QR)
+    //
+    // If blocked, admin can still override by providing overrideReason
+    // (e.g. "Replacement — lost phone") — the new pass is issued and the old
+    // one should be manually revoked.
+    const existingHolders = await Holder.find({ eventId, phone: normPhone })
+      .select("_id name subCategory").lean();
+
+    for (const existing of existingHolders) {
+      const existingSubCat = (existing.subCategory || "").toString().trim().toUpperCase();
+      const sameSlot =
+        (incomingSubCat && existingSubCat && incomingSubCat === existingSubCat) ||
+        (!incomingSubCat && !existingSubCat); // both empty = general pass conflict
+
+      if (!sameSlot) continue; // different seva slot — allow
+
+      const existingQR = await QRPass.findOne({ holderId: existing._id, status: "active" })
+        .select("qrId").lean();
+      if (!existingQR) continue; // no active QR — allow
+
+      const reason = (req.body.overrideReason || "").toString().trim();
+      if (!reason) {
+        const slotLabel = incomingSubCat || "General";
         return res.status(409).json({
-          error: "A pass has already been issued to this phone number for this event",
-          qrId: existingQR.qrId,
-          holderId: existingHolder._id,
+          code: "DUPLICATE_SEVA_SLOT",
+          error: `An active pass for seva slot "${slotLabel}" already exists for this phone number.`,
+          hint: "To issue a replacement, provide a reason (e.g. 'Lost phone'). To add a different seva slot, change the Sub Category.",
+          existing: {
+            holderId: existing._id,
+            holderName: existing.name,
+            subCategory: existingSubCat || null,
+            qrId: existingQR.qrId,
+          },
         });
       }
+      // Override provided — proceed, old pass should be revoked separately
     }
 
     const category = await Category.findById(catId).populate("entryPoints");
@@ -349,10 +379,11 @@ exports.createHolder = async (req, res) => {
       // FIX: normalise phone so duplicate detection works across manual + bulk imports
       overrideReason,
       preacher: preacher || "",
-      preacherId: preacherId || null,  // link to preacher User record
+      preacherId: preacherId || null,
       venueName: venueName || primaryVenue?.name || "",
-      // Sponsor tier etc. — drives which bahumana the desk gives
       subCategory: (req.body.subCategory || "").toString().trim().toUpperCase() || undefined,
+      // Reason given when issuing a second pass to the same phone number
+      overrideReason: (req.body.overrideReason || "").toString().trim() || undefined,
     });
 
     const qrId = await qrService.generateQRId(
@@ -718,25 +749,33 @@ async function processSingleRecord(
         ? "91" + phone.replace(/[\+\s\-\(\)]/g, "")
         : phone.replace(/[\+\s\-\(\)]/g, "");
 
-    let holder = await Holder.findOne({
+    // Bulk import duplicate rule: same phone + same subCategory = skip (already issued)
+    // same phone + DIFFERENT subCategory = issue new QR (new seva slot)
+    const existingHoldersForPhone = await Holder.find({
       eventId: event._id,
       phone: formattedPhone,
-    });
-    const existingQR = holder
-      ? await QRPass.findOne({ holderId: holder._id, status: "active" })
-      : null;
-    if (existingQR)
-      return {
-        success: true,
-        name,
-        phone: formattedPhone,
-        qrId: existingQR.qrId,
-        skipped: true,
-      };
+    }).select("_id subCategory").lean();
 
-    if (!holder) {
-      try {
-        holder = await Holder.create({
+    let skippedQrId = null;
+    for (const eh of existingHoldersForPhone) {
+      const ehSubCat = (eh.subCategory || "").toString().trim().toUpperCase();
+      const sameSlot =
+        (subCategory && ehSubCat && subCategory === ehSubCat) ||
+        (!subCategory && !ehSubCat);
+      if (!sameSlot) continue; // different seva slot — allow new QR
+      const existingQR = await QRPass.findOne({ holderId: eh._id, status: "active" }).select("qrId").lean();
+      if (existingQR) {
+        skippedQrId = existingQR.qrId;
+        break;
+      }
+    }
+    if (skippedQrId)
+      return { success: true, name, phone: formattedPhone, qrId: skippedQrId, skipped: true };
+
+    let holder = null;
+
+    try {
+      holder = await Holder.create({
           eventId: event._id,
           catId: category._id,
           name,
@@ -768,7 +807,6 @@ async function processSingleRecord(
           throw createErr;
         }
       }
-    }
 
     const qrId = await qrService.generateQRId(
       event.eventCode,
