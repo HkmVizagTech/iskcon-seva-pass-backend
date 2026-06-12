@@ -50,7 +50,7 @@ router.patch("/:slotId", protect, authorize(...ADMIN), async (req, res) => {
 
     const slot = await SevaSlot.findOneAndUpdate(
       { _id: req.params.slotId, eventId: req.params.eventId },
-      { $set }, { new: true },
+      { $set }, { returnDocument: "after" },
     );
     if (!slot) return res.status(404).json({ error: "Slot not found" });
     res.json({ slot });
@@ -64,7 +64,7 @@ router.delete("/:slotId", protect, authorize(...ADMIN), async (req, res) => {
   try {
     const slot = await SevaSlot.findOneAndUpdate(
       { _id: req.params.slotId, eventId: req.params.eventId },
-      { $set: { isActive: false } }, { new: true },
+      { $set: { isActive: false } }, { returnDocument: "after" },
     );
     if (!slot) return res.status(404).json({ error: "Slot not found" });
     res.json({ success: true });

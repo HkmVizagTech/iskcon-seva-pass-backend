@@ -278,7 +278,7 @@ class QRService {
           },
         },
       },
-      { new: true, select: "_id" },
+      { returnDocument: "after", select: "_id" },
     );
     return { redeemed: !!qrPass };
   }

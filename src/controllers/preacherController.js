@@ -152,7 +152,7 @@ exports.updatePreacher = async (req, res) => {
     const preacher = await User.findOneAndUpdate(
       { _id: req.params.id, role: "preacher" },
       { $set },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     ).select("-password");
 
     if (!preacher) return res.status(404).json({ error: "Preacher not found" });
@@ -170,7 +170,7 @@ exports.deletePreacher = async (req, res) => {
     const preacher = await User.findOneAndUpdate(
       { _id: req.params.id, role: "preacher" },
       { $set: { isActive: false } },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!preacher) return res.status(404).json({ error: "Preacher not found" });
     res.json({ success: true, message: "Preacher deactivated" });

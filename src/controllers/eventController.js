@@ -243,7 +243,7 @@ exports.updateEvent = async (req, res) => {
     const event = await Event.findByIdAndUpdate(
       req.params.id,
       { $set },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     );
 
     if (!event) return res.status(404).json({ error: "Event not found" });

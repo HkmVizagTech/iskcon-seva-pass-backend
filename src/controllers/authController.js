@@ -105,7 +105,7 @@ exports.updateProfile = async (req, res) => {
     const user = await User.findByIdAndUpdate(
       getReqUserId(req),
       { $set: update },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     ).select("-password");
 
     res.json({ success: true, user });
@@ -193,7 +193,7 @@ exports.updateUser = async (req, res) => {
     if (canOverride !== undefined) update.canOverride = canOverride;
 
     const user = await User.findByIdAndUpdate(
-      req.params.id, { $set: update }, { new: true }
+      req.params.id, { $set: update }, { returnDocument: "after" }
     ).select("-password");
 
     if (!user) return res.status(404).json({ error: "User not found" });

@@ -43,7 +43,7 @@ exports.updateHolderType = async (req, res) => {
     const holderType = await HolderType.findByIdAndUpdate(
       req.params.htId,
       { $set },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     );
     if (!holderType)
       return res.status(404).json({ error: "Holder type not found" });

@@ -54,7 +54,7 @@ exports.revokeQR = async (req, res) => {
     const qrPass = await QRPass.findOneAndUpdate(
       { qrId: req.params.qrId },
       { status: "revoked" },
-      { new: true },
+      { returnDocument: "after" },
     );
 
     if (!qrPass) {
@@ -262,7 +262,7 @@ exports.updateHolder = async (req, res) => {
     const holder = await Holder.findByIdAndUpdate(
       req.params.holderId,
       update,
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     );
     if (!holder) return res.status(404).json({ error: "Holder not found" });
     res.json({ success: true, holder });

@@ -189,7 +189,7 @@ exports.updateVolunteer = async (req, res) => {
     const volunteer = await User.findOneAndUpdate(
       { _id: req.params.id, role: "volunteer" },
       { $set: updateData }, // FIX: was missing $set — Mongoose was replacing top-level fields
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     )
       .select("-password")
       .populate("assignedEvents", "name eventCode")

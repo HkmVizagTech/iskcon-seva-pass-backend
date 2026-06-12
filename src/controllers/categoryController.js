@@ -101,7 +101,7 @@ exports.updateCategory = async (req, res) => {
     if (typeof isActive === "boolean") updateData.isActive = isActive;
 
     const category = await Category.findByIdAndUpdate(
-      req.params.catId, { $set: updateData }, { new: true }
+      req.params.catId, { $set: updateData }, { returnDocument: "after" }
     )
       .populate("holderTypeId", "name code icon color")
       .populate("entryPoints", "name stationLabel type");

@@ -43,7 +43,7 @@ exports.updateEntryPoint = async (req, res) => {
     const entryPoint = await EntryPoint.findOneAndUpdate(
       { _id: req.params.epId, eventId: req.params.eventId },
       { $set },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     );
     if (!entryPoint) return res.status(404).json({ error: "Entry point not found" });
     res.json(entryPoint);
