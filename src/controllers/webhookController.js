@@ -115,27 +115,78 @@ exports.handleRazorpayWebhook = async (req, res) => {
 
 exports.handleWhatsAppWebhook = async (req, res) => {
   try {
-    // Handle WhatsApp status updates (Twilio / Flaxxa status callback)
-    const { From, MessageStatus, MessageSid } = req.body;
+    // Flaxxa WAPI webhook payload format:
+    // { message_id, status, phone, error_code, error_message, timestamp }
+    // status values: "sent", "delivered", "read", "failed"
+    const body = req.body;
 
-    // FIX: QRPass has no "delivery" subdoc — update deliveryStatus directly
-    // Match by the phone number stored on the holder
-    if (From && MessageStatus) {
-      const normalised = From.replace(/[^\d]/g, "");
+    // Support both Flaxxa format and legacy Twilio format
+    const messageId = body.message_id || body.MessageSid;
+    const rawStatus = body.status || body.MessageStatus;
+    const phone = body.phone || body.From;
+    const errorCode = body.error_code;
+    const errorMessage = body.error_message;
+
+    if (rawStatus) {
+      const deliveryStatus =
+        ["delivered", "read"].includes(rawStatus) ? "delivered" :
+        rawStatus === "failed" ? "failed" : "sent";
+
+      // Log every delivery status update for diagnostics
+      console.log("📬 WhatsApp delivery update:", JSON.stringify({
+        messageId, status: rawStatus, deliveryStatus, phone,
+        errorCode, errorMessage,
+      }));
+
+      // #131005 = recipient not on WhatsApp or blocked business messages
+      // #131026 = message undeliverable
+      // Log clearly so admin can see in Railway logs
+      if (deliveryStatus === "failed") {
+        console.error(`❌ WhatsApp delivery FAILED for ${phone}:`,
+          `error ${errorCode} — ${errorMessage || "unknown reason"}`);
+      }
+
+      // Update QRPass delivery status by matching message_id
+      // Flaxxa sends message_id which we store as deliveryMessageId
+      // Fall back to phone lookup if no message_id match
       const Holder = require("../models/Holder");
-      const holder = await Holder.findOne({ phone: normalised }).select("_id");
-      if (holder) {
-        const status = ["delivered", "read"].includes(MessageStatus) ? "delivered"
-                     : MessageStatus === "failed" ? "failed" : "sent";
-        await QRPass.updateMany(
-          { holderId: holder._id, status: "active" },
-          { $set: { deliveryStatus: status } },
+
+      let updated = false;
+      if (messageId) {
+        const result = await QRPass.updateOne(
+          { deliveryMessageId: messageId },
+          { $set: {
+            deliveryStatus,
+            ...(deliveryStatus === "failed" ? {
+              deliveryError: `${errorCode}: ${errorMessage || "delivery failed"}`,
+            } : {}),
+            ...(deliveryStatus === "delivered" ? { deliveredAt: new Date() } : {}),
+          }},
         );
+        updated = result.modifiedCount > 0;
+      }
+
+      // Fall back to phone-based lookup
+      if (!updated && phone) {
+        const normalised = phone.replace(/[^\d]/g, "");
+        const holder = await Holder.findOne({ phone: normalised }).select("_id");
+        if (holder) {
+          await QRPass.updateMany(
+            { holderId: holder._id, status: "active" },
+            { $set: {
+              deliveryStatus,
+              ...(deliveryStatus === "failed" ? {
+                deliveryError: `${errorCode}: ${errorMessage || "delivery failed"}`,
+              } : {}),
+            }},
+          );
+        }
       }
     }
 
     res.json({ received: true });
   } catch (error) {
+    console.error("WhatsApp webhook error:", error.message);
     res.status(500).json({ error: "Webhook processing failed" });
   }
 };

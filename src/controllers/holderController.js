@@ -438,13 +438,15 @@ exports.createHolder = async (req, res) => {
 
       try {
         if (deliveryMethod === "whatsapp" || deliveryMethod === "both") {
-          await whatsappService.sendQRMessage(
+          const waResult = await whatsappService.sendQRMessage(
             phone,
             qrImage,
             name,
             event.name,
             passDetails,
           );
+          // Store Flaxxa message_id for webhook delivery status matching
+          if (waResult?.messageId) qrPass.deliveryMessageId = waResult.messageId;
         }
         qrPass.deliveryStatus = "sent";
         qrPass.deliveredAt = new Date();
