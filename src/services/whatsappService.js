@@ -90,16 +90,31 @@ class WhatsAppService {
       { headers: form.getHeaders(), timeout: 30000 },
     );
 
-    console.log(
-      "✅ Flaxxa response:",
-      response.data?.status,
-      response.data?.message_id,
-    );
+    const status = response.data?.status;
+    const msgId = response.data?.message_id || response.data?.id;
+
+    // Log full response so we can diagnose delivery issues
+    console.log("✅ Flaxxa response:", JSON.stringify({
+      status,
+      message_id: msgId,
+      phone,
+      holderName,
+      // any error detail Flaxxa includes even on "success" responses
+      error: response.data?.error || response.data?.message || null,
+      raw: JSON.stringify(response.data).slice(0, 300),
+    }));
+
+    // Flaxxa returns status:"success" even when the message is queued but
+    // not yet confirmed by Meta. Log it explicitly so we can track.
+    if (status !== "success" && status !== "sent") {
+      console.warn("⚠️ Flaxxa non-success status:", status, JSON.stringify(response.data).slice(0, 300));
+    }
 
     return {
       success: true,
-      messageId: response.data?.message_id || response.data?.id,
+      messageId: msgId,
       phone: phone,
+      flaxxaStatus: status,
     };
   }
 
