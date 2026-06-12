@@ -148,6 +148,7 @@ exports.scanQR = async (req, res) => {
         holder_name: validation.holderName,
         holderName: validation.holderName,
         subCategory: validation.subCategory || null,
+      sevaSlot: validation.sevaSlot || null,
         categoryName: validation.categoryName || null,
       });
     }
@@ -174,6 +175,7 @@ exports.scanQR = async (req, res) => {
         holder_name: validation.holderName,
         holderName: validation.holderName,
         subCategory: validation.subCategory || null,
+      sevaSlot: validation.sevaSlot || null,
         categoryName: validation.categoryName || null,
       });
     }
@@ -201,6 +203,7 @@ exports.scanQR = async (req, res) => {
       holder_name: validation.holderName,
       holderName: validation.holderName,
       subCategory: validation.subCategory || null,
+      sevaSlot: validation.sevaSlot || null,
       categoryName: validation.categoryName || null,
       groupCount: incomingGroupCount,
       message: "Access granted",

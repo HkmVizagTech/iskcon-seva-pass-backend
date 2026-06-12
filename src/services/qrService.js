@@ -114,7 +114,7 @@ class QRService {
       const [qrPassAny, entryPoint] = await Promise.all([
         QRPass.findOne({ qrId: payload.q })
           .select("eventId entryPoints holderId redemptionHistory status")
-          .populate({ path: "holderId", select: "name subCategory catId", populate: { path: "catId", select: "name" } })
+          .populate({ path: "holderId", select: "name subCategory sevaSlotId catId", populate: [{ path: "catId", select: "name" }, { path: "sevaSlotId", select: "code name time displayLabel" }] })
           .lean(),
         EntryPoint.findById(epId)
           .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed stationLabel")
@@ -209,6 +209,12 @@ class QRService {
             valid: false, reason: "already_used", message: "Already scanned here",
             holderName: qrPass.holderId?.name,
             subCategory: qrPass.holderId?.subCategory || null,
+            sevaSlot: qrPass.holderId?.sevaSlotId ? {
+              code: qrPass.holderId.sevaSlotId.code,
+              name: qrPass.holderId.sevaSlotId.name,
+              time: qrPass.holderId.sevaSlotId.time,
+              displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
+            } : null,
             categoryName: qrPass.holderId?.catId?.name || null,
           };
         }
@@ -237,6 +243,12 @@ class QRService {
         event,
         holderName: qrPass.holderId?.name || payload.n,
         subCategory: qrPass.holderId?.subCategory || null,
+        sevaSlot: qrPass.holderId?.sevaSlotId ? {
+          code: qrPass.holderId.sevaSlotId.code,
+          name: qrPass.holderId.sevaSlotId.name,
+          time: qrPass.holderId.sevaSlotId.time,
+          displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
+        } : null,
         categoryName: qrPass.holderId?.catId?.name || null,
       };
     } catch (error) {

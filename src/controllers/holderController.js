@@ -1,5 +1,6 @@
 // FIX: All requires moved to TOP
 const { resolvePreacherFromString } = require("./preacherController");
+const SevaSlot = require("../models/SevaSlot");
 const thirdPartyService = require("../services/thirdPartyService");
 // ─── Helper: normalise phone to 91XXXXXXXXXX format ──────────────────────────
 function normalisePhone(phone) {
@@ -315,6 +316,11 @@ exports.createHolder = async (req, res) => {
     const normPhone = normalisePhone(phone) || phone;
     const incomingSubCat = (req.body.subCategory || "").toString().trim().toUpperCase();
 
+    // Resolve SevaSlot record for this event + subCategory code
+    const sevaSlot = incomingSubCat
+      ? await SevaSlot.findOne({ eventId, code: incomingSubCat, isActive: true }).lean()
+      : null;
+
     // ── Duplicate check: same phone + same event ──
     // Rule: one QR per seva slot (subCategory).
     //   • Same phone + same subCategory (or both empty) → BLOCK (duplicate seva slot)
@@ -381,7 +387,8 @@ exports.createHolder = async (req, res) => {
       preacher: preacher || "",
       preacherId: preacherId || null,
       venueName: venueName || primaryVenue?.name || "",
-      subCategory: (req.body.subCategory || "").toString().trim().toUpperCase() || undefined,
+      subCategory: incomingSubCat || undefined,
+      sevaSlotId: sevaSlot?._id || undefined,
       // Reason given when issuing a second pass to the same phone number
       overrideReason: (req.body.overrideReason || "").toString().trim() || undefined,
     });
@@ -738,6 +745,11 @@ async function processSingleRecord(
   const venue = (record.Venue || record.venue || "").toString().trim();
   const slot = (record.Slot || record.slot || "").toString().trim();
 
+  // Resolve SevaSlot record from subCategory code (for CSV bulk import)
+  const sevaSlot = subCategory
+    ? await SevaSlot.findOne({ eventId: event._id, code: subCategory, isActive: true }).select("_id").lean()
+    : null;
+
   if (!name)
     return { success: false, error: "Name is required", name: "Unknown", phone };
   if (!phone || !/^\d{10,15}$/.test(phone.replace(/[\+\s\-\(\)]/g, "")))
@@ -783,6 +795,7 @@ async function processSingleRecord(
           whatsappNumber: formattedPhone,
           holderType,
           subCategory: subCategory || undefined,
+          sevaSlotId: sevaSlot?._id || undefined,
           preacher: preacher || "",
           // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
           preacherId: csvPreacherId || bulkPreacherId || null,

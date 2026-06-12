@@ -25,6 +25,10 @@ const holderSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  // Reference to the SevaSlot record for this holder.
+  // Populated from the event's seva slots — gives name + time.
+  sevaSlotId: { type: mongoose.Schema.Types.ObjectId, ref: "SevaSlot" },
+
   // Sub-category within the category — e.g. Sponsor tiers A / B / C.
   // Different sub-categories receive different bahumana/experience;
   // the scanner displays this prominently so the desk gives the right kit.
