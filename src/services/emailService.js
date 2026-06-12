@@ -77,7 +77,7 @@ class EmailService {
             <p>Your pass for <strong>${eventName}</strong> has been generated successfully.</p>
 
             <div class="qr-container">
-              <img src="${qrImage}" alt="QR Code" class="qr-image">
+              <img src="${passDetails?.qrId ? `${process.env.BACKEND_PUBLIC_URL || "https://iskcon-seva-pass-backend-production.up.railway.app"}/api/qr/${passDetails.qrId}/image` : qrImage}" alt="QR Code" class="qr-image">
             </div>
 
             <div class="details">

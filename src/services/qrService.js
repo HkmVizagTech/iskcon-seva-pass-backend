@@ -91,8 +91,23 @@ class QRService {
 
   async validateQR(qrData, epId) {
     try {
-      // Step 1: verify JWT signature only — proves it was legitimately issued
-      const payload = this.verifyPayload(qrData);
+      // Step 1: verify JWT signature — proves it was legitimately issued.
+      // FALLBACK: some delivery surfaces (third-party app, re-rendered QRs)
+      // encode just the qrId (e.g. ISK-ACT26-GN-0000137) instead of the JWT.
+      // Accept that too — the pass record is then looked up by qrId and ALL
+      // the same checks (status, live event dates, station membership,
+      // already-used, capacity, dedup) still apply.
+      let payload;
+      try {
+        payload = this.verifyPayload(qrData);
+      } catch (jwtErr) {
+        const candidate = String(qrData || "").trim().toUpperCase();
+        if (/^ISK-[A-Z0-9]+-[A-Z0-9]+-\d+$/.test(candidate)) {
+          payload = { q: candidate }; // qrId-only QR
+        } else {
+          return { valid: false, reason: "invalid", message: "Invalid QR code" };
+        }
+      }
 
       // Step 2: fetch QR pass + entry point in parallel
       const [qrPassAny, entryPoint] = await Promise.all([
