@@ -351,6 +351,8 @@ exports.createHolder = async (req, res) => {
       preacher: preacher || "",
       preacherId: preacherId || null,  // link to preacher User record
       venueName: venueName || primaryVenue?.name || "",
+      // Sponsor tier etc. — drives which bahumana the desk gives
+      subCategory: (req.body.subCategory || "").toString().trim().toUpperCase() || undefined,
     });
 
     const qrId = await qrService.generateQRId(
@@ -695,6 +697,7 @@ async function processSingleRecord(
   )
     .toString()
     .trim();
+  const subCategory = (record.SubCategory || record["Sub Category"] || record.subcategory || record.Subcategory || "").toString().trim().toUpperCase();
   const preacherRaw = (record.Preacher || record.preacher || "").toString().trim();
   // Resolve preacher from CSV value — tries shortCode match first, then name
   // e.g. "MKGD" in the Preacher column → links to Mukunda Gauranga Dasa's User record
@@ -740,6 +743,7 @@ async function processSingleRecord(
           phone: formattedPhone,
           whatsappNumber: formattedPhone,
           holderType,
+          subCategory: subCategory || undefined,
           preacher: preacher || "",
           // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
           preacherId: csvPreacherId || bulkPreacherId || null,

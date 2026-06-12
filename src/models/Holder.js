@@ -25,6 +25,11 @@ const holderSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  // Sub-category within the category — e.g. Sponsor tiers A / B / C.
+  // Different sub-categories receive different bahumana/experience;
+  // the scanner displays this prominently so the desk gives the right kit.
+  subCategory: { type: String, trim: true, uppercase: true },
+
   source: {
     type: String,
     enum: ["admin", "bulk_import", "third_party", "self"],

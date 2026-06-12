@@ -1,5 +1,6 @@
 const QRCode = require("qrcode");
 const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
 const QRPass = require("../models/QRPass");
 const EntryPoint = require("../models/EntryPoint");
 const Event = require("../models/Event");
@@ -113,10 +114,10 @@ class QRService {
       const [qrPassAny, entryPoint] = await Promise.all([
         QRPass.findOne({ qrId: payload.q })
           .select("eventId entryPoints holderId redemptionHistory status")
-          .populate("holderId", "name")
+          .populate({ path: "holderId", select: "name subCategory catId", populate: { path: "catId", select: "name" } })
           .lean(),
         EntryPoint.findById(epId)
-          .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed")
+          .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed stationLabel")
           .lean(),
       ]);
 
@@ -135,7 +136,20 @@ class QRService {
       const qrPass = qrPassAny;
 
       if (!entryPoint || entryPoint.eventId.toString() !== qrPass.eventId.toString()) {
-        return { valid: false, reason: "invalid", message: "Wrong event" };
+        {
+        // Old/foreign QR: tell the volunteer exactly what this pass is
+        const Event2 = require("../models/Event");
+        const passEvent = await Event2.findById(qrPass.eventId).select("name dateEnd").lean();
+        const ended = passEvent?.dateEnd && new Date(passEvent.dateEnd).getTime() < Date.now();
+        return {
+          valid: false,
+          reason: ended ? "expired" : "invalid",
+          message: ended
+            ? `Old QR — ${passEvent?.name || "previous event"} has ended`
+            : `This pass is for a different event${passEvent?.name ? ` (${passEvent.name})` : ""}`,
+          holderName: qrPass.holderId?.name,
+        };
+      }
       }
 
       // Step 3: validate date window from the LIVE Event record — not from JWT payload
@@ -172,7 +186,7 @@ class QRService {
           return {
             valid: false,
             reason: "expired",
-            message: "Event has ended",
+            message: `Old QR expired — ${event.name || "event"} has ended`,
           };
         }
       }
@@ -191,7 +205,12 @@ class QRService {
           (rh) => rh.epId?.toString() === epIdStr && rh.result === "granted",
         );
         if (used) {
-          return { valid: false, reason: "already_used", message: "Already scanned here" };
+          return {
+            valid: false, reason: "already_used", message: "Already scanned here",
+            holderName: qrPass.holderId?.name,
+            subCategory: qrPass.holderId?.subCategory || null,
+            categoryName: qrPass.holderId?.catId?.name || null,
+          };
         }
       }
 
@@ -217,6 +236,8 @@ class QRService {
         entryPoint,
         event,
         holderName: qrPass.holderId?.name || payload.n,
+        subCategory: qrPass.holderId?.subCategory || null,
+        categoryName: qrPass.holderId?.catId?.name || null,
       };
     } catch (error) {
       return { valid: false, reason: "invalid", message: "Invalid QR code" };
@@ -225,25 +246,29 @@ class QRService {
 
   // redeemQR — only updates QRPass redemptionHistory.
   // ScanLog creation and EntryPoint.currentCount increment are the caller's responsibility.
-  async redeemQR(qrId, epId, userId, stationLabel, deviceInfo = {}, groupCount = 1) {
+  async redeemQR(qrId, epId, userId, stationLabel, deviceInfo = {}, groupCount = 1, opts = {}) {
+    // ATOMIC: for one-time stations the filter itself rejects a second redemption,
+    // so two simultaneous scans (even on different server instances) can never
+    // both be granted — the loser gets { redeemed:false } → already_used.
+    const filter = { qrId, status: "active" };
+    if (!opts.multiEntryAllowed) {
+      filter.redemptionHistory = {
+        $not: { $elemMatch: { epId: new mongoose.Types.ObjectId(String(epId)), result: "granted" } },
+      };
+    }
     const qrPass = await QRPass.findOneAndUpdate(
-      { qrId, status: "active" },
+      filter,
       {
         $push: {
           redemptionHistory: {
-            epId,
-            scannedAt: new Date(),
-            scannedBy: userId,
-            stationLabel,
-            result: "granted",
-            groupCount,
+            epId, scannedAt: new Date(), scannedBy: userId,
+            stationLabel, result: "granted", groupCount,
           },
         },
       },
-      { new: true, select: "holderId holderName" },
+      { new: true, select: "_id" },
     );
-    if (!qrPass) throw new Error("QR pass not found");
-    return { success: true, holderName: qrPass.holderName || "", groupCount };
+    return { redeemed: !!qrPass };
   }
 
   async deliverQR(qrPass, deliveryMethod) {

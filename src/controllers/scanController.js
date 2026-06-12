@@ -126,8 +126,8 @@ exports.scanQR = async (req, res) => {
       // Remove from dedup map — invalid scans shouldn't block future attempts
       recentScans.delete(dupKey);
 
-      // Log the failed attempt
-      await ScanLog.create({
+      // Log the failed attempt (async — don't make the volunteer wait)
+      ScanLog.create({
         qrId: validatedQrId,
         epId: incomingEpId,
         scannedBy: userId,
@@ -139,7 +139,7 @@ exports.scanQR = async (req, res) => {
           groupCount: incomingGroupCount,
           ipAddress: req.ip,
         },
-      });
+      }).catch((e) => console.error("ScanLog(fail) write error:", e.message));
 
       return res.json({
         success: false,
@@ -147,44 +147,52 @@ exports.scanQR = async (req, res) => {
         message: validation.message,
         holder_name: validation.holderName,
         holderName: validation.holderName,
+        subCategory: validation.subCategory || null,
+        categoryName: validation.categoryName || null,
       });
     }
 
     const fullHolderId =
       validation.qrPass?.holderId?._id || validation.qrPass?.holderId || null;
 
-    // FIX: ScanLog is created HERE (in controller), redeemQR no longer creates
-    // a second one. EntryPoint.currentCount is incremented once here.
-    await Promise.all([
-      ScanLog.create({
-        qrId: validatedQrId,
-        holderId: fullHolderId,
-        epId: incomingEpId,
-        scannedBy: userId,
-        stationLabel: finalStationLabel,
-        result: "granted",
-        groupCount: incomingGroupCount,
-        clientScanId: client_scan_id || clientScanId,
-        deviceInfo: {
-          ...deviceInfo,
-          groupCount: incomingGroupCount,
-          ipAddress: req.ip,
-        },
-      }),
-      qrService.redeemQR(
-        validatedQrId,
-        incomingEpId,
-        userId,
-        finalStationLabel,
-        deviceInfo,
-        incomingGroupCount,
-      ),
-      EntryPoint.findByIdAndUpdate(incomingEpId, {
-        $inc: { currentCount: incomingGroupCount },
-      }),
-    ]);
+    // SPEED: await ONLY the atomic redemption (single indexed write, race-proof).
+    // ScanLog + counter persist asynchronously — the volunteer gets the verdict
+    // in one DB round-trip instead of three.
+    const redemption = await qrService.redeemQR(
+      validatedQrId, incomingEpId, userId, finalStationLabel,
+      deviceInfo, incomingGroupCount,
+      { multiEntryAllowed: validation.entryPoint?.multiEntryAllowed },
+    );
 
-    // Keep dedup entry alive for DEDUP_WINDOW_MS, then remove
+    if (!redemption.redeemed) {
+      // Lost an atomic race (or pass just revoked) — treat as already scanned
+      recentScans.delete(dupKey);
+      return res.json({
+        success: false,
+        result: "already_used",
+        message: "Already scanned here",
+        holder_name: validation.holderName,
+        holderName: validation.holderName,
+        subCategory: validation.subCategory || null,
+        categoryName: validation.categoryName || null,
+      });
+    }
+
+    ScanLog.create({
+      qrId: validatedQrId,
+      holderId: fullHolderId,
+      epId: incomingEpId,
+      scannedBy: userId,
+      stationLabel: finalStationLabel,
+      result: "granted",
+      groupCount: incomingGroupCount,
+      clientScanId: client_scan_id || clientScanId,
+      deviceInfo: { ...deviceInfo, groupCount: incomingGroupCount, ipAddress: req.ip },
+    }).catch((e) => console.error("ScanLog(grant) write error:", e.message));
+    EntryPoint.findByIdAndUpdate(incomingEpId, {
+      $inc: { currentCount: incomingGroupCount },
+    }).catch((e) => console.error("EP counter error:", e.message));
+
     setTimeout(() => recentScans.delete(dupKey), DEDUP_WINDOW_MS);
 
     return res.json({
@@ -192,6 +200,8 @@ exports.scanQR = async (req, res) => {
       result: "granted",
       holder_name: validation.holderName,
       holderName: validation.holderName,
+      subCategory: validation.subCategory || null,
+      categoryName: validation.categoryName || null,
       groupCount: incomingGroupCount,
       message: "Access granted",
     });
@@ -280,53 +290,90 @@ exports.getHolderScanHistory = async (req, res) => {
 exports.syncOfflineScans = async (req, res) => {
   try {
     const { scans } = req.body;
-    const results = []; // track which records actually inserted
+    if (!Array.isArray(scans)) {
+      return res.status(400).json({ error: "scans array is required" });
+    }
+
+    const syncedIds = [];   // clientScanIds that were processed (new records)
     let duplicates = 0;
+    let failed = 0;
 
     for (const scan of scans) {
       try {
-        const clientId = scan.client_scan_id || scan.clientScanId;
+        const clientId = scan.client_scan_id || scan.clientScanId || null;
+        const qrData = scan.qrData || scan.qr_payload;
+        const epId = scan.epId || scan.ep_id;
+        const stationLabel = scan.stationLabel || scan.station || "";
+        const groupCount = Math.min(Math.max(1, parseInt(scan.groupCount) || 1), 50);
+        const scannedAt = scan.timestamp ? new Date(scan.timestamp) : new Date();
+
+        if (!qrData || !epId) { failed++; continue; }
+
+        // Dedup: if this clientScanId already exists, skip
         if (clientId) {
-          const result = await ScanLog.updateOne(
-            { clientScanId: clientId },
-            {
-              $setOnInsert: {
-                ...scan,
-                clientScanId: clientId,
-                scannedBy: req.user._id || req.user.userId,
-                offlineSync: { isOffline: true, syncedAt: new Date() },
-              },
-            },
-            { upsert: true },
-          );
-          if (result.upsertedCount > 0) {
-            results.push(clientId);
-          } else {
-            duplicates++;
-          }
+          const existing = await ScanLog.findOne({ clientScanId: clientId }).select("_id").lean();
+          if (existing) { duplicates++; syncedIds.push(clientId); continue; }
+          // NOTE: still push to syncedIds so the device marks it synced and stops retrying
+        }
+
+        // FIX: validate the QR like a live scan so the record is complete & correct
+        const validation = await qrService.validateQR(qrData, epId);
+        const validatedQrId = validation.payload?.q || validation.payload?.qrId || "unknown";
+        const finalStationLabel = stationLabel || validation.entryPoint?.stationLabel || String(epId);
+        const fullHolderId = validation.qrPass?.holderId?._id || validation.qrPass?.holderId || null;
+
+        if (validation.valid) {
+          // Record + redeem + increment, same as a live granted scan
+          await Promise.all([
+            ScanLog.create({
+              qrId: validatedQrId,
+              holderId: fullHolderId,
+              epId,
+              scannedBy: req.user._id || req.user.userId,
+              stationLabel: finalStationLabel,
+              result: "granted",
+              groupCount,
+              clientScanId: clientId || undefined,
+              scannedAt,
+              deviceInfo: { offlineOrigin: true, groupCount },
+              offlineSync: { isOffline: true, syncedAt: new Date() },
+            }),
+            qrService.redeemQR(validatedQrId, epId, req.user._id || req.user.userId, finalStationLabel, { offlineOrigin: true }, groupCount),
+            EntryPoint.findByIdAndUpdate(epId, { $inc: { currentCount: groupCount } }),
+          ]);
         } else {
+          // Log the failed validation so reports reflect reality
           await ScanLog.create({
-            ...scan,
+            qrId: validatedQrId,
+            epId,
             scannedBy: req.user._id || req.user.userId,
+            stationLabel: finalStationLabel,
+            result: validation.reason || "invalid",
+            groupCount,
+            clientScanId: clientId || undefined,
+            scannedAt,
+            deviceInfo: { offlineOrigin: true },
             offlineSync: { isOffline: true, syncedAt: new Date() },
           });
-          results.push(null);
         }
+
+        if (clientId) syncedIds.push(clientId);
       } catch (e) {
-        console.error("Failed to sync scan:", e);
+        console.error("Failed to sync scan:", e.message);
+        failed++;
       }
     }
 
-    // FIX: Return the list of synced client IDs so the client can mark exactly
-    // the right records as synced (not just the first N by index).
     res.json({
       success: true,
-      synced: results.length,
+      synced: syncedIds.length,
       duplicates,
-      syncedIds: results, // client uses this to mark exactly which records synced
-      message: `Synced ${results.length} scans`,
+      failed,
+      syncedIds,
+      message: `Synced ${syncedIds.length} scans`,
     });
   } catch (error) {
+    console.error("syncOfflineScans error:", error);
     res.status(500).json({ error: "Failed to sync offline scans" });
   }
 };
