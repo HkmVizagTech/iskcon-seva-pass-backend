@@ -39,6 +39,9 @@ const scanLogSchema = new mongoose.Schema({
       "link_required",
       "expired",
       "revoked",
+      "not_yet_valid",   // event hasn't started
+      "capacity_full",   // station at max capacity
+      "duplicate",       // dedup-blocked repeat scan
     ],
     required: true,
   },
