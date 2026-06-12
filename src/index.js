@@ -70,6 +70,60 @@ app.use("/uploads", express.static(uploadDir));
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
+
+// ── WhatsApp delivery test — admin only ──────────────────────────────────────
+app.post("/api/test/whatsapp", async (req, res) => {
+  try {
+    const { protect, authorize } = require("./src/middleware/auth");
+    // Inline auth check
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) return res.status(401).json({ error: "No token" });
+
+    const jwt = require("jsonwebtoken");
+    const User = require("./src/models/User");
+    const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId).select("-password");
+    if (!user || !["super_admin","event_admin"].includes(user.role)) {
+      return res.status(403).json({ error: "Not authorized" });
+    }
+
+    const { phone, holderName } = req.body;
+    if (!phone) return res.status(400).json({ error: "phone required" });
+
+    const whatsappService = require("./src/services/whatsappService");
+
+    // Check env vars
+    const envCheck = {
+      WHATSAPP_API_KEY: !!process.env.WHATSAPP_API_KEY,
+      WHATSAPP_API_URL: process.env.WHATSAPP_API_URL || "(default: https://wapi.flaxxa.com/api/v1)",
+      HELP_CONTACT: process.env.HELP_CONTACT || "(default: 8977761187)",
+    };
+
+    // Send a minimal test with a placeholder QR image (1x1 white PNG base64)
+    const testQR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg==";
+    try {
+      const result = await whatsappService.sendQRMessage(
+        phone,
+        testQR,
+        holderName || "Test Devotee",
+        "Test Event",
+        { entryPoints: ["Main Gate"], qrId: "TEST-001", validFrom: new Date().toISOString(), venue: "ISKCON Temple" }
+      );
+      res.json({ success: true, envCheck, result });
+    } catch (e) {
+      res.json({
+        success: false,
+        envCheck,
+        error: e.message,
+        responseData: e.response?.data,
+        statusCode: e.response?.status,
+      });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.use("/api/events/:eventId/seva-slots", require("./routes/sevaSlots"));
 app.use("/api/events", require("./routes/events"));
 app.use("/api/holders", require("./routes/holders"));
@@ -94,7 +148,7 @@ app.get("/health", (req, res) => {
 
 // Version — used to verify Railway deployed the latest commit
 app.get("/version", (req, res) => {
-  res.json({ build: "production-v7-route-fix", time: new Date().toISOString() });
+  res.json({ build: "production-v8-wa-debug", time: new Date().toISOString() });
 });
 
 // Test route
