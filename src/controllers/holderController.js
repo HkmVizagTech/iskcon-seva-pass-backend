@@ -316,41 +316,51 @@ exports.createHolder = async (req, res) => {
     const normPhone = normalisePhone(phone) || phone;
     const incomingSubCat = (req.body.subCategory || "").toString().trim().toUpperCase();
 
-    // Resolve SevaSlot record for this event + subCategory code
-    const sevaSlot = incomingSubCat
+    // Resolve category to check if it's a Sponsor category (catCode SP)
+    const categoryForCheck = await Category.findById(catId).select("catCode name").lean();
+    const isSponsorCategory = (categoryForCheck?.catCode || "").toUpperCase() === "SP";
+
+    // Resolve SevaSlot only for Sponsor category
+    const sevaSlot = (isSponsorCategory && incomingSubCat)
       ? await SevaSlot.findOne({ eventId, code: incomingSubCat, isActive: true }).lean()
       : null;
 
-    // ── Duplicate check: same phone + same event ──
-    // Rule: one QR per seva slot (subCategory).
-    //   • Same phone + same subCategory (or both empty) → BLOCK (duplicate seva slot)
-    //   • Same phone + different subCategory           → ALLOW (different seva slot = new QR)
-    //
-    // If blocked, admin can still override by providing overrideReason
-    // (e.g. "Replacement — lost phone") — the new pass is issued and the old
-    // one should be manually revoked.
+    // ── Duplicate check ──────────────────────────────────────────────────────
+    // Sponsor category: one QR per seva slot (SubCategory).
+    //   Same phone + same SubCategory → block (duplicate slot)
+    //   Same phone + different SubCategory → allow (different seva = new QR)
+    // All other categories: one QR per phone per event (SubCategory irrelevant).
     const existingHolders = await Holder.find({ eventId, phone: normPhone })
       .select("_id name subCategory").lean();
 
     for (const existing of existingHolders) {
       const existingSubCat = (existing.subCategory || "").toString().trim().toUpperCase();
-      const sameSlot =
-        (incomingSubCat && existingSubCat && incomingSubCat === existingSubCat) ||
-        (!incomingSubCat && !existingSubCat); // both empty = general pass conflict
 
-      if (!sameSlot) continue; // different seva slot — allow
+      // For sponsors: only block if same slot
+      if (isSponsorCategory) {
+        const sameSlot =
+          (incomingSubCat && existingSubCat && incomingSubCat === existingSubCat) ||
+          (!incomingSubCat && !existingSubCat);
+        if (!sameSlot) continue; // different slot — allow
+      }
+      // For non-sponsors: any existing holder on this phone = potential duplicate
 
       const existingQR = await QRPass.findOne({ holderId: existing._id, status: "active" })
         .select("qrId").lean();
-      if (!existingQR) continue; // no active QR — allow
+      if (!existingQR) continue;
 
       const reason = (req.body.overrideReason || "").toString().trim();
       if (!reason) {
+        const code = isSponsorCategory ? "DUPLICATE_SEVA_SLOT" : "DUPLICATE_PHONE";
         const slotLabel = incomingSubCat || "General";
         return res.status(409).json({
-          code: "DUPLICATE_SEVA_SLOT",
-          error: `An active pass for seva slot "${slotLabel}" already exists for this phone number.`,
-          hint: "To issue a replacement, provide a reason (e.g. 'Lost phone'). To add a different seva slot, change the Sub Category.",
+          code,
+          error: isSponsorCategory
+            ? `An active pass for seva slot "${slotLabel}" already exists for this phone number.`
+            : "An active pass already exists for this phone number at this event.",
+          hint: isSponsorCategory
+            ? "To issue a replacement, provide a reason. To add a different seva slot, change the Sub Category."
+            : "To issue a replacement, provide a reason (e.g. 'Lost phone').",
           existing: {
             holderId: existing._id,
             holderName: existing.name,
@@ -359,7 +369,6 @@ exports.createHolder = async (req, res) => {
           },
         });
       }
-      // Override provided — proceed, old pass should be revoked separately
     }
 
     const category = await Category.findById(catId).populate("entryPoints");
@@ -387,8 +396,9 @@ exports.createHolder = async (req, res) => {
       preacher: preacher || "",
       preacherId: preacherId || null,
       venueName: venueName || primaryVenue?.name || "",
-      subCategory: incomingSubCat || undefined,
-      sevaSlotId: sevaSlot?._id || undefined,
+      // SubCategory and SevaSlot only apply to Sponsor category
+      subCategory: isSponsorCategory ? (incomingSubCat || undefined) : undefined,
+      sevaSlotId: isSponsorCategory ? (sevaSlot?._id || undefined) : undefined,
       // Reason given when issuing a second pass to the same phone number
       overrideReason: (req.body.overrideReason || "").toString().trim() || undefined,
     });
@@ -763,8 +773,13 @@ async function processSingleRecord(
         ? "91" + phone.replace(/[\+\s\-\(\)]/g, "")
         : phone.replace(/[\+\s\-\(\)]/g, "");
 
-    // Bulk import duplicate rule: same phone + same subCategory = skip (already issued)
-    // same phone + DIFFERENT subCategory = issue new QR (new seva slot)
+    // Duplicate check:
+    // - Sponsor category (catCode SP): one QR per phone per seva slot (SubCategory)
+    //   Same phone + same SubCategory = skip. Different SubCategory = new QR.
+    // - All other categories: one QR per phone per event (SubCategory ignored)
+    const isSponsor = (category.catCode || "").toUpperCase() === "SP";
+    const effectiveSubCat = isSponsor ? subCategory : ""; // ignore SubCategory for non-sponsors
+
     const existingHoldersForPhone = await Holder.find({
       eventId: event._id,
       phone: formattedPhone,
@@ -773,15 +788,14 @@ async function processSingleRecord(
     let skippedQrId = null;
     for (const eh of existingHoldersForPhone) {
       const ehSubCat = (eh.subCategory || "").toString().trim().toUpperCase();
-      const sameSlot =
-        (subCategory && ehSubCat && subCategory === ehSubCat) ||
-        (!subCategory && !ehSubCat);
-      if (!sameSlot) continue; // different seva slot — allow new QR
+      // For sponsors: match on subCategory. For others: any existing = skip.
+      const isMatch = isSponsor
+        ? (effectiveSubCat && ehSubCat && effectiveSubCat === ehSubCat) ||
+          (!effectiveSubCat && !ehSubCat)
+        : true; // non-sponsor: same phone = duplicate regardless of subCategory
+      if (!isMatch) continue;
       const existingQR = await QRPass.findOne({ holderId: eh._id, status: "active" }).select("qrId").lean();
-      if (existingQR) {
-        skippedQrId = existingQR.qrId;
-        break;
-      }
+      if (existingQR) { skippedQrId = existingQR.qrId; break; }
     }
     if (skippedQrId)
       return { success: true, name, phone: formattedPhone, qrId: skippedQrId, skipped: true };
@@ -796,8 +810,8 @@ async function processSingleRecord(
           phone: formattedPhone,
           whatsappNumber: formattedPhone,
           holderType,
-          subCategory: subCategory || undefined,
-          sevaSlotId: sevaSlot?._id || undefined,
+          subCategory: isSponsor ? (subCategory || undefined) : undefined,
+          sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,
           preacher: preacher || "",
           // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
           preacherId: csvPreacherId || bulkPreacherId || null,
