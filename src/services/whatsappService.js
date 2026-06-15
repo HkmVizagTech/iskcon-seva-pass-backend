@@ -15,6 +15,11 @@ class WhatsAppService {
     const entries = this.formatEntryPoints(passDetails.entryPoints || []);
     const venue = passDetails.venue || "ISKCON Temple, Visakhapatnam";
 
+    // {{8}} Seva slot — for sponsors show "Code — Name · Time", else "-"
+    const sevaSlot = passDetails.sevaSlot
+      ? passDetails.sevaSlot.displayLabel || passDetails.sevaSlot.name || "-"
+      : "-";
+
     let dateStr = "Event Date";
     let timeStr = "Event Time";
 
@@ -52,6 +57,7 @@ class WhatsAppService {
     console.log("  Date:", dateStr);
     console.log("  Time:", timeStr);
     console.log("  Entries:", entries);
+    console.log("  Seva Slot:", sevaSlot);
 
     const base64Data = qrImageBase64.replace(/^data:image\/\w+;base64,/, "");
     const imageBuffer = Buffer.from(base64Data, "base64");
@@ -67,13 +73,14 @@ class WhatsAppService {
         {
           type: "body",
           parameters: [
-            { type: "text", text: holderName }, // {{1}} Name
-            { type: "text", text: eventName }, // {{2}} Event
-            { type: "text", text: dateStr }, // {{3}} Date
-            { type: "text", text: timeStr }, // {{4}} Time
-            { type: "text", text: venue }, // {{5}} Venue (DYNAMIC)
+            { type: "text", text: holderName },                              // {{1}} Name
+            { type: "text", text: eventName },                              // {{2}} Event
+            { type: "text", text: dateStr },                                // {{3}} Date
+            { type: "text", text: timeStr },                                // {{4}} Time
+            { type: "text", text: venue },                                  // {{5}} Venue
             { type: "text", text: process.env.HELP_CONTACT || "8977761187" }, // {{6}} Help
-            { type: "text", text: entries }, // {{7}} Access
+            { type: "text", text: entries },                                // {{7}} Access
+            { type: "text", text: sevaSlot },                               // {{8}} Seva Slot
           ],
         },
       ]),
