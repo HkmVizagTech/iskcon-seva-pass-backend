@@ -155,31 +155,35 @@ class QRService {
       // Step 3: validate date window from the LIVE Event record — not from JWT payload
       // This means updating event dates works immediately for all existing QR passes
       // without needing to re-sign or regenerate them.
-      const event = await Event.findById(qrPass.eventId).select("dateStart dateEnd name").lean();
+      const event = await Event.findById(qrPass.eventId)
+        .select("dateStart dateEnd scanStart scanEnd name").lean();
       if (!event) {
         return { valid: false, reason: "invalid", message: "Event not found" };
       }
 
       const now = new Date();
-      const CLOCK_SKEW_MS = 5 * 60 * 1000; // 5 minutes
+      const CLOCK_SKEW_MS = 5 * 60 * 1000; // 5 minutes tolerance
 
-      // FIX: only enforce date window when BOTH dates are set and valid.
-      // If dateStart/dateEnd is null (QR issued before event dates were configured),
-      // new Date(null) = epoch (1970) which always fails the "event has ended" check.
-      // Skip date validation when dates are not properly set — the pass is considered
-      // valid as long as it's active in the DB.
-      const hasValidStart = event.dateStart && !isNaN(new Date(event.dateStart).getTime());
-      const hasValidEnd = event.dateEnd && !isNaN(new Date(event.dateEnd).getTime());
+      // Use scanStart/scanEnd if set — these are the GATE timings.
+      // Falls back to dateStart/dateEnd (ceremony timings) if scan window not configured.
+      const gateStart = event.scanStart || event.dateStart;
+      const gateEnd   = event.scanEnd   || event.dateEnd;
+
+      const hasValidStart = gateStart && !isNaN(new Date(gateStart).getTime());
+      const hasValidEnd   = gateEnd   && !isNaN(new Date(gateEnd).getTime());
 
       if (hasValidStart && hasValidEnd) {
-        const startMs = new Date(event.dateStart).getTime();
-        const endMs = new Date(event.dateEnd).getTime();
+        const startMs = new Date(gateStart).getTime();
+        const endMs   = new Date(gateEnd).getTime();
 
         if (now.getTime() < startMs - CLOCK_SKEW_MS) {
+          const openTime = new Date(gateStart).toLocaleTimeString("en-IN", {
+            timeZone: "Asia/Kolkata", hour: "numeric", minute: "2-digit", hour12: true,
+          });
           return {
             valid: false,
             reason: "not_yet_valid",
-            message: `Event hasn't started yet (starts ${new Date(event.dateStart).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })})`,
+            message: `Gate not open yet — scanning starts at ${openTime}`,
           };
         }
         if (now.getTime() > endMs + CLOCK_SKEW_MS) {
@@ -190,7 +194,7 @@ class QRService {
           };
         }
       }
-      // If dates not set yet, date check is skipped — QR is valid
+      // If no scan/event dates configured, QR is valid (skip check)
 
       // Step 4: check entry point access
       const epIdStr = epId.toString();

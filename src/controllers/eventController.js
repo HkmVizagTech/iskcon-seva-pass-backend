@@ -218,13 +218,17 @@ exports.updateEvent = async (req, res) => {
     // undefined, clearing it in the database.
     const ALLOWED = [
       "name", "eventCode", "description",
-      "dateStart", "dateEnd", "venue",
-      "bannerImage", "donorThreshold", "settings",
+      "dateStart", "dateEnd",
+      "scanStart", "scanEnd",   // gate/scan window — independent of ceremony time
+      "venue", "bannerImage", "donorThreshold", "settings",
     ];
 
     const $set = { updatedAt: new Date() };
+    const $unset = {};
     for (const key of ALLOWED) {
-      if (body[key] !== undefined) {
+      if (body[key] === null) {
+        $unset[key] = 1;  // null = clear the field
+      } else if (body[key] !== undefined) {
         $set[key] = body[key];
       }
     }
@@ -240,9 +244,12 @@ exports.updateEvent = async (req, res) => {
       return res.status(400).json({ error: "End date must be after start date" });
     }
 
+    const update = { $set };
+    if (Object.keys($unset).length > 0) update.$unset = $unset;
+
     const event = await Event.findByIdAndUpdate(
       req.params.id,
-      { $set },
+      update,
       { returnDocument: "after", runValidators: true },
     );
 

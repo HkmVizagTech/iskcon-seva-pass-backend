@@ -20,6 +20,11 @@ const eventSchema = new mongoose.Schema({
     type: Date,
     required: true,
   },
+  // Scan window — when QRs are valid at the gate.
+  // If not set, falls back to dateStart/dateEnd.
+  // Allows gate to open before the ceremony starts.
+  scanStart: { type: Date },
+  scanEnd:   { type: Date },
   venue: [
     {
       name: String,
