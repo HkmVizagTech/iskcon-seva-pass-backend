@@ -15,33 +15,17 @@ class WhatsAppService {
     const entries = this.formatEntryPoints(passDetails.entryPoints || []);
     const venue = passDetails.venue || "ISKCON Temple, Visakhapatnam";
 
-    // {{8}} Seva slot — for sponsors show "Code — Name · Time", else "-"
-    const sevaSlot = passDetails.sevaSlot
-      ? passDetails.sevaSlot.displayLabel || passDetails.sevaSlot.name || "-"
-      : "-";
-
+    // Date only — no event time (ceremony time is in the seva slot line)
     let dateStr = "Event Date";
-    let timeStr = "Event Time";
-
     if (passDetails.validFrom) {
       try {
         const d = new Date(passDetails.validFrom);
         if (!isNaN(d.getTime())) {
-          // FIX: always format in IST regardless of server timezone (Cloud Run = UTC).
-          // Without timeZone: "Asia/Kolkata", a date stored as 02:30Z (= 8:00 IST)
-          // displayed as "2:30 am" on WhatsApp instead of "8:00 am".
-          const istOpts = { timeZone: "Asia/Kolkata" };
           dateStr = d.toLocaleDateString("en-IN", {
-            ...istOpts,
+            timeZone: "Asia/Kolkata",
             day: "numeric",
             month: "short",
             year: "numeric",
-          });
-          timeStr = d.toLocaleTimeString("en-IN", {
-            ...istOpts,
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: true,
           });
         }
       } catch (e) {
@@ -49,15 +33,24 @@ class WhatsAppService {
       }
     }
 
+    // Seva slot line — shows for sponsors, "-" for all others
+    // For sponsors: "A — Pratistha Abhisheka · 7:00 AM"
+    // For others:   "-"
+    const sevaSlot = passDetails.sevaSlot
+      ? passDetails.sevaSlot.displayLabel
+        || (passDetails.sevaSlot.name
+            + (passDetails.sevaSlot.time ? ` · ${passDetails.sevaSlot.time}` : ""))
+        || "-"
+      : "-";
+
     console.log("📤 WhatsApp Send:");
     console.log("  Phone:", phone);
     console.log("  Holder:", holderName);
     console.log("  Event:", eventName);
     console.log("  Venue:", venue);
     console.log("  Date:", dateStr);
-    console.log("  Time:", timeStr);
-    console.log("  Entries:", entries);
     console.log("  Seva Slot:", sevaSlot);
+    console.log("  Entries:", entries);
 
     const base64Data = qrImageBase64.replace(/^data:image\/\w+;base64,/, "");
     const imageBuffer = Buffer.from(base64Data, "base64");
@@ -73,14 +66,13 @@ class WhatsAppService {
         {
           type: "body",
           parameters: [
-            { type: "text", text: holderName },                              // {{1}} Name
-            { type: "text", text: eventName },                              // {{2}} Event
-            { type: "text", text: dateStr },                                // {{3}} Date
-            { type: "text", text: timeStr },                                // {{4}} Time
-            { type: "text", text: venue },                                  // {{5}} Venue
-            { type: "text", text: process.env.HELP_CONTACT || "8977761187" }, // {{6}} Help
-            { type: "text", text: entries },                                // {{7}} Access
-            { type: "text", text: sevaSlot },                               // {{8}} Seva Slot
+            { type: "text", text: holderName },                               // {{1}} Name
+            { type: "text", text: eventName },                               // {{2}} Event
+            { type: "text", text: dateStr },                                 // {{3}} Date
+            { type: "text", text: venue },                                   // {{4}} Venue
+            { type: "text", text: sevaSlot },                                // {{5}} Seva Slot (or "-")
+            { type: "text", text: entries },                                 // {{6}} Access points
+            { type: "text", text: process.env.HELP_CONTACT || "8977761187" }, // {{7}} Help
           ],
         },
       ]),
@@ -100,19 +92,15 @@ class WhatsAppService {
     const status = response.data?.status;
     const msgId = response.data?.message_id || response.data?.id;
 
-    // Log full response so we can diagnose delivery issues
     console.log("✅ Flaxxa response:", JSON.stringify({
       status,
       message_id: msgId,
       phone,
       holderName,
-      // any error detail Flaxxa includes even on "success" responses
       error: response.data?.error || response.data?.message || null,
       raw: JSON.stringify(response.data).slice(0, 300),
     }));
 
-    // Flaxxa returns status:"success" even when the message is queued but
-    // not yet confirmed by Meta. Log it explicitly so we can track.
     if (status !== "success" && status !== "sent") {
       console.warn("⚠️ Flaxxa non-success status:", status, JSON.stringify(response.data).slice(0, 300));
     }
