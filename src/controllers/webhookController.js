@@ -114,6 +114,16 @@ exports.handleRazorpayWebhook = async (req, res) => {
 };
 
 exports.handleWhatsAppWebhook = async (req, res) => {
+  // ── Forward to CRM immediately (fire-and-forget, don't block) ────────────
+  // Flaxxa only supports one webhook URL. We are that URL.
+  // Forward the raw payload to the HKM WhatsApp CRM so it keeps working.
+  const CRM_WEBHOOK = process.env.CRM_WEBHOOK_URL || "https://hkm-wapi-crm-production.up.railway.app/api/webhooks/flaxxa";
+  const axios = require("axios");
+  axios.post(CRM_WEBHOOK, req.body, {
+    headers: { "Content-Type": "application/json" },
+    timeout: 5000,
+  }).catch((e) => console.warn("CRM forward failed:", e.message));
+
   try {
     // Flaxxa WAPI webhook payload format:
     // { message_id, status, phone, error_code, error_message, timestamp }
