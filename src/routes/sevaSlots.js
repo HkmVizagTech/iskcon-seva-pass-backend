@@ -37,6 +37,31 @@ router.post("/", protect, authorize(...ADMIN), async (req, res) => {
   }
 });
 
+// ── DELETE /api/events/:eventId/seva-slots/cleanup ── MUST be before /:slotId ──
+router.delete("/cleanup", protect, authorize(...ADMIN), async (req, res) => {
+  try {
+    const result = await SevaSlot.deleteMany({
+      eventId: req.params.eventId,
+      isActive: false,
+    });
+    res.json({ success: true, deleted: result.deletedCount });
+  } catch (e) {
+    console.error("Slot cleanup error:", e.message);
+    res.status(500).json({ error: "Cleanup failed", detail: e.message });
+  }
+});
+
+// ── GET all including inactive (for admin diagnostics) ────────────────────────
+router.get("/all", protect, authorize(...ADMIN), async (req, res) => {
+  try {
+    const slots = await SevaSlot.find({ eventId: req.params.eventId })
+      .sort({ sortOrder: 1, code: 1 });
+    res.json({ slots });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch slots" });
+  }
+});
+
 // ── PATCH /api/events/:eventId/seva-slots/:slotId ────────────────────────────
 router.patch("/:slotId", protect, authorize(...ADMIN), async (req, res) => {
   try {
@@ -71,21 +96,6 @@ router.delete("/:slotId", protect, authorize(...ADMIN), async (req, res) => {
     res.json({ success: true, deleted: slot.code });
   } catch (e) {
     res.status(500).json({ error: "Failed to delete slot" });
-  }
-});
-
-// ── DELETE /api/events/:eventId/seva-slots/cleanup ───────────────────────────
-// Hard-deletes all soft-deleted (isActive:false) slots for this event
-// so their codes can be reused
-router.delete("/cleanup", protect, authorize(...ADMIN), async (req, res) => {
-  try {
-    const result = await SevaSlot.deleteMany({
-      eventId: req.params.eventId,
-      isActive: false,
-    });
-    res.json({ success: true, deleted: result.deletedCount });
-  } catch (e) {
-    res.status(500).json({ error: "Cleanup failed" });
   }
 });
 
