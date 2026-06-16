@@ -90,8 +90,10 @@ class WhatsAppService {
       // {{5}} Seva slot ("A — Pratistha Abhisheka · 7:00 AM")
       // {{6}} Access points  {{7}} Help
       const sl = passDetails.sevaSlot;
-      const sevaLabel = sl.displayLabel
-        || (sl.name + (sl.time ? ` · ${sl.time}` : ""));
+      const slotName = sl.name + (sl.time ? ` · ${sl.time}` : "");
+      // Prepend bahumana tier so recipient sees "B — Prathama Abhisheka · 7:00 AM"
+      const tier = passDetails.tier || ""; // e.g. "B"
+      const sevaLabel = tier ? `${tier} — ${slotName}` : slotName;
 
       // Template: sponsor_qr_message (5 variables)
       // {{1}} Name  {{2}} Event name  {{3}} Date  {{4}} Venue  {{5}} Seva Slot

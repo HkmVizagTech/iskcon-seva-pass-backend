@@ -442,12 +442,22 @@ exports.createHolder = async (req, res) => {
     let deliveryError = null;
 
     if (deliveryMethod && deliveryMethod !== "none") {
+      // Resolve sevaSlot for WhatsApp (sponsor only)
+      let sevaSlotDetails = null;
+      if (holder.sevaSlotId) {
+        const SevaSlotModel = require("../models/SevaSlot");
+        sevaSlotDetails = await SevaSlotModel.findById(holder.sevaSlotId)
+          .select("code name time displayLabel").lean();
+      }
+
       const passDetails = {
         entryPoints: finalEntryPoints.map((ep) => ep.name || ep.stationLabel),
         qrId: qrId,
         validFrom: validFrom ? validFrom.toISOString() : "",
         validUntil: validUntil ? validUntil.toISOString() : "",
         venue: venueName || event.venue?.[0]?.name || "",
+        sevaSlot: sevaSlotDetails,
+        tier: holder.subCategory || "",  // bahumana tier (A/B/C)
       };
 
       try {
