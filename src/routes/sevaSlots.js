@@ -62,12 +62,13 @@ router.patch("/:slotId", protect, authorize(...ADMIN), async (req, res) => {
 // ── DELETE /api/events/:eventId/seva-slots/:slotId ───────────────────────────
 router.delete("/:slotId", protect, authorize(...ADMIN), async (req, res) => {
   try {
-    const slot = await SevaSlot.findOneAndUpdate(
-      { _id: req.params.slotId, eventId: req.params.eventId },
-      { $set: { isActive: false } }, { returnDocument: "after" },
-    );
+    // Hard delete — removes from DB entirely so the code can be reused
+    const slot = await SevaSlot.findOneAndDelete({
+      _id: req.params.slotId,
+      eventId: req.params.eventId,
+    });
     if (!slot) return res.status(404).json({ error: "Slot not found" });
-    res.json({ success: true });
+    res.json({ success: true, deleted: slot.code });
   } catch (e) {
     res.status(500).json({ error: "Failed to delete slot" });
   }
