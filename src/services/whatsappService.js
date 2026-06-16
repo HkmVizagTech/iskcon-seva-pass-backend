@@ -93,16 +93,16 @@ class WhatsAppService {
       const sevaLabel = sl.displayLabel
         || (sl.name + (sl.time ? ` · ${sl.time}` : ""));
 
+      // Template: sponsor_qr_message (5 variables)
+      // {{1}} Name  {{2}} Event name  {{3}} Date  {{4}} Venue  {{5}} Seva Slot
       return this._sendTemplate(phone, imageBuffer,
-        process.env.WA_TEMPLATE_SPONSOR || "iskcon_sponsor_pass",
+        process.env.WA_TEMPLATE_SPONSOR || "sponsor_qr_message",
         [
-          { type: "text", text: holderName },  // {{1}}
-          { type: "text", text: eventName },   // {{2}}
-          { type: "text", text: dateStr },     // {{3}}
-          { type: "text", text: venue },       // {{4}}
-          { type: "text", text: sevaLabel },   // {{5}}
-          { type: "text", text: entries },     // {{6}}
-          { type: "text", text: help },        // {{7}}
+          { type: "text", text: holderName },  // {{1}} Hare Krishna {{1}}!
+          { type: "text", text: eventName },   // {{2}} Seva Pass for {{2}}
+          { type: "text", text: dateStr },     // {{3}} Date
+          { type: "text", text: venue },       // {{4}} Venue
+          { type: "text", text: sevaLabel },   // {{5}} Seva Slot
         ],
       );
     } else {
