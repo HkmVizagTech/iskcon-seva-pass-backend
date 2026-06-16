@@ -314,36 +314,40 @@ exports.createHolder = async (req, res) => {
     const primaryVenue = event.venue?.[0];
 
     const normPhone = normalisePhone(phone) || phone;
-    const incomingSubCat = (req.body.subCategory || "").toString().trim().toUpperCase();
+
+    // TWO independent sponsor fields:
+    //   • tier (subCategory)  → A/B/C — drives bahumana/gift
+    //   • slotCode            → seva slot code — drives timing/seating
+    const incomingTier = (req.body.subCategory || req.body.tier || "").toString().trim().toUpperCase();
+    const incomingSlotCode = (req.body.sevaSlotCode || req.body.slotCode || "").toString().trim().toUpperCase();
 
     // Resolve category to check if it's a Sponsor category (catCode SP)
     const categoryForCheck = await Category.findById(catId).select("catCode name").lean();
     const isSponsorCategory = (categoryForCheck?.catCode || "").toUpperCase() === "SP";
 
-    // Resolve SevaSlot only for Sponsor category
-    const sevaSlot = (isSponsorCategory && incomingSubCat)
-      ? await SevaSlot.findOne({ eventId, code: incomingSubCat, isActive: true }).lean()
+    // Resolve SevaSlot from the slot code (sponsors only)
+    const sevaSlot = (isSponsorCategory && incomingSlotCode)
+      ? await SevaSlot.findOne({ eventId, code: incomingSlotCode, isActive: true }).lean()
       : null;
 
     // ── Duplicate check ──────────────────────────────────────────────────────
-    // Sponsor category: one QR per seva slot (SubCategory).
-    //   Same phone + same SubCategory → block (duplicate slot)
-    //   Same phone + different SubCategory → allow (different seva = new QR)
-    // All other categories: one QR per phone per event (SubCategory irrelevant).
+    // Sponsor: one QR per phone per SEVA SLOT (timing). Same phone + same slot
+    //   = block. Same phone + different slot = allow (they attend two sevas).
+    //   Tier does NOT affect duplicate logic — it's just the bahumana.
+    // Non-sponsor: one QR per phone per event.
     const existingHolders = await Holder.find({ eventId, phone: normPhone })
-      .select("_id name subCategory").lean();
+      .select("_id name subCategory sevaSlotId").lean();
 
     for (const existing of existingHolders) {
-      const existingSubCat = (existing.subCategory || "").toString().trim().toUpperCase();
-
-      // For sponsors: only block if same slot
       if (isSponsorCategory) {
+        // Compare by seva slot (timing), not tier
+        const existingSlotId = existing.sevaSlotId ? String(existing.sevaSlotId) : "";
+        const incomingSlotId = sevaSlot ? String(sevaSlot._id) : "";
         const sameSlot =
-          (incomingSubCat && existingSubCat && incomingSubCat === existingSubCat) ||
-          (!incomingSubCat && !existingSubCat);
-        if (!sameSlot) continue; // different slot — allow
+          (incomingSlotId && existingSlotId && incomingSlotId === existingSlotId) ||
+          (!incomingSlotId && !existingSlotId);
+        if (!sameSlot) continue; // different slot — allow new QR
       }
-      // For non-sponsors: any existing holder on this phone = potential duplicate
 
       const existingQR = await QRPass.findOne({ holderId: existing._id, status: "active" })
         .select("qrId").lean();
@@ -352,19 +356,19 @@ exports.createHolder = async (req, res) => {
       const reason = (req.body.overrideReason || "").toString().trim();
       if (!reason) {
         const code = isSponsorCategory ? "DUPLICATE_SEVA_SLOT" : "DUPLICATE_PHONE";
-        const slotLabel = incomingSubCat || "General";
+        const slotLabel = sevaSlot ? (sevaSlot.name || incomingSlotCode) : "this seva slot";
         return res.status(409).json({
           code,
           error: isSponsorCategory
-            ? `An active pass for seva slot "${slotLabel}" already exists for this phone number.`
+            ? `An active pass for "${slotLabel}" already exists for this phone number.`
             : "An active pass already exists for this phone number at this event.",
           hint: isSponsorCategory
-            ? "To issue a replacement, provide a reason. To add a different seva slot, change the Sub Category."
+            ? "To issue a replacement, provide a reason. To add a different seva slot, change the Seva Slot."
             : "To issue a replacement, provide a reason (e.g. 'Lost phone').",
           existing: {
             holderId: existing._id,
             holderName: existing.name,
-            subCategory: existingSubCat || null,
+            subCategory: existing.subCategory || null,
             qrId: existingQR.qrId,
           },
         });
@@ -396,8 +400,8 @@ exports.createHolder = async (req, res) => {
       preacher: preacher || "",
       preacherId: preacherId || null,
       venueName: venueName || primaryVenue?.name || "",
-      // SubCategory and SevaSlot only apply to Sponsor category
-      subCategory: isSponsorCategory ? (incomingSubCat || undefined) : undefined,
+      // Sponsor only: tier (bahumana) + seva slot (timing) — independent
+      subCategory: isSponsorCategory ? (incomingTier || undefined) : undefined,
       sevaSlotId: isSponsorCategory ? (sevaSlot?._id || undefined) : undefined,
       // Reason given when issuing a second pass to the same phone number
       overrideReason: (req.body.overrideReason || "").toString().trim() || undefined,
@@ -747,7 +751,11 @@ async function processSingleRecord(
   )
     .toString()
     .trim();
-  const subCategory = (record.SubCategory || record["Sub Category"] || record.subcategory || record.Subcategory || "").toString().trim().toUpperCase();
+  // TWO separate sponsor columns:
+  //   Tier         → A/B/C bahumana gift  (column: Tier / Bahumana)
+  //   SubCategory  → seva slot code        (column: SubCategory / Seva Slot)
+  const tier = (record.Tier || record.tier || record.Bahumana || record.bahumana || "").toString().trim().toUpperCase();
+  const slotCode = (record.SubCategory || record["Sub Category"] || record.subcategory || record.Subcategory || record["Seva Slot"] || record["seva slot"] || "").toString().trim().toUpperCase();
   const preacherRaw = (record.Preacher || record.preacher || "").toString().trim();
   // Resolve preacher from CSV value — tries shortCode match first, then name
   // e.g. "MKGD" in the Preacher column → links to Mukunda Gauranga Dasa's User record
@@ -757,9 +765,9 @@ async function processSingleRecord(
   const venue = (record.Venue || record.venue || "").toString().trim();
   const slot = (record.Slot || record.slot || "").toString().trim();
 
-  // Resolve SevaSlot record from subCategory code (for CSV bulk import)
-  const sevaSlot = subCategory
-    ? await SevaSlot.findOne({ eventId: event._id, code: subCategory, isActive: true }).select("_id").lean()
+  // Resolve SevaSlot from the slot code (sponsors only)
+  const sevaSlot = slotCode
+    ? await SevaSlot.findOne({ eventId: event._id, code: slotCode, isActive: true }).select("_id name").lean()
     : null;
 
   if (!name)
@@ -778,21 +786,21 @@ async function processSingleRecord(
     //   Same phone + same SubCategory = skip. Different SubCategory = new QR.
     // - All other categories: one QR per phone per event (SubCategory ignored)
     const isSponsor = (category.catCode || "").toUpperCase() === "SP";
-    const effectiveSubCat = isSponsor ? subCategory : ""; // ignore SubCategory for non-sponsors
 
     const existingHoldersForPhone = await Holder.find({
       eventId: event._id,
       phone: formattedPhone,
-    }).select("_id subCategory").lean();
+    }).select("_id sevaSlotId").lean();
 
     let skippedQrId = null;
     for (const eh of existingHoldersForPhone) {
-      const ehSubCat = (eh.subCategory || "").toString().trim().toUpperCase();
-      // For sponsors: match on subCategory. For others: any existing = skip.
-      const isMatch = isSponsor
-        ? (effectiveSubCat && ehSubCat && effectiveSubCat === ehSubCat) ||
-          (!effectiveSubCat && !ehSubCat)
-        : true; // non-sponsor: same phone = duplicate regardless of subCategory
+      // Sponsor: dedup by seva SLOT (timing). Non-sponsor: any existing = skip.
+      let isMatch = true;
+      if (isSponsor) {
+        const ehSlotId = eh.sevaSlotId ? String(eh.sevaSlotId) : "";
+        const inSlotId = sevaSlot ? String(sevaSlot._id) : "";
+        isMatch = (inSlotId && ehSlotId && inSlotId === ehSlotId) || (!inSlotId && !ehSlotId);
+      }
       if (!isMatch) continue;
       const existingQR = await QRPass.findOne({ holderId: eh._id, status: "active" }).select("qrId").lean();
       if (existingQR) { skippedQrId = existingQR.qrId; break; }
@@ -810,17 +818,17 @@ async function processSingleRecord(
           phone: formattedPhone,
           whatsappNumber: formattedPhone,
           holderType,
-          subCategory: isSponsor ? (subCategory || undefined) : undefined,
-          sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,
+          subCategory: isSponsor ? (tier || undefined) : undefined,        // bahumana tier
+          sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,  // seva slot (timing)
           preacher: preacher || "",
           // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
           preacherId: csvPreacherId || bulkPreacherId || null,
           venueName: venue || event.venue?.[0]?.name || "",
           notes:
-            [sponsorSeva, sponsorCategory, preacher, venue, slot]
+            [sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode]
               .filter(Boolean)
               .join(" | ") || undefined,
-          customFields: { sponsorSeva, sponsorCategory, preacher, venue, slot },
+          customFields: { sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode },
           issuedBy: userId,
         });
       } catch (createErr) {

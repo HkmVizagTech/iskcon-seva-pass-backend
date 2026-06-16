@@ -27,11 +27,13 @@ const holderSchema = new mongoose.Schema({
   },
   // Reference to the SevaSlot record for this holder.
   // Populated from the event's seva slots — gives name + time.
+  // Seva slot — the TIMING/seating (e.g. Pratistha Abhisheka · 7:00 AM).
+  // Independent of bahumana tier — a tier-A sponsor may attend any slot.
   sevaSlotId: { type: mongoose.Schema.Types.ObjectId, ref: "SevaSlot" },
 
-  // Sub-category within the category — e.g. Sponsor tiers A / B / C.
-  // Different sub-categories receive different bahumana/experience;
-  // the scanner displays this prominently so the desk gives the right kit.
+  // Bahumana TIER — A / B / C. Drives which gift/kit the desk hands over.
+  // Independent of seva slot: tier B can attend the morning slot, etc.
+  // (Sponsors only — ignored for all other categories.)
   subCategory: { type: String, trim: true, uppercase: true },
 
   source: {
