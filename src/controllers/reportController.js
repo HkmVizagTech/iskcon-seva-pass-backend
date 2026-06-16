@@ -303,3 +303,227 @@ exports.getDashboardStats = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch dashboard stats" });
   }
 };
+
+// ── Comprehensive multi-angle analytics ─────────────────────────────────────
+// GET /api/reports/analytics?eventId=xxx  (omit eventId for all-events)
+// Returns: preacherWise, slotWise, tierWise, entryWise + totals
+exports.getAnalytics = async (req, res) => {
+  try {
+    const { eventId } = req.query;
+    const scoped = eventId && eventId !== "all";
+    const eventObjectId = scoped ? new mongoose.Types.ObjectId(eventId) : null;
+
+    // Holder match filter
+    const holderMatch = scoped ? { eventId: eventObjectId } : {};
+
+    // Entry points in scope (for scan filtering)
+    const epFilter = scoped ? { eventId: eventObjectId } : {};
+    const eps = await EntryPoint.find(epFilter).select("_id name stationLabel");
+    const epIds = eps.map((e) => e._id);
+
+    // ── 1. PREACHER-WISE ──────────────────────────────────────────────────
+    // Issued count + scanned (attended) count per preacher
+    const preacherWise = await Holder.aggregate([
+      { $match: holderMatch },
+      {
+        $group: {
+          _id: {
+            preacherId: "$preacherId",
+            preacher: { $ifNull: ["$preacher", "Unassigned"] },
+          },
+          issued: { $sum: 1 },
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id.preacherId",
+          foreignField: "_id",
+          as: "p",
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          preacherId: "$_id.preacherId",
+          name: {
+            $ifNull: [
+              { $arrayElemAt: ["$p.name", 0] },
+              "$_id.preacher",
+            ],
+          },
+          shortCode: { $arrayElemAt: ["$p.shortCode", 0] },
+          issued: 1,
+        },
+      },
+      { $sort: { issued: -1 } },
+    ]);
+
+    // Scanned (attended) per preacher — join scanlog -> holder
+    const preacherScanned = await ScanLog.aggregate([
+      { $match: { epId: { $in: epIds }, result: "granted" } },
+      { $lookup: { from: "holders", localField: "holderId", foreignField: "_id", as: "h" } },
+      { $unwind: { path: "$h", preserveNullAndEmptyArrays: false } },
+      ...(scoped ? [{ $match: { "h.eventId": eventObjectId } }] : []),
+      // unique holders per preacher (one attendance per holder)
+      { $group: { _id: { holderId: "$holderId", preacher: { $ifNull: ["$h.preacher", "Unassigned"] } } } },
+      { $group: { _id: "$_id.preacher", attended: { $sum: 1 } } },
+    ]);
+    const scannedMap = {};
+    preacherScanned.forEach((p) => { scannedMap[p._id] = p.attended; });
+    preacherWise.forEach((p) => { p.attended = scannedMap[p.name] || 0; });
+
+    // ── 2. SEVA SLOT-WISE ─────────────────────────────────────────────────
+    const slotWise = await Holder.aggregate([
+      { $match: { ...holderMatch, sevaSlotId: { $ne: null } } },
+      { $group: { _id: "$sevaSlotId", issued: { $sum: 1 } } },
+      { $lookup: { from: "sevaslots", localField: "_id", foreignField: "_id", as: "s" } },
+      { $unwind: { path: "$s", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0,
+          slotId: "$_id",
+          code: "$s.code",
+          name: { $ifNull: ["$s.name", "Unknown"] },
+          time: "$s.time",
+          issued: 1,
+        },
+      },
+      { $sort: { code: 1 } },
+    ]);
+
+    // ── 3. BAHUMANA TIER-WISE ─────────────────────────────────────────────
+    const tierWise = await Holder.aggregate([
+      { $match: { ...holderMatch, subCategory: { $nin: [null, ""] } } },
+      { $group: { _id: "$subCategory", issued: { $sum: 1 } } },
+      { $project: { _id: 0, tier: "$_id", issued: 1 } },
+      { $sort: { tier: 1 } },
+    ]);
+
+    // ── 4. ENTRY / SCAN-WISE ──────────────────────────────────────────────
+    const entryWise = await ScanLog.aggregate([
+      { $match: { epId: { $in: epIds } } },
+      { $lookup: { from: "entrypoints", localField: "epId", foreignField: "_id", as: "ep" } },
+      { $unwind: { path: "$ep", preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: { epId: "$epId", name: "$ep.name", label: "$ep.stationLabel" },
+          granted: { $sum: { $cond: [{ $eq: ["$result", "granted"] }, 1, 0] } },
+          duplicate: { $sum: { $cond: [{ $eq: ["$result", "already_used"] }, 1, 0] } },
+          denied: { $sum: { $cond: [{ $in: ["$result", ["invalid", "expired", "not_included", "capacity_full"]] }, 1, 0] } },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          epId: "$_id.epId",
+          name: { $ifNull: ["$_id.name", "$_id.label"] },
+          granted: 1, duplicate: 1, denied: 1,
+        },
+      },
+      { $sort: { granted: -1 } },
+    ]);
+
+    // ── Totals ────────────────────────────────────────────────────────────
+    const totalIssued = await Holder.countDocuments(holderMatch);
+    const totalScannedUnique = await ScanLog.aggregate([
+      { $match: { epId: { $in: epIds }, result: "granted" } },
+      ...(scoped ? [
+        { $lookup: { from: "holders", localField: "holderId", foreignField: "_id", as: "h" } },
+        { $unwind: "$h" },
+        { $match: { "h.eventId": eventObjectId } },
+      ] : []),
+      { $group: { _id: "$holderId" } },
+      { $count: "n" },
+    ]);
+    const attended = totalScannedUnique[0]?.n || 0;
+
+    res.json({
+      scope: scoped ? "event" : "all",
+      totals: {
+        issued: totalIssued,
+        attended,
+        notAttended: Math.max(0, totalIssued - attended),
+        attendanceRate: totalIssued ? Math.round((attended / totalIssued) * 100) : 0,
+      },
+      preacherWise,
+      slotWise,
+      tierWise,
+      entryWise,
+    });
+  } catch (error) {
+    console.error("getAnalytics error:", error);
+    res.status(500).json({ error: "Failed to fetch analytics", detail: error.message });
+  }
+};
+
+// ── Export a specific analytics angle as CSV ───────────────────────────────
+// GET /api/reports/analytics/export?eventId=xxx&angle=preacher|slot|tier|entry
+exports.exportAnalytics = async (req, res) => {
+  try {
+    const { eventId, angle } = req.query;
+    const scoped = eventId && eventId !== "all";
+    const eventObjectId = scoped ? new mongoose.Types.ObjectId(eventId) : null;
+    const holderMatch = scoped ? { eventId: eventObjectId } : {};
+    const epFilter = scoped ? { eventId: eventObjectId } : {};
+    const eps = await EntryPoint.find(epFilter).select("_id");
+    const epIds = eps.map((e) => e._id);
+
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    let csv = "";
+
+    if (angle === "preacher") {
+      csv = "Preacher,Issued\n";
+      const data = await Holder.aggregate([
+        { $match: holderMatch },
+        { $group: { _id: { $ifNull: ["$preacher", "Unassigned"] }, issued: { $sum: 1 } } },
+        { $sort: { issued: -1 } },
+      ]);
+      data.forEach((d) => { csv += `${esc(d._id)},${d.issued}\n`; });
+    } else if (angle === "slot") {
+      csv = "Slot Code,Seva Name,Time,Issued\n";
+      const data = await Holder.aggregate([
+        { $match: { ...holderMatch, sevaSlotId: { $ne: null } } },
+        { $group: { _id: "$sevaSlotId", issued: { $sum: 1 } } },
+        { $lookup: { from: "sevaslots", localField: "_id", foreignField: "_id", as: "s" } },
+        { $unwind: { path: "$s", preserveNullAndEmptyArrays: true } },
+        { $sort: { "s.code": 1 } },
+      ]);
+      data.forEach((d) => { csv += `${esc(d.s?.code)},${esc(d.s?.name)},${esc(d.s?.time)},${d.issued}\n`; });
+    } else if (angle === "tier") {
+      csv = "Bahumana Tier,Issued\n";
+      const data = await Holder.aggregate([
+        { $match: { ...holderMatch, subCategory: { $nin: [null, ""] } } },
+        { $group: { _id: "$subCategory", issued: { $sum: 1 } } },
+        { $sort: { _id: 1 } },
+      ]);
+      data.forEach((d) => { csv += `${esc(d._id)},${d.issued}\n`; });
+    } else if (angle === "entry") {
+      csv = "Entry Point,Granted,Duplicate,Denied\n";
+      const data = await ScanLog.aggregate([
+        { $match: { epId: { $in: epIds } } },
+        { $lookup: { from: "entrypoints", localField: "epId", foreignField: "_id", as: "ep" } },
+        { $unwind: { path: "$ep", preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: { $ifNull: ["$ep.name", "$ep.stationLabel"] },
+            granted: { $sum: { $cond: [{ $eq: ["$result", "granted"] }, 1, 0] } },
+            duplicate: { $sum: { $cond: [{ $eq: ["$result", "already_used"] }, 1, 0] } },
+            denied: { $sum: { $cond: [{ $in: ["$result", ["invalid", "expired", "not_included", "capacity_full"]] }, 1, 0] } },
+          },
+        },
+        { $sort: { granted: -1 } },
+      ]);
+      data.forEach((d) => { csv += `${esc(d._id)},${d.granted},${d.duplicate},${d.denied}\n`; });
+    } else {
+      return res.status(400).json({ error: "Invalid angle" });
+    }
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="report_${angle}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error("exportAnalytics error:", error);
+    res.status(500).json({ error: "Export failed", detail: error.message });
+  }
+};
