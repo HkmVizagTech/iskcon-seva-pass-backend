@@ -69,7 +69,9 @@ class WhatsAppService {
     const base64Data  = qrImageBase64.replace(/^data:image\/\w+;base64,/, "");
     const imageBuffer = Buffer.from(base64Data, "base64");
 
-    const isSponsor = !!passDetails.sevaSlot;
+    // Sponsor = catCode 'SP' OR has a seva slot. Don't rely on sevaSlot alone
+    // because a sponsor may not have a slot assigned yet.
+    const isSponsor = passDetails.isSponsor === true || !!passDetails.sevaSlot;
 
     console.log("📤 WhatsApp Send:");
     console.log("  Phone:", phone);

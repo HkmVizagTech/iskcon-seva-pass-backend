@@ -458,6 +458,7 @@ exports.createHolder = async (req, res) => {
         venue: venueName || event.venue?.[0]?.name || "",
         sevaSlot: sevaSlotDetails,
         tier: holder.subCategory || "",  // bahumana tier (A/B/C)
+        isSponsor: isSponsorCategory,    // always use sponsor template for SP category
       };
 
       try {
@@ -777,7 +778,7 @@ async function processSingleRecord(
 
   // Resolve SevaSlot from the slot code (sponsors only)
   const sevaSlot = slotCode
-    ? await SevaSlot.findOne({ eventId: event._id, code: slotCode, isActive: true }).select("_id name").lean()
+    ? await SevaSlot.findOne({ eventId: event._id, code: slotCode, isActive: true }).select("_id code name time").lean()
     : null;
 
   if (!name)
@@ -899,6 +900,14 @@ async function processSingleRecord(
             validFrom: event.dateStart.toISOString(),
             validUntil: event.dateEnd.toISOString(),
             venue: venue || event.venue?.[0]?.name || "",
+            isSponsor: isSponsor,           // use sponsor_qr_message template
+            tier: tier || "",               // bahumana tier A/B/C
+            sevaSlot: sevaSlot ? {          // slot name + time for {{5}}
+              name: sevaSlot.name,
+              time: sevaSlot.time,
+              displayLabel: sevaSlot.displayLabel ||
+                (sevaSlot.name + (sevaSlot.time ? ` · ${sevaSlot.time}` : "")),
+            } : null,
           },
         );
         qrPass.deliveryStatus = "sent";
