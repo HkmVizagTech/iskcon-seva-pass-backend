@@ -74,4 +74,19 @@ router.delete("/:slotId", protect, authorize(...ADMIN), async (req, res) => {
   }
 });
 
+// ── DELETE /api/events/:eventId/seva-slots/cleanup ───────────────────────────
+// Hard-deletes all soft-deleted (isActive:false) slots for this event
+// so their codes can be reused
+router.delete("/cleanup", protect, authorize(...ADMIN), async (req, res) => {
+  try {
+    const result = await SevaSlot.deleteMany({
+      eventId: req.params.eventId,
+      isActive: false,
+    });
+    res.json({ success: true, deleted: result.deletedCount });
+  } catch (e) {
+    res.status(500).json({ error: "Cleanup failed" });
+  }
+});
+
 module.exports = router;
