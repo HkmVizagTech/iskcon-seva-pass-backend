@@ -129,6 +129,7 @@ exports.scanQR = async (req, res) => {
       // Log the failed attempt (async — don't make the volunteer wait)
       ScanLog.create({
         qrId: validatedQrId,
+        holderId: validation.qrPass?.holderId?._id || validation.qrPass?.holderId || null,
         epId: incomingEpId,
         scannedBy: userId,
         stationLabel: finalStationLabel,
@@ -168,6 +169,17 @@ exports.scanQR = async (req, res) => {
     if (!redemption.redeemed) {
       // Lost an atomic race (or pass just revoked) — treat as already scanned
       recentScans.delete(dupKey);
+      // Log the already_used scan so it shows correctly in the live feed
+      ScanLog.create({
+        qrId: validatedQrId,
+        holderId: fullHolderId,
+        epId: incomingEpId,
+        scannedBy: userId,
+        stationLabel: finalStationLabel,
+        result: "already_used",
+        groupCount: incomingGroupCount,
+        deviceInfo: { ...deviceInfo, groupCount: incomingGroupCount, ipAddress: req.ip },
+      }).catch((e) => console.error("ScanLog(already_used) write error:", e.message));
       return res.json({
         success: false,
         result: "already_used",
@@ -175,7 +187,7 @@ exports.scanQR = async (req, res) => {
         holder_name: validation.holderName,
         holderName: validation.holderName,
         subCategory: validation.subCategory || null,
-      sevaSlot: validation.sevaSlot || null,
+        sevaSlot: validation.sevaSlot || null,
         categoryName: validation.categoryName || null,
       });
     }

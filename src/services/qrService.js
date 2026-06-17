@@ -220,6 +220,7 @@ class QRService {
               displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
             } : null,
             categoryName: qrPass.holderId?.catId?.name || null,
+            qrPass,  // include so scanController can log holderId
           };
         }
       }
