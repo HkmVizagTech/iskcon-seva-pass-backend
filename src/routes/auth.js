@@ -33,10 +33,13 @@ router.delete("/staff/:userId", _protect, _authorize("super_admin","event_admin"
 const User = require("../models/User");
 router.patch("/staff/:userId/permissions", _protect, _authorize("super_admin","event_admin"), async (req, res) => {
   try {
-    const { canManualEntry, canOverride } = req.body;
+    const { canManualEntry, canOverride, canBahumanaView, allowedEvents, role } = req.body;
     const update = {};
     if (canManualEntry !== undefined) update.canManualEntry = canManualEntry;
     if (canOverride !== undefined) update.canOverride = canOverride;
+    if (canBahumanaView !== undefined) update.canBahumanaView = canBahumanaView;
+    if (allowedEvents !== undefined) update.allowedEvents = allowedEvents;
+    if (role !== undefined) update.role = role;
     const user = await User.findByIdAndUpdate(req.params.userId, { $set: update }, { new: true })
       .select("-password");
     if (!user) return res.status(404).json({ error: "User not found" });

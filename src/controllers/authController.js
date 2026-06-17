@@ -74,7 +74,7 @@ exports.login = async (req, res) => {
       user: {
         id: user._id, name: user.name, email: user.email,
         role: user.role, avatar: user.avatar,
-        permissions: { canOverride: user.canOverride, canManualEntry: user.canManualEntry, allowedEvents: user.allowedEvents },
+        permissions: { canOverride: user.canOverride, canManualEntry: user.canManualEntry, canBahumanaView: user.canBahumanaView, allowedEvents: user.allowedEvents },
       },
     });
   } catch (error) {

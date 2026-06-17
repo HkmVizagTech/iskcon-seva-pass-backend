@@ -82,7 +82,11 @@ const userSchema = new mongoose.Schema({
   },
   canManualEntry: {
     type: Boolean,
-    default: false,   // explicit permission to mark attendance without scanning
+    default: false,
+  },
+  canBahumanaView: {
+    type: Boolean,
+    default: false,   // can see the bahumana announcement view
   },
   isActive: {
     type: Boolean,
