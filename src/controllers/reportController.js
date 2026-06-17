@@ -141,15 +141,21 @@ exports.getScanLog = async (req, res) => {
     // FIX: cursor-based pagination instead of skip/limit
     // skip(N) on large collections scans N documents — gets exponentially slower per page
     // before= accepts the scannedAt ISO string of the last item from the previous page
-    const { before, limit = 50, result: resultFilter } = req.query;
+    const { before, limit = 50, result: resultFilter, slotId } = req.query;
 
     const eventEntryPoints = await EntryPoint.find({ eventId }).select("_id");
     const epIds = eventEntryPoints.map((ep) => ep._id);
 
     const query = { epId: { $in: epIds } };
     if (resultFilter) query.result = resultFilter;
-    // Cursor: only return records older than the cursor
     if (before) query.scannedAt = { $lt: new Date(before) };
+
+    // Slot filter: find all holder IDs with this seva slot, then filter scan logs
+    if (slotId) {
+      const Holder = require("../models/Holder");
+      const holderIds = await Holder.find({ sevaSlotId: slotId }).select("_id").lean();
+      query.holderId = { $in: holderIds.map(h => h._id) };
+    }
 
     const logs = await ScanLog.find(query)
       .populate("epId", "name stationLabel")
@@ -614,6 +620,7 @@ exports.exportAnalytics = async (req, res) => {
 exports.getBahumanaAnnouncement = async (req, res) => {
   try {
     const { eventId } = req.params;
+    const { slotId } = req.query;   // optional slot filter
     const eventObjectId = new mongoose.Types.ObjectId(eventId);
 
     // Get all entry points for this event
@@ -627,11 +634,14 @@ exports.getBahumanaAnnouncement = async (req, res) => {
     ]);
     const attendedIds = attendedScans.map((s) => s._id).filter(Boolean);
 
-    // Get holder details for attended sponsors
-    const holders = await Holder.find({
+    // Get holder details for attended sponsors (optionally filtered by slot)
+    const holderFilter = {
       _id: { $in: attendedIds },
       eventId: eventObjectId,
-    })
+    };
+    if (slotId) holderFilter.sevaSlotId = new mongoose.Types.ObjectId(slotId);
+
+    const holders = await Holder.find(holderFilter)
       .populate("catId", "name catCode color")
       .populate("sevaSlotId", "code name time sortOrder")
       .select("name phone subCategory catId sevaSlotId venueName")
