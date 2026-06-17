@@ -152,9 +152,16 @@ exports.getScanLog = async (req, res) => {
     if (before) query.scannedAt = { $lt: new Date(before) };
 
     const logs = await ScanLog.find(query)
-      .populate("epId", "name")
+      .populate("epId", "name stationLabel")
       .populate("scannedBy", "name")
-      .populate("holderId", "name phone")
+      .populate({
+        path: "holderId",
+        select: "name phone subCategory sevaSlotId catId",
+        populate: [
+          { path: "catId", select: "name catCode color" },
+          { path: "sevaSlotId", select: "code name time" },
+        ],
+      })
       .sort({ scannedAt: -1 })
       .limit(Number(limit) + 1); // fetch one extra to detect hasMore
 
