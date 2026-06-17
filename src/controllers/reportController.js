@@ -733,3 +733,79 @@ exports.getBahumanaAnnouncement = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch announcement data" });
   }
 };;
+
+// ── Bahumana Announcement CSV export ────────────────────────────────────────
+// GET /api/reports/events/:eventId/bahumana-announcement/export?session=all|morning|evening
+exports.exportBahumanaAnnouncement = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { session = "all" } = req.query;
+    const eventObjectId = new mongoose.Types.ObjectId(eventId);
+
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const SPLIT_HOUR_IST = 14;
+
+    const eps = await EntryPoint.find({ eventId: eventObjectId }).select("_id");
+    const epIds = eps.map((e) => e._id);
+
+    const scanAgg = await ScanLog.aggregate([
+      { $match: { epId: { $in: epIds }, result: "granted", holderId: { $ne: null } } },
+      { $sort: { scannedAt: 1 } },
+      { $group: { _id: "$holderId", firstScan: { $first: "$scannedAt" } } },
+    ]);
+
+    const filteredScans = scanAgg.filter((s) => {
+      if (session === "all") return true;
+      const hourIST = new Date(new Date(s.firstScan).getTime() + IST_OFFSET_MS).getUTCHours();
+      return session === "morning" ? hourIST < SPLIT_HOUR_IST : hourIST >= SPLIT_HOUR_IST;
+    });
+
+    const attendedIds = filteredScans.map((s) => s._id).filter(Boolean);
+    const scanTimeMap = {};
+    filteredScans.forEach((s) => { scanTimeMap[String(s._id)] = s.firstScan; });
+
+    const holders = await Holder.find({
+      _id: { $in: attendedIds },
+      eventId: eventObjectId,
+    })
+      .populate("catId", "name catCode")
+      .populate("sevaSlotId", "code name time")
+      .select("name phone subCategory catId sevaSlotId venueName")
+      .sort({ subCategory: 1, name: 1 })
+      .lean();
+
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+
+    let csv = "S.No,Name,Phone,Category,Bahumana Tier,Seva Slot,Venue,Scan Session,Scan Time (IST)\n";
+    holders.forEach((h, i) => {
+      const scanTime = scanTimeMap[String(h._id)];
+      const scanIST = scanTime
+        ? new Date(new Date(scanTime).getTime() + IST_OFFSET_MS)
+            .toUTCString().replace(" GMT", "")
+        : "";
+      const sessionLabel = scanTime
+        ? (new Date(new Date(scanTime).getTime() + IST_OFFSET_MS).getUTCHours() < SPLIT_HOUR_IST
+            ? "Morning" : "Evening")
+        : "";
+      csv += [
+        i + 1,
+        esc(h.name),
+        esc(h.phone),
+        esc(h.catId?.name || ""),
+        esc(h.subCategory || ""),
+        esc(h.sevaSlotId ? `${h.sevaSlotId.name}${h.sevaSlotId.time ? " · " + h.sevaSlotId.time : ""}` : ""),
+        esc(h.venueName || ""),
+        esc(sessionLabel),
+        esc(scanIST),
+      ].join(",") + "\n";
+    });
+
+    const label = session === "morning" ? "morning" : session === "evening" ? "evening" : "all";
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="bahumana_${label}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error("exportBahumanaAnnouncement error:", error);
+    res.status(500).json({ error: "Export failed" });
+  }
+};
