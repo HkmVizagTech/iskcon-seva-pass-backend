@@ -657,35 +657,51 @@ exports.exportAnalytics = async (req, res) => {
 exports.getBahumanaAnnouncement = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { slotId } = req.query;   // optional slot filter
+    const { session = "all" } = req.query; // all | morning | evening
     const eventObjectId = new mongoose.Types.ObjectId(eventId);
 
-    // Get all entry points for this event
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // UTC+5:30
+    const SPLIT_HOUR_IST = 14; // 2:00 PM IST
+
     const eps = await EntryPoint.find({ eventId: eventObjectId }).select("_id");
     const epIds = eps.map((e) => e._id);
 
-    // Find all unique holders who were granted entry (attended)
-    const attendedScans = await ScanLog.aggregate([
-      { $match: { epId: { $in: epIds }, result: "granted" } },
-      { $group: { _id: "$holderId" } },
+    // Get first granted scan per holder with its time
+    const scanAgg = await ScanLog.aggregate([
+      { $match: { epId: { $in: epIds }, result: "granted", holderId: { $ne: null } } },
+      { $sort: { scannedAt: 1 } },
+      { $group: { _id: "$holderId", firstScan: { $first: "$scannedAt" } } },
     ]);
-    const attendedIds = attendedScans.map((s) => s._id).filter(Boolean);
 
-    // Get holder details for attended sponsors (optionally filtered by slot)
-    const holderFilter = {
+    // Compute sessions for all scans (for badge counts)
+    let morningCount = 0, eveningCount = 0;
+    scanAgg.forEach((s) => {
+      const istMs = new Date(s.firstScan).getTime() + IST_OFFSET_MS;
+      const hourIST = new Date(istMs).getUTCHours();
+      if (hourIST < SPLIT_HOUR_IST) morningCount++;
+      else eveningCount++;
+    });
+
+    // Filter by session
+    const filteredScans = scanAgg.filter((s) => {
+      if (session === "all") return true;
+      const istMs = new Date(s.firstScan).getTime() + IST_OFFSET_MS;
+      const hourIST = new Date(istMs).getUTCHours();
+      return session === "morning" ? hourIST < SPLIT_HOUR_IST : hourIST >= SPLIT_HOUR_IST;
+    });
+
+    const attendedIds = filteredScans.map((s) => s._id).filter(Boolean);
+
+    const holders = await Holder.find({
       _id: { $in: attendedIds },
       eventId: eventObjectId,
-    };
-    if (slotId) holderFilter.sevaSlotId = new mongoose.Types.ObjectId(slotId);
-
-    const holders = await Holder.find(holderFilter)
+    })
       .populate("catId", "name catCode color")
       .populate("sevaSlotId", "code name time sortOrder")
       .select("name phone subCategory catId sevaSlotId venueName")
       .sort({ subCategory: 1, name: 1 })
       .lean();
 
-    // Group by tier (A first, then B, then C, then untiered sponsors, then others)
     const tierOrder = ["A", "B", "C"];
     const sponsors = holders.filter(
       (h) => (h.catId?.catCode || "").toUpperCase() === "SP"
@@ -693,26 +709,27 @@ exports.getBahumanaAnnouncement = async (req, res) => {
     const others = holders.filter(
       (h) => (h.catId?.catCode || "").toUpperCase() !== "SP"
     );
-
-    const grouped = tierOrder.map((tier) => ({
-      tier,
-      holders: sponsors.filter((h) => h.subCategory === tier),
-    })).filter((g) => g.holders.length > 0);
-
-    // Add any sponsors without a tier
+    const grouped = tierOrder
+      .map((tier) => ({ tier, holders: sponsors.filter((h) => h.subCategory === tier) }))
+      .filter((g) => g.holders.length > 0);
     const untiered = sponsors.filter((h) => !h.subCategory);
     if (untiered.length > 0) grouped.push({ tier: "—", holders: untiered });
 
     res.json({
       eventId,
-      slotId: slotId || null,
+      session,
       totalAttended: attendedIds.length,
       sponsorsAttended: sponsors.length,
       grouped,
       others,
+      sessions: {
+        morning: { count: morningCount, label: "Morning (before 2:00 PM)" },
+        evening: { count: eveningCount, label: "Evening (from 2:00 PM)" },
+        all:     { count: scanAgg.length, label: "All Sessions" },
+      },
     });
   } catch (error) {
     console.error("getBahumanaAnnouncement error:", error);
     res.status(500).json({ error: "Failed to fetch announcement data" });
   }
-};
+};;
