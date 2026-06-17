@@ -668,6 +668,7 @@ exports.getBahumanaAnnouncement = async (req, res) => {
 
     res.json({
       eventId,
+      slotId: slotId || null,
       totalAttended: attendedIds.length,
       sponsorsAttended: sponsors.length,
       grouped,
