@@ -970,3 +970,69 @@ function parseExcel(filePath) {
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// ── Manual Entry: mark a holder as attended without physical QR scan ─────────
+// POST /api/qr/:qrId/manual-entry
+// Requires canManualEntry permission. Creates a ScanLog with source:manual.
+exports.manualEntry = async (req, res) => {
+  try {
+    const { qrId } = req.params;
+    const { epId, stationLabel, reason } = req.body;
+    const userId = req.user._id || req.user.id;
+
+    // Check permission
+    if (!req.user.canManualEntry) {
+      return res.status(403).json({ error: "You do not have manual entry permission" });
+    }
+
+    // Find the QR pass
+    const QRPass = require("../models/QRPass");
+    const ScanLog = require("../models/ScanLog");
+    const EntryPoint = require("../models/EntryPoint");
+
+    const qrPass = await QRPass.findOne({ qrId: qrId.toUpperCase() })
+      .populate({ path: "holderId", select: "name phone subCategory catId sevaSlotId eventId",
+        populate: [{ path: "catId", select: "name catCode color" },
+                   { path: "sevaSlotId", select: "code name time" }] });
+
+    if (!qrPass) return res.status(404).json({ error: "QR pass not found" });
+    if (qrPass.status !== "active") return res.status(400).json({ error: "QR pass is not active" });
+
+    // Resolve entry point
+    let resolvedEpId = epId;
+    let resolvedLabel = stationLabel || "Manual Entry";
+    if (!resolvedEpId) {
+      // Use the first entry point for the event
+      const ep = await EntryPoint.findOne({ eventId: qrPass.eventId }).select("_id name stationLabel");
+      if (ep) { resolvedEpId = ep._id; resolvedLabel = ep.name || resolvedLabel; }
+    }
+
+    // Create scan log with source: manual
+    await ScanLog.create({
+      qrId: qrPass.qrId,
+      holderId: qrPass.holderId?._id || qrPass.holderId,
+      epId: resolvedEpId,
+      scannedBy: userId,
+      stationLabel: resolvedLabel,
+      result: "granted",
+      source: "manual",
+      notes: reason || "Manual entry by admin",
+      deviceInfo: { ipAddress: req.ip, source: "admin_dashboard" },
+    });
+
+    // Update entry point counter
+    if (resolvedEpId) {
+      await EntryPoint.findByIdAndUpdate(resolvedEpId, { $inc: { currentCount: 1 } });
+    }
+
+    return res.json({
+      success: true,
+      message: `${qrPass.holderId?.name || "Holder"} marked as attended`,
+      holderName: qrPass.holderId?.name,
+      qrId: qrPass.qrId,
+    });
+  } catch (error) {
+    console.error("manualEntry error:", error);
+    res.status(500).json({ error: "Manual entry failed", detail: error.message });
+  }
+};

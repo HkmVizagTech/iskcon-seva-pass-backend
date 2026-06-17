@@ -45,6 +45,8 @@ const scanLogSchema = new mongoose.Schema({
     ],
     required: true,
   },
+  source: { type: String, enum: ['scanner','manual','offline'], default: 'scanner' },
+  notes: { type: String },
   deviceInfo: {
     deviceId: String,
     userAgent: String,

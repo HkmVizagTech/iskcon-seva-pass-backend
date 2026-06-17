@@ -24,6 +24,7 @@ router.get("/:qrId/image", async (req, res) => {
 });
 
 router.get("/:qrId", protect, holderController.getQRDetails);
+router.post("/:qrId/manual-entry", protect, holderController.manualEntry);
 router.patch(
   "/:qrId/revoke",
   protect,

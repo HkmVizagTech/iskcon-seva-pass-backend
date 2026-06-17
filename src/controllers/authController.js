@@ -74,7 +74,7 @@ exports.login = async (req, res) => {
       user: {
         id: user._id, name: user.name, email: user.email,
         role: user.role, avatar: user.avatar,
-        permissions: { canOverride: user.canOverride, allowedEvents: user.allowedEvents },
+        permissions: { canOverride: user.canOverride, canManualEntry: user.canManualEntry, allowedEvents: user.allowedEvents },
       },
     });
   } catch (error) {
@@ -221,7 +221,7 @@ exports.deleteUser = async (req, res) => {
 // ── Admin: create a staff user (event_admin, announcer, etc) ────────────────
 exports.createStaffUser = async (req, res) => {
   try {
-    const { name, email, password, role, allowedEvents } = req.body;
+    const { name, email, password, role, allowedEvents, canManualEntry } = req.body;
     if (!name || !email || !password || !role) {
       return res.status(400).json({ error: "name, email, password, role are required" });
     }
@@ -231,12 +231,13 @@ exports.createStaffUser = async (req, res) => {
     const user = await User.create({
       name, email, password,
       role,
+      canManualEntry: canManualEntry === true,
       allowedEvents: allowedEvents || [],
       isActive: true,
     });
     res.status(201).json({
       success: true,
-      user: { _id: user._id, name: user.name, email: user.email, role: user.role, allowedEvents: user.allowedEvents },
+      user: { _id: user._id, name: user.name, email: user.email, role: user.role, canManualEntry: user.canManualEntry, allowedEvents: user.allowedEvents },
     });
   } catch (error) {
     console.error("createStaffUser error:", error);

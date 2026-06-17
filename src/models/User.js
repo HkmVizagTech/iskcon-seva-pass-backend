@@ -80,6 +80,10 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  canManualEntry: {
+    type: Boolean,
+    default: false,   // explicit permission to mark attendance without scanning
+  },
   isActive: {
     type: Boolean,
     default: true,

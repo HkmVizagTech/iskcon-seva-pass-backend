@@ -148,7 +148,7 @@ app.get("/health", (req, res) => {
 
 // Version — used to verify Railway deployed the latest commit
 app.get("/version", (req, res) => {
-  res.json({ build: "production-v26-announcer-role", time: new Date().toISOString() });
+  res.json({ build: "production-v27-manual-entry", time: new Date().toISOString() });
 });
 
 // Test route
