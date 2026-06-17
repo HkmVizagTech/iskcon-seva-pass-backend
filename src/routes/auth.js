@@ -45,3 +45,23 @@ router.patch("/staff/:userId/permissions", _protect, _authorize("super_admin","e
     res.status(500).json({ error: "Failed to update permissions" });
   }
 });
+
+// ── Admin: full update of a staff user (role, allowedEvents, permissions) ────
+router.patch("/staff/:userId", _protect, _authorize("super_admin","event_admin"), async (req, res) => {
+  try {
+    const { role, allowedEvents, canManualEntry, canOverride, isActive } = req.body;
+    const update = {};
+    if (role !== undefined) update.role = role;
+    if (allowedEvents !== undefined) update.allowedEvents = allowedEvents;
+    if (canManualEntry !== undefined) update.canManualEntry = canManualEntry;
+    if (canOverride !== undefined) update.canOverride = canOverride;
+    if (isActive !== undefined) update.isActive = isActive;
+    const user = await User.findByIdAndUpdate(
+      req.params.userId, { $set: update }, { new: true }
+    ).select("-password").populate("allowedEvents", "name eventCode");
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true, user });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to update user" });
+  }
+});
