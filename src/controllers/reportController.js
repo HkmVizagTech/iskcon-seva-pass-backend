@@ -141,7 +141,7 @@ exports.getScanLog = async (req, res) => {
     // FIX: cursor-based pagination instead of skip/limit
     // skip(N) on large collections scans N documents — gets exponentially slower per page
     // before= accepts the scannedAt ISO string of the last item from the previous page
-    const { before, limit = 50, result: resultFilter, slotId } = req.query;
+    const { before, limit = 50, result: resultFilter, slotId, session } = req.query;
 
     const eventEntryPoints = await EntryPoint.find({ eventId }).select("_id");
     const epIds = eventEntryPoints.map((ep) => ep._id);
@@ -150,11 +150,48 @@ exports.getScanLog = async (req, res) => {
     if (resultFilter) query.result = resultFilter;
     if (before) query.scannedAt = { $lt: new Date(before) };
 
-    // Slot filter: find all holder IDs with this seva slot, then filter scan logs
+    // Slot filter (legacy): find all holder IDs with this seva slot
     if (slotId) {
       const Holder = require("../models/Holder");
       const holderIds = await Holder.find({ sevaSlotId: slotId }).select("_id").lean();
       query.holderId = { $in: holderIds.map(h => h._id) };
+    }
+
+    // Session filter: morning = before 14:00 IST, evening = from 14:00 IST
+    if (session === "morning" || session === "evening") {
+      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+      const SPLIT_HOUR = 14;
+      // We need to filter by hour in IST. MongoDB $expr with $hour uses UTC.
+      // IST 14:00 = UTC 08:30 → use UTC hour 8 as approximation
+      // More precisely: scan time + 5.5h offset, then check hour < 14
+      // Use $expr to compute: ((scannedAt_ms + IST_OFFSET_MS) / 3600000) % 24 < 14
+      const splitUTCHour = SPLIT_HOUR - 5; // 9 (approximate — 08:30 UTC = 14:00 IST)
+      const splitUTCMinute = 30;
+      if (session === "morning") {
+        query.$expr = {
+          $lt: [
+            {
+              $add: [
+                { $multiply: [{ $hour: "$scannedAt" }, 60] },
+                { $minute: "$scannedAt" },
+              ],
+            },
+            splitUTCHour * 60 + splitUTCMinute, // 570 minutes = 9h30m UTC = 15h00 IST
+          ],
+        };
+      } else {
+        query.$expr = {
+          $gte: [
+            {
+              $add: [
+                { $multiply: [{ $hour: "$scannedAt" }, 60] },
+                { $minute: "$scannedAt" },
+              ],
+            },
+            splitUTCHour * 60 + splitUTCMinute,
+          ],
+        };
+      }
     }
 
     const logs = await ScanLog.find(query)
