@@ -445,6 +445,55 @@ exports.getAnalytics = async (req, res) => {
     ]);
     const attended = totalScannedUnique[0]?.n || 0;
 
+    // ── 5. DELIVERY-WISE ──────────────────────────────────────────────
+    const QRPass = require("../models/QRPass");
+    const deliveryWise = await QRPass.aggregate([
+      { $match: scoped ? { eventId: eventObjectId } : {} },
+      {
+        $group: {
+          _id: {
+            status: { $ifNull: ["$deliveryStatus", "pending"] },
+            method: { $ifNull: ["$deliveryMethod", "none"] },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { "_id.status": 1 } },
+    ]);
+
+    // Failed list — names for follow-up
+    const failedPasses = await QRPass.find({
+      ...(scoped ? { eventId: eventObjectId } : {}),
+      deliveryStatus: "failed",
+    })
+      .populate("holderId", "name phone")
+      .select("qrId deliveryError holderId")
+      .limit(100)
+      .lean();
+
+    // Sent but not confirmed delivered
+    const sentCount = await QRPass.countDocuments({
+      ...(scoped ? { eventId: eventObjectId } : {}),
+      deliveryStatus: "sent",
+    });
+    const deliveredCount = await QRPass.countDocuments({
+      ...(scoped ? { eventId: eventObjectId } : {}),
+      deliveryStatus: "delivered",
+    });
+    const failedCount = await QRPass.countDocuments({
+      ...(scoped ? { eventId: eventObjectId } : {}),
+      deliveryStatus: "failed",
+    });
+    const pendingCount = await QRPass.countDocuments({
+      ...(scoped ? { eventId: eventObjectId } : {}),
+      deliveryStatus: { $in: [null, "pending"] },
+      deliveryMethod: { $ne: "none" },
+    });
+    const noDeliveryCount = await QRPass.countDocuments({
+      ...(scoped ? { eventId: eventObjectId } : {}),
+      deliveryMethod: "none",
+    });
+
     res.json({
       scope: scoped ? "event" : "all",
       totals: {
@@ -457,6 +506,19 @@ exports.getAnalytics = async (req, res) => {
       slotWise,
       tierWise,
       entryWise,
+      deliveryWise: {
+        sent: sentCount,
+        delivered: deliveredCount,
+        failed: failedCount,
+        pending: pendingCount,
+        noDelivery: noDeliveryCount,
+        failedList: failedPasses.map(p => ({
+          qrId: p.qrId,
+          name: p.holderId?.name || "Unknown",
+          phone: p.holderId?.phone || "",
+          error: p.deliveryError,
+        })),
+      },
     });
   } catch (error) {
     console.error("getAnalytics error:", error);
@@ -522,6 +584,17 @@ exports.exportAnalytics = async (req, res) => {
         { $sort: { granted: -1 } },
       ]);
       data.forEach((d) => { csv += `${esc(d._id)},${d.granted},${d.duplicate},${d.denied}\n`; });
+    } else if (angle === "delivery") {
+      csv = "Name,Phone,QR ID,Delivery Status,Error\n";
+      const QRPass = require("../models/QRPass");
+      const data = await QRPass.find({ ...(scoped ? { eventId: eventObjectId } : {}), deliveryMethod: { $ne: "none" } })
+        .populate("holderId", "name phone")
+        .select("qrId deliveryStatus deliveryError holderId")
+        .sort({ deliveryStatus: 1, createdAt: -1 })
+        .lean();
+      data.forEach((p) => {
+        csv += `${esc(p.holderId?.name)},${esc(p.holderId?.phone)},${esc(p.qrId)},${esc(p.deliveryStatus || "pending")},${esc(p.deliveryError || "")}\n`;
+      });
     } else {
       return res.status(400).json({ error: "Invalid angle" });
     }
