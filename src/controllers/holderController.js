@@ -980,8 +980,10 @@ exports.manualEntry = async (req, res) => {
     const { epId, stationLabel, reason } = req.body;
     const userId = req.user._id || req.user.id;
 
-    // Check permission
-    if (!req.user.canManualEntry) {
+    // Check permission — super_admin and event_admin always allowed
+    const hasPermission = req.user.canManualEntry ||
+      req.user.role === "super_admin" || req.user.role === "event_admin";
+    if (!hasPermission) {
       return res.status(403).json({ error: "You do not have manual entry permission" });
     }
 
