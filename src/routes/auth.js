@@ -28,3 +28,20 @@ const { protect: _protect, authorize: _authorize } = require("../middleware/auth
 router.get("/staff", _protect, _authorize("super_admin","event_admin"), authController.listStaffUsers);
 router.post("/staff", _protect, _authorize("super_admin","event_admin"), authController.createStaffUser);
 router.delete("/staff/:userId", _protect, _authorize("super_admin","event_admin"), authController.deleteStaffUser);
+
+// ── Admin: toggle canManualEntry for a user ──────────────────────────────────
+const User = require("../models/User");
+router.patch("/staff/:userId/permissions", _protect, _authorize("super_admin","event_admin"), async (req, res) => {
+  try {
+    const { canManualEntry, canOverride } = req.body;
+    const update = {};
+    if (canManualEntry !== undefined) update.canManualEntry = canManualEntry;
+    if (canOverride !== undefined) update.canOverride = canOverride;
+    const user = await User.findByIdAndUpdate(req.params.userId, { $set: update }, { new: true })
+      .select("-password");
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true, user });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to update permissions" });
+  }
+});
