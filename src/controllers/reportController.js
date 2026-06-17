@@ -534,3 +534,64 @@ exports.exportAnalytics = async (req, res) => {
     res.status(500).json({ error: "Export failed", detail: error.message });
   }
 };
+
+// ── Bahumana Announcement View ───────────────────────────────────────────────
+// GET /api/reports/events/:eventId/bahumana-announcement
+// Returns attended sponsors grouped by tier, ordered for stage announcement.
+exports.getBahumanaAnnouncement = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const eventObjectId = new mongoose.Types.ObjectId(eventId);
+
+    // Get all entry points for this event
+    const eps = await EntryPoint.find({ eventId: eventObjectId }).select("_id");
+    const epIds = eps.map((e) => e._id);
+
+    // Find all unique holders who were granted entry (attended)
+    const attendedScans = await ScanLog.aggregate([
+      { $match: { epId: { $in: epIds }, result: "granted" } },
+      { $group: { _id: "$holderId" } },
+    ]);
+    const attendedIds = attendedScans.map((s) => s._id).filter(Boolean);
+
+    // Get holder details for attended sponsors
+    const holders = await Holder.find({
+      _id: { $in: attendedIds },
+      eventId: eventObjectId,
+    })
+      .populate("catId", "name catCode color")
+      .populate("sevaSlotId", "code name time sortOrder")
+      .select("name phone subCategory catId sevaSlotId venueName")
+      .sort({ subCategory: 1, name: 1 })
+      .lean();
+
+    // Group by tier (A first, then B, then C, then untiered sponsors, then others)
+    const tierOrder = ["A", "B", "C"];
+    const sponsors = holders.filter(
+      (h) => (h.catId?.catCode || "").toUpperCase() === "SP"
+    );
+    const others = holders.filter(
+      (h) => (h.catId?.catCode || "").toUpperCase() !== "SP"
+    );
+
+    const grouped = tierOrder.map((tier) => ({
+      tier,
+      holders: sponsors.filter((h) => h.subCategory === tier),
+    })).filter((g) => g.holders.length > 0);
+
+    // Add any sponsors without a tier
+    const untiered = sponsors.filter((h) => !h.subCategory);
+    if (untiered.length > 0) grouped.push({ tier: "—", holders: untiered });
+
+    res.json({
+      eventId,
+      totalAttended: attendedIds.length,
+      sponsorsAttended: sponsors.length,
+      grouped,
+      others,
+    });
+  } catch (error) {
+    console.error("getBahumanaAnnouncement error:", error);
+    res.status(500).json({ error: "Failed to fetch announcement data" });
+  }
+};
