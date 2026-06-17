@@ -6,7 +6,7 @@ const { protect, authorize } = require("../middleware/auth");
 // Report routes
 router.get("/dashboard", protect, reportController.getDashboardStats);
 router.get("/analytics", protect, reportController.getAnalytics);
-router.get("/events/:eventId/bahumana-announcement", protect, reportController.getBahumanaAnnouncement);
+router.get("/events/:eventId/bahumana-announcement", protect, authorize("super_admin","event_admin","campaign_manager","announcer"), reportController.getBahumanaAnnouncement);
 router.get("/analytics/export", protect, reportController.exportAnalytics);
 router.get(
   "/events/:eventId/summary",

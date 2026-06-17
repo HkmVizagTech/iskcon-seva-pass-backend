@@ -217,3 +217,53 @@ exports.deleteUser = async (req, res) => {
     res.status(500).json({ error: "Failed to delete user" });
   }
 };
+
+// ── Admin: create a staff user (event_admin, announcer, etc) ────────────────
+exports.createStaffUser = async (req, res) => {
+  try {
+    const { name, email, password, role, allowedEvents } = req.body;
+    if (!name || !email || !password || !role) {
+      return res.status(400).json({ error: "name, email, password, role are required" });
+    }
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(409).json({ error: "Email already registered" });
+
+    const user = await User.create({
+      name, email, password,
+      role,
+      allowedEvents: allowedEvents || [],
+      isActive: true,
+    });
+    res.status(201).json({
+      success: true,
+      user: { _id: user._id, name: user.name, email: user.email, role: user.role, allowedEvents: user.allowedEvents },
+    });
+  } catch (error) {
+    console.error("createStaffUser error:", error);
+    res.status(500).json({ error: "Failed to create user" });
+  }
+};
+
+// ── Admin: list all staff users ──────────────────────────────────────────────
+exports.listStaffUsers = async (req, res) => {
+  try {
+    const users = await User.find({ role: { $ne: "self" } })
+      .select("-password")
+      .populate("allowedEvents", "name eventCode")
+      .sort({ createdAt: -1 });
+    res.json({ users });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+};
+
+// ── Admin: delete a staff user ───────────────────────────────────────────────
+exports.deleteStaffUser = async (req, res) => {
+  try {
+    const user = await User.findByIdAndDelete(req.params.userId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to delete user" });
+  }
+};

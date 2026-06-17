@@ -22,3 +22,9 @@ router.put("/users/:id", protect, authorize("super_admin"), authController.updat
 router.delete("/users/:id", protect, authorize("super_admin"), authController.deleteUser);
 
 module.exports = router;
+
+// ── Admin-only user management ───────────────────────────────────────────────
+const { protect: _protect, authorize: _authorize } = require("../middleware/auth");
+router.get("/staff", _protect, _authorize("super_admin","event_admin"), authController.listStaffUsers);
+router.post("/staff", _protect, _authorize("super_admin","event_admin"), authController.createStaffUser);
+router.delete("/staff/:userId", _protect, _authorize("super_admin","event_admin"), authController.deleteStaffUser);

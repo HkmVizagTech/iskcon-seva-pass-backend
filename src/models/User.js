@@ -41,6 +41,7 @@ const userSchema = new mongoose.Schema({
       "campaign_manager",
       "volunteer",
       "preacher",   // can log in and view only their own assigned holders/reports
+      "announcer",  // can only see the bahumana announcement view for their assigned event
       "self",
     ],
     default: "volunteer",
