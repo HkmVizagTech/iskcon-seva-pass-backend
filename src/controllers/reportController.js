@@ -359,9 +359,12 @@ exports.getDashboardStats = async (req, res) => {
 // Returns: preacherWise, slotWise, tierWise, entryWise + totals
 exports.getAnalytics = async (req, res) => {
   try {
-    const { eventId } = req.query;
+    const { eventId, session = "all" } = req.query;
     const scoped = eventId && eventId !== "all";
     const eventObjectId = scoped ? new mongoose.Types.ObjectId(eventId) : null;
+
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const SPLIT_HOUR_IST = 14; // 2:00 PM
 
     // Holder match filter
     const holderMatch = scoped ? { eventId: eventObjectId } : {};
@@ -371,10 +374,35 @@ exports.getAnalytics = async (req, res) => {
     const eps = await EntryPoint.find(epFilter).select("_id name stationLabel");
     const epIds = eps.map((e) => e._id);
 
+    // Session filter: get holder IDs who attended in the given session
+    // based on their first scan time
+    let sessionHolderIds = null; // null = no filter
+    if (session === "morning" || session === "evening") {
+      const scanAgg = await ScanLog.aggregate([
+        { $match: { epId: { $in: epIds }, result: "granted", holderId: { $ne: null } } },
+        { $sort: { scannedAt: 1 } },
+        { $group: { _id: "$holderId", firstScan: { $first: "$scannedAt" } } },
+      ]);
+      sessionHolderIds = scanAgg
+        .filter((s) => {
+          const hourIST = new Date(new Date(s.firstScan).getTime() + IST_OFFSET_MS).getUTCHours();
+          return session === "morning" ? hourIST < SPLIT_HOUR_IST : hourIST >= SPLIT_HOUR_IST;
+        })
+        .map((s) => s._id);
+    }
+
+    // Apply session filter to holderMatch if needed
+    const holderMatchWithSession = sessionHolderIds
+      ? { ...holderMatch, _id: { $in: sessionHolderIds } }
+      : holderMatch;
+
+    // For scan-based metrics, also filter epIds scan logs by session
+    const scanLogMatch = { epId: { $in: epIds }, result: "granted" };
+    if (sessionHolderIds) scanLogMatch.holderId = { $in: sessionHolderIds };
+
     // ── 1. PREACHER-WISE ──────────────────────────────────────────────────
-    // Issued count + scanned (attended) count per preacher
     const preacherWise = await Holder.aggregate([
-      { $match: holderMatch },
+      { $match: holderMatchWithSession },
       {
         $group: {
           _id: {
@@ -425,7 +453,7 @@ exports.getAnalytics = async (req, res) => {
 
     // ── 2. SEVA SLOT-WISE ─────────────────────────────────────────────────
     const slotWise = await Holder.aggregate([
-      { $match: { ...holderMatch, sevaSlotId: { $ne: null } } },
+      { $match: { ...holderMatchWithSession, sevaSlotId: { $ne: null } } },
       { $group: { _id: "$sevaSlotId", issued: { $sum: 1 } } },
       { $lookup: { from: "sevaslots", localField: "_id", foreignField: "_id", as: "s" } },
       { $unwind: { path: "$s", preserveNullAndEmptyArrays: true } },
@@ -444,7 +472,7 @@ exports.getAnalytics = async (req, res) => {
 
     // ── 3. BAHUMANA TIER-WISE ─────────────────────────────────────────────
     const tierWise = await Holder.aggregate([
-      { $match: { ...holderMatch, subCategory: { $nin: [null, ""] } } },
+      { $match: { ...holderMatchWithSession, subCategory: { $nin: [null, ""] } } },
       { $group: { _id: "$subCategory", issued: { $sum: 1 } } },
       { $project: { _id: 0, tier: "$_id", issued: 1 } },
       { $sort: { tier: 1 } },
@@ -475,10 +503,12 @@ exports.getAnalytics = async (req, res) => {
     ]);
 
     // ── Totals ────────────────────────────────────────────────────────────
-    const totalIssued = await Holder.countDocuments(holderMatch);
+    const totalIssued = await Holder.countDocuments(holderMatchWithSession);
     const totalScannedUnique = await ScanLog.aggregate([
-      { $match: { epId: { $in: epIds }, result: "granted" } },
-      ...(scoped ? [
+      { $match: sessionHolderIds
+          ? { epId: { $in: epIds }, result: "granted", holderId: { $in: sessionHolderIds } }
+          : { epId: { $in: epIds }, result: "granted" } },
+      ...(scoped && !sessionHolderIds ? [
         { $lookup: { from: "holders", localField: "holderId", foreignField: "_id", as: "h" } },
         { $unwind: "$h" },
         { $match: { "h.eventId": eventObjectId } },
@@ -537,8 +567,26 @@ exports.getAnalytics = async (req, res) => {
       deliveryMethod: "none",
     });
 
+    // Session counts for tabs
+    const allScanAgg = await ScanLog.aggregate([
+      { $match: { epId: { $in: epIds }, result: "granted", holderId: { $ne: null } } },
+      { $sort: { scannedAt: 1 } },
+      { $group: { _id: "$holderId", firstScan: { $first: "$scannedAt" } } },
+    ]);
+    let mCount = 0, eCount = 0;
+    allScanAgg.forEach((s) => {
+      const h = new Date(new Date(s.firstScan).getTime() + IST_OFFSET_MS).getUTCHours();
+      if (h < SPLIT_HOUR_IST) mCount++; else eCount++;
+    });
+
     res.json({
       scope: scoped ? "event" : "all",
+      session,
+      sessions: {
+        all:     { count: allScanAgg.length },
+        morning: { count: mCount },
+        evening: { count: eCount },
+      },
       totals: {
         issued: totalIssued,
         attended,
@@ -573,13 +621,33 @@ exports.getAnalytics = async (req, res) => {
 // GET /api/reports/analytics/export?eventId=xxx&angle=preacher|slot|tier|entry
 exports.exportAnalytics = async (req, res) => {
   try {
-    const { eventId, angle } = req.query;
+    const { eventId, angle, session = "all" } = req.query;
     const scoped = eventId && eventId !== "all";
     const eventObjectId = scoped ? new mongoose.Types.ObjectId(eventId) : null;
-    const holderMatch = scoped ? { eventId: eventObjectId } : {};
     const epFilter = scoped ? { eventId: eventObjectId } : {};
     const eps = await EntryPoint.find(epFilter).select("_id");
     const epIds = eps.map((e) => e._id);
+
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const SPLIT_HOUR_IST = 14;
+    let sessionHolderIds = null;
+    if (session === "morning" || session === "evening") {
+      const scanAgg = await ScanLog.aggregate([
+        { $match: { epId: { $in: epIds }, result: "granted", holderId: { $ne: null } } },
+        { $sort: { scannedAt: 1 } },
+        { $group: { _id: "$holderId", firstScan: { $first: "$scannedAt" } } },
+      ]);
+      sessionHolderIds = scanAgg
+        .filter((s) => {
+          const h = new Date(new Date(s.firstScan).getTime() + IST_OFFSET_MS).getUTCHours();
+          return session === "morning" ? h < SPLIT_HOUR_IST : h >= SPLIT_HOUR_IST;
+        })
+        .map((s) => s._id);
+    }
+    const holderMatch = {
+      ...(scoped ? { eventId: eventObjectId } : {}),
+      ...(sessionHolderIds ? { _id: { $in: sessionHolderIds } } : {}),
+    };
 
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     let csv = "";
