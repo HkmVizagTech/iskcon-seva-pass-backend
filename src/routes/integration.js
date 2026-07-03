@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const integrationController = require("../controllers/integrationController");
+const prasadamController = require("../controllers/prasadamIntegrationController");
 
 // ─── API key middleware ───────────────────────────────────────────────────────
 // The third-party system authenticates using an API key in the
@@ -36,5 +37,11 @@ router.post(
   requireApiKey,
   integrationController.generateVolunteerQR,
 );
+
+// ─── Prasadam Coupon integration (community app) ─────────────────────────────
+// Matches events by our own MongoDB Event _id, shared directly with the
+// community app — no eventCode translation needed.
+router.post("/prasadam/qr", requireApiKey, prasadamController.issueSingle);
+router.post("/prasadam/qr/bulk", requireApiKey, prasadamController.issueBulk);
 
 module.exports = router;
