@@ -1,88 +1,99 @@
-// ─── Third-party integration service ─────────────────────────────────────────
-// Handles syncing holder/volunteer QR data with the third-party platform.
+// ─── Community App integration (harekrishnavizag.co.in) ────────────────────
+// Pushes every QR we issue to their register-volunteer API so it shows up
+// in their community app too.
 //
-// Flow 1: We → Them (push)
-//   After we issue a QR pass (single or bulk), call their
-//   POST /api/register-volunteer with the holder + QR details.
+// Their API doc:
+//   POST https://harekrishnavizag.co.in/api/v1/user/festivals/register-volunteer
+//   Content-Type: multipart/form-data
+//   Access restricted by IP whitelist — no API key/bearer token needed.
+//   Fields: event_id, event_start_date, event_end_date,
+//           user_phone_number, user_email, qr_code (base64/URL)
 //
-// Flow 2: Them → Us (receive)
-//   Their app calls our POST /api/generate-volunteer-qr when someone
-//   marks interest. We create the holder + QR and return the code.
+// event_id mapping: each of OUR events can optionally have a
+// `thirdPartyEventId` field set (e.g. "event_5") which is what gets sent
+// as their event_id. If not set for an event, the push is skipped.
 //
 // Config (env vars):
-//   THIRD_PARTY_API_URL        — base URL of their server
-//   THIRD_PARTY_API_KEY        — Bearer token / API key for their server
-//   THIRD_PARTY_SYNC_ENABLED   — set to "true" to enable sync (default off)
+//   THIRD_PARTY_API_URL       — base URL, defaults to https://harekrishnavizag.co.in
+//   THIRD_PARTY_SYNC_ENABLED  — set to "true" to enable push (default off)
 
 const axios = require("axios");
+const FormData = require("form-data");
 
 class ThirdPartyService {
   constructor() {
-    this.baseUrl = (process.env.THIRD_PARTY_API_URL || "").replace(/\/$/, "");
-    this.apiKey = process.env.THIRD_PARTY_API_KEY;
+    this.baseUrl = (process.env.THIRD_PARTY_API_URL || "https://harekrishnavizag.co.in").replace(/\/$/, "");
     this.enabled = process.env.THIRD_PARTY_SYNC_ENABLED === "true";
   }
 
   isConfigured() {
-    return this.enabled && !!this.baseUrl && !!this.apiKey;
+    return this.enabled && !!this.baseUrl;
   }
 
   /**
-   * Push a holder's QR pass to the third-party server.
+   * Push a holder's QR pass to the community app.
    * Called after every successful QR issuance (single or bulk).
-   *
-   * Their endpoint: POST /api/register-volunteer
-   * Payload shape (as per their docs):
-   *   event_id, user_phone_number, user_email (optional),
-   *   qr_code (base64 image), event_start_date, event_end_date
+   * Non-fatal — never blocks our own issuance flow.
    */
   async pushHolder({ holder, qrPass, qrImageBase64, event }) {
-    if (!this.isConfigured()) return { skipped: true };
+    if (!this.isConfigured()) return { skipped: true, reason: "sync disabled" };
+
+    // Only push if this event is mapped to a community app event_id
+    const thirdPartyEventId = event?.thirdPartyEventId;
+    if (!thirdPartyEventId) {
+      return { skipped: true, reason: "event has no thirdPartyEventId mapped" };
+    }
 
     try {
-      const payload = {
-        event_id: event.eventCode || event._id.toString(),
-        user_phone_number: holder.phone,
-        user_email: holder.email || undefined,
-        qr_code: qrImageBase64,
-        event_start_date: this._toDateTimeStr(event.dateStart),
-        event_end_date: this._toDateTimeStr(event.dateEnd),
-      };
+      const form = new FormData();
+      form.append("event_id", thirdPartyEventId);
+      form.append("event_start_date", this._toDateTimeStr(event.dateStart));
+      form.append("event_end_date", this._toDateTimeStr(event.dateEnd));
+
+      // Their doc shows a bare 10-digit number in the example payload
+      const bare10 = String(holder.phone || "").replace(/^91/, "").slice(-10);
+      form.append("user_phone_number", bare10);
+
+      if (holder.email) form.append("user_email", holder.email);
+
+      // qr_code — base64 (without the data: prefix) or a hosted URL.
+      const base64Only = String(qrImageBase64 || "").replace(/^data:image\/\w+;base64,/, "");
+      form.append("qr_code", base64Only);
 
       const response = await axios.post(
-        `${this.baseUrl}/api/register-volunteer`,
-        payload,
+        `${this.baseUrl}/api/v1/user/festivals/register-volunteer`,
+        form,
         {
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            "Content-Type": "application/json",
-          },
-          timeout: 10000,
+          headers: { ...form.getHeaders(), Accept: "application/json" },
+          timeout: 15000,
         },
       );
 
+      const ok = response.data?.success === true;
       console.log(
-        `[ThirdParty] Pushed holder ${holder.phone} → event ${event.eventCode}:`,
-        response.data,
+        `[CommunityApp] register-volunteer ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
+        JSON.stringify(response.data).slice(0, 200),
       );
-      return { success: true, response: response.data };
+      return { success: ok, response: response.data };
     } catch (error) {
       // Non-fatal — log and continue. Never block local issuance.
+      const detail = error.response?.data || error.message;
       console.error(
-        `[ThirdParty] Push failed for ${holder.phone}:`,
-        error.response?.data || error.message,
+        `[CommunityApp] register-volunteer FAILED for ${holder.phone}:`,
+        JSON.stringify(detail).slice(0, 300),
       );
-      return { success: false, error: error.message };
+      return { success: false, error: detail };
     }
   }
 
   /**
    * Format a Date/ISO string as "YYYY-MM-DD HH:MM:SS" in IST
-   * (their docs expect this format).
+   * (their docs require this exact format).
    */
   _toDateTimeStr(date) {
     if (!date) return "";
     const d = new Date(date);
+    if (isNaN(d.getTime())) return "";
     return d
       .toLocaleString("sv-SE", { timeZone: "Asia/Kolkata" })
       .replace("T", " ")

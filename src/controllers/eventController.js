@@ -220,6 +220,7 @@ exports.updateEvent = async (req, res) => {
       "name", "eventCode", "description",
       "dateStart", "dateEnd",
       "scanStart", "scanEnd",   // gate/scan window — independent of ceremony time
+      "thirdPartyEventId",       // community app event_id mapping
       "venue", "bannerImage", "donorThreshold", "settings",
     ];
 

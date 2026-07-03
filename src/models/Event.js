@@ -25,6 +25,12 @@ const eventSchema = new mongoose.Schema({
   // Allows gate to open before the ceremony starts.
   scanStart: { type: Date },
   scanEnd:   { type: Date },
+
+  // Community app (harekrishnavizag.co.in) integration.
+  // If set, every QR issued for this event is auto-pushed to their
+  // register-volunteer API using this event_id string (e.g. "event_5").
+  // If not set, no push happens for this event.
+  thirdPartyEventId: { type: String, trim: true },
   venue: [
     {
       name: String,
