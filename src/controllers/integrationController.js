@@ -8,6 +8,7 @@
 const Event = require("../models/Event");
 const Category = require("../models/Category");
 const Holder = require("../models/Holder");
+const HolderType = require("../models/HolderType");
 const QRPass = require("../models/QRPass");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
@@ -140,6 +141,29 @@ exports.generateVolunteerQR = async (req, res) => {
     }
 
     // ── Create or update holder ─────────────────────────────────────────────
+    // Resolve holder type for integration-issued holders.
+    // Uses the event "Invitee" type when it exists (INTEGRATION_HOLDER_TYPE
+    // overrides the name/code), else the event default type, else none.
+    // Non-fatal: a missing type falls back to the old "self" behaviour.
+    let holderTypeId = null;
+    let holderTypeLabel = "self";
+    try {
+      const typeName = (process.env.INTEGRATION_HOLDER_TYPE || "invitee").trim();
+      let holderType = await HolderType.findOne({
+        eventId: event._id,
+        isActive: true,
+        $or: [{ code: typeName.toUpperCase() }, { name: new RegExp("^" + typeName + "$", "i") }],
+      });
+      if (!holderType) {
+        holderType = await HolderType.findOne({ eventId: event._id, isDefault: true, isActive: true });
+      }
+      if (holderType) {
+        holderTypeId = holderType._id;
+        holderTypeLabel = holderType.name;
+      }
+    } catch (e) {
+      console.warn("[Integration] holder type lookup failed:", e.message);
+    }
     const holderData = {
       eventId: event._id,
       catId: category._id,
@@ -147,7 +171,8 @@ exports.generateVolunteerQR = async (req, res) => {
       email: user_email || undefined,
       // Name defaults to phone if not provided — can be updated later
       name: user_email ? user_email.split("@")[0] : `Devotee ${phone.slice(-4)}`,
-      holderType: "self",
+      holderType: holderTypeLabel,
+      holderTypeId,
       source: "third_party",   // mark origin
       issuedBy: null,
     };
