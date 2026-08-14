@@ -11,6 +11,7 @@ const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
+const whatsappService = require("../services/whatsappService");
 
 // Helper: normalise phone
 function normalisePhone(phone) {
@@ -21,6 +22,25 @@ function normalisePhone(phone) {
   if (digits.length === 11 && digits.startsWith("0")) return "91" + digits.slice(1);
   return digits;
 }
+// Send the QR to the holder's phone via the main system's Flaxxa integration.
+// Non-fatal - WhatsApp failure must never block QR issuance.
+async function trySendWhatsApp(phone, qrImage, holder, event, entryPoints) {
+  try {
+    await whatsappService.sendQRMessage(phone, qrImage, holder.name, event.name, {
+      entryPoints: (entryPoints || []).map((ep) => ({
+        name: ep.name || ep.stationLabel,
+        stationLabel: ep.stationLabel || ep.name,
+      })),
+      validFrom: event.dateStart,
+      venue: (event.venue && event.venue[0] && event.venue[0].name) || "ISKCON Temple, Visakhapatnam",
+      isSponsor: false,
+    });
+    console.log(`[Integration] WhatsApp QR sent to ${phone} for ${event.eventCode}`);
+  } catch (error) {
+    console.error(`[Integration] WhatsApp send skipped for ${phone}:`, error.message);
+  }
+}
+
 
 /**
  * POST /api/integration/generate-volunteer-qr
@@ -92,6 +112,7 @@ exports.generateVolunteerQR = async (req, res) => {
           [],
         );
         const { image: qrImage } = await qrService.generateQRCode(payload);
+        await trySendWhatsApp(phone, qrImage, existingHolder, event, []);
         return res.json({
           status: true,
           message: "QR code already exists — returning existing pass",
@@ -173,6 +194,9 @@ exports.generateVolunteerQR = async (req, res) => {
     console.log(
       `[Integration] QR generated for ${phone} at event ${event.eventCode} via third-party`,
     );
+
+    // Deliver the QR to the holder's phone (non-fatal)
+    await trySendWhatsApp(phone, qrImage, holder, event, entryPoints);
 
     // Return in their expected format
     return res.status(200).json({
