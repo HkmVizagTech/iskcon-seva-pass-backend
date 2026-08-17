@@ -14,6 +14,12 @@ const QRPass = require("../models/QRPass");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
 const whatsappService = require("../services/whatsappService");
+const { resolvePreacherFromString } = require("./preacherController");
+
+// Helper: escape regex special chars for safe name matching
+function escapeRegExp(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 // Helper: normalise phone
 function normalisePhone(phone) {
@@ -24,6 +30,29 @@ function normalisePhone(phone) {
   if (digits.length === 11 && digits.startsWith("0")) return "91" + digits.slice(1);
   return digits;
 }
+// Resolve the category a QR is issued under, in priority order:
+//   1. requested (catCode or exact name) — from the Seva Pass app's pass-type picker
+//   2. an "Invitee" category (code INV / name matching "invitee")
+//   3. legacy defaults: General Public (GN) → name "general" → name "volunteer"
+async function resolveCategory(eventId, requested) {
+  const attempts = [];
+  if (requested) {
+    attempts.push({ catCode: requested.toUpperCase() });
+    attempts.push({ name: new RegExp(`^${escapeRegExp(requested)}$`, "i") });
+  }
+  attempts.push({ catCode: "INV" });
+  attempts.push({ name: /^invitee$/i });
+  attempts.push({ catCode: "GN" });
+  attempts.push({ name: /general/i });
+  attempts.push({ name: /volunteer/i });
+
+  for (const q of attempts) {
+    const category = await Category.findOne({ eventId, ...q }).populate("entryPoints");
+    if (category) return category;
+  }
+  return null;
+}
+
 // Send the QR to the holder's phone via the main system's Flaxxa integration.
 // Non-fatal - WhatsApp failure must never block QR issuance.
 async function trySendWhatsApp(phone, qrImage, holder, event, entryPoints) {
@@ -60,6 +89,26 @@ async function trySendWhatsApp(phone, qrImage, holder, event, entryPoints) {
 exports.generateVolunteerQR = async (req, res) => {
   try {
     const { event_id, user_phone_number, user_email } = req.body;
+    // Optional preacher attribution — sent by the Seva Pass app when a
+    // devotee/preacher issues a pass, so it appears under their "My Passes".
+    // preacher = display name (also used for CSV-style matching),
+    // preacherId = main-system User _id of the role:"preacher" account.
+    const preacher = (req.body.preacher || "").trim();
+    const preacherId = req.body.preacherId || null;
+
+    // Resolve the preacher string (short code like MKGD, or exact name) to the
+    // actual preacher account — same matching used by CSV imports. When matched,
+    // the holder links by preacherId; the raw string is kept otherwise.
+    let resolvedPreacher = null;
+    if (preacher) {
+      try {
+        resolvedPreacher = await resolvePreacherFromString(preacher);
+      } catch (e) {
+        resolvedPreacher = null;
+      }
+    }
+    const finalPreacherName = resolvedPreacher?.preacherName || preacher || "";
+    const finalPreacherId = resolvedPreacher?.preacherId || preacherId || null;
 
     // ── Validate input ──────────────────────────────────────────────────────
     if (!event_id) {
@@ -101,6 +150,17 @@ exports.generateVolunteerQR = async (req, res) => {
     // ── Check if holder already has an active pass ──────────────────────────
     const existingHolder = await Holder.findOne({ eventId: event._id, phone });
     if (existingHolder) {
+      // Backfill preacher attribution if the request carries it and the holder
+      // was created without one (e.g. issued before this feature shipped).
+      if (finalPreacherName || finalPreacherId) {
+        const backfill = {};
+        if (finalPreacherName && !existingHolder.preacher) backfill.preacher = finalPreacherName;
+        if (finalPreacherId && !existingHolder.preacherId) backfill.preacherId = finalPreacherId;
+        if (Object.keys(backfill).length > 0) {
+          existingHolder.set(backfill);
+          await existingHolder.save();
+        }
+      }
       const existingPass = await QRPass.findOne({
         holderId: existingHolder._id,
         status: "active",
@@ -124,20 +184,19 @@ exports.generateVolunteerQR = async (req, res) => {
       }
     }
 
-    // ── Find the default "General Public" category for this event ──────────
-    const category = await Category.findOne({
-      eventId: event._id,
-      $or: [
-        { catCode: "GN" },
-        { name: /general/i },
-        { name: /volunteer/i },
-      ],
-    }).populate("entryPoints");
+    // ── Resolve the category this QR is issued under, in priority order: ──
+    //   1. Explicitly requested category (catCode or name) — sent by the
+    //      Seva Pass app when the devotee picks a pass type.
+    //   2. An "Invitee" category (code INV or name matching "invitee") — the
+    //      default type for the Seva Pass app flow.
+    //   3. Legacy fallbacks: General Public (GN) → name "general" → "volunteer".
+    const requestedCategory = (req.body.category || "").trim();
+    const category = await resolveCategory(event._id, requestedCategory);
 
     if (!category) {
       return res.status(400).json({
         status: false,
-        message: "No suitable category found for this event. Please configure a General Public or Volunteer category.",
+        message: "No suitable category found for this event. Please configure an Invitee or General Public category.",
       });
     }
 
@@ -189,6 +248,9 @@ exports.generateVolunteerQR = async (req, res) => {
       holderTypeId,
       source: "third_party",   // mark origin
       issuedBy: null,
+      // Preacher attribution — links this pass to the devotee who issued it.
+      ...(finalPreacherName ? { preacher: finalPreacherName } : {}),
+      ...(finalPreacherId ? { preacherId: finalPreacherId } : {}),
     };
 
     let holder;
@@ -302,6 +364,33 @@ exports.getAllEvents = async (req, res) => {
   } catch (error) {
     console.error("[Integration] getAllEvents error:", error);
     res.status(500).json({ status: false, message: "Failed to fetch events" });
+  }
+};
+
+/**
+ * GET /api/integration/events/:eventCode/categories
+ *
+ * Returns the categories (pass types) configured for an event, with their
+ * entry points. The Seva Pass app uses this to let the devotee pick the pass
+ * type after selecting an event.
+ */
+exports.getEventCategories = async (req, res) => {
+  try {
+    const { eventCode } = req.params;
+    const event = await Event.findOne({ eventCode: eventCode.toUpperCase() }).select("_id");
+    if (!event) {
+      return res.status(404).json({ status: false, message: "Event not found" });
+    }
+
+    const categories = await Category.find({ eventId: event._id, isActive: true })
+      .populate("entryPoints", "name stationLabel type")
+      .select("name catCode entryPoints")
+      .sort({ catCode: 1 });
+
+    res.json(categories);
+  } catch (error) {
+    console.error("[Integration] getEventCategories error:", error);
+    res.status(500).json({ status: false, message: "Failed to fetch categories" });
   }
 };
 

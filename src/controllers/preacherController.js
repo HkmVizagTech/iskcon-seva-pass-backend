@@ -1,9 +1,28 @@
 const User = require("../models/User");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
+const Category = require("../models/Category");
+const EntryPoint = require("../models/EntryPoint");
+const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function escapeRegExp(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Bahumana entry points across ALL events (preacher is not event-scoped).
+// "Bahumana received" = a granted scan at one of these stations.
+let bahumanaEpCache = null;
+async function getBahumanaEpIds() {
+  if (bahumanaEpCache) return bahumanaEpCache;
+  const eps = await EntryPoint.find({ type: "bahumana" }).select("_id").lean();
+  bahumanaEpCache = new Set(eps.map((e) => e._id.toString()));
+  // Refresh periodically so newly created bahumana stations are picked up.
+  setTimeout(() => { bahumanaEpCache = null; }, 5 * 60 * 1000);
+  return bahumanaEpCache;
+}
 
 function validateShortCode(code) {
   if (!code) return null;
@@ -247,7 +266,7 @@ exports.preacherLogin = async (req, res) => {
 
 exports.getMyHolders = async (req, res) => {
   try {
-    const { page = 1, limit = 20, search, eventId } = req.query;
+    const { page = 1, limit = 20, search, eventId, category, bahumana } = req.query;
     const preacherId = req.user._id;
     const preacherName = req.user.name;
 
@@ -265,6 +284,49 @@ exports.getMyHolders = async (req, res) => {
     // Optional event filter (for preacher's own UI — not enforced)
     if (eventId) query.eventId = eventId;
 
+    // Optional category filter — by catCode (e.g. DN, INV, SP, VIP), exact name,
+    // or category _id. Matches categories across all events since preachers
+    // are not event-scoped.
+    if (category) {
+      const cat = String(category).trim();
+      let catIds = null;
+      if (mongoose.isValidObjectId(cat)) {
+        catIds = [cat];
+      } else {
+        const cats = await Category.find({
+          $or: [
+            { catCode: cat.toUpperCase() },
+            { name: new RegExp(`^${escapeRegExp(cat)}$`, "i") },
+          ],
+        }).select("_id").lean();
+        catIds = cats.map((c) => c._id);
+      }
+      if (catIds.length > 0) query.catId = { $in: catIds };
+      else query.catId = { $in: [] }; // no matches — return nothing
+    }
+
+    // Optional bahumana filter — yes = at least one granted scan at a
+    // bahumana station; no = none yet. Applied on top of the base query
+    // (before pagination) so the total count stays accurate.
+    const bahumanaFilter = String(bahumana || "").toLowerCase();
+    if (bahumanaFilter === "yes" || bahumanaFilter === "no") {
+      const bahumanaEpIds = await getBahumanaEpIds();
+      const grantedHolderIds = await QRPass.find({
+        "redemptionHistory.epId": { $in: [...bahumanaEpIds] },
+        "redemptionHistory.result": "granted",
+      }).distinct("holderId");
+      const hasBahumana = new Set(grantedHolderIds.map((id) => id.toString()));
+      const allMatching = await Holder.find(query).select("_id").lean();
+      const ids = allMatching
+        .filter((h) =>
+          bahumanaFilter === "yes"
+            ? hasBahumana.has(h._id.toString())
+            : !hasBahumana.has(h._id.toString())
+        )
+        .map((h) => h._id);
+      query._id = { $in: ids };
+    }
+
     if (search) {
       const rgx = new RegExp(search, "i");
       query.$and = [
@@ -276,7 +338,7 @@ exports.getMyHolders = async (req, res) => {
 
     const [holders, total] = await Promise.all([
       Holder.find(query)
-        .populate("catId", "name icon color")
+        .populate("catId", "name catCode color")
         .populate("eventId", "name eventCode")
         .sort({ issuedAt: -1 })
         .limit(Number(limit))
@@ -286,15 +348,25 @@ exports.getMyHolders = async (req, res) => {
 
     const holderIds = holders.map((h) => h._id);
     const qrPasses = await QRPass.find({ holderId: { $in: holderIds } }).select(
-      "holderId qrId status redemptionHistory deliveryStatus",
+      "holderId qrId status redemptionHistory deliveryStatus deliveryMethod",
     );
     const passMap = Object.fromEntries(qrPasses.map((p) => [p.holderId.toString(), p]));
+    const bahumanaEpIds = await getBahumanaEpIds();
 
     res.json({
-      holders: holders.map((h) => ({
-        ...h.toObject(),
-        qrPass: passMap[h._id.toString()] || null,
-      })),
+      holders: holders.map((h) => {
+        const pass = passMap[h._id.toString()] || null;
+        const history = (pass && pass.redemptionHistory) || [];
+        const bahumanaHit = history.find(
+          (r) => r.result === "granted" && bahumanaEpIds.has(String(r.epId))
+        );
+        return {
+          ...h.toObject(),
+          qrPass: pass || null,
+          bahumanaReceived: Boolean(bahumanaHit),
+          bahumanaAt: bahumanaHit ? bahumanaHit.scannedAt || null : null,
+        };
+      }),
       pagination: {
         total,
         page: Number(page),

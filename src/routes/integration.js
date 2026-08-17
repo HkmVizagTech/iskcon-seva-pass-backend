@@ -41,6 +41,10 @@ router.get("/events/:eventCode/venues", requireApiKey, integrationController.get
 // GET /api/integration/events/:eventCode/entry-points
 router.get("/events/:eventCode/entry-points", requireApiKey, integrationController.getEventEntryPoints);
 
+// ─── Categories (pass types) for an event ─────────────────────────────────────
+// GET /api/integration/events/:eventCode/categories
+router.get("/events/:eventCode/categories", requireApiKey, integrationController.getEventCategories);
+
 // ─── Inbound from third-party (they call us) ─────────────────────────────────
 // POST /api/integration/generate-volunteer-qr
 // Their user marks interest → we generate QR → return it
