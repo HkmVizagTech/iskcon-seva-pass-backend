@@ -29,6 +29,18 @@ const requireApiKey = (req, res, next) => {
 // ─── Public health check ──────────────────────────────────────────────────────
 router.get("/status", integrationController.status);
 
+// ─── Events list (used by Seva Pass app to sync) ─────────────────────────────
+// GET /api/integration/events
+router.get("/events", requireApiKey, integrationController.getAllEvents);
+
+// ─── Venues for an event ──────────────────────────────────────────────────────
+// GET /api/integration/events/:eventCode/venues
+router.get("/events/:eventCode/venues", requireApiKey, integrationController.getEventVenues);
+
+// ─── Entry points for an event (optionally filtered by ?venue=<name>) ─────────
+// GET /api/integration/events/:eventCode/entry-points
+router.get("/events/:eventCode/entry-points", requireApiKey, integrationController.getEventEntryPoints);
+
 // ─── Inbound from third-party (they call us) ─────────────────────────────────
 // POST /api/integration/generate-volunteer-qr
 // Their user marks interest → we generate QR → return it

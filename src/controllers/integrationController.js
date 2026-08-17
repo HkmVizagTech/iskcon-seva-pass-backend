@@ -7,6 +7,7 @@
 
 const Event = require("../models/Event");
 const Category = require("../models/Category");
+const EntryPoint = require("../models/EntryPoint");
 const Holder = require("../models/Holder");
 const HolderType = require("../models/HolderType");
 const QRPass = require("../models/QRPass");
@@ -140,6 +141,19 @@ exports.generateVolunteerQR = async (req, res) => {
       });
     }
 
+    // ── Filter entry points by venue if provided ──────────────────────────
+    // The Seva Pass app sends venue name; we match it against location.building.
+    const requestedVenue = (req.body.venue || "").trim();
+    let entryPoints = category.entryPoints || [];
+    if (requestedVenue && entryPoints.length > 0) {
+      const venueRe = new RegExp(requestedVenue, "i");
+      const filtered = entryPoints.filter((ep) => ep.location && ep.location.building && venueRe.test(ep.location.building));
+      // Only narrow down if the venue matched something — otherwise keep all
+      if (filtered.length > 0) {
+        entryPoints = filtered;
+      }
+    }
+
     // ── Create or update holder ─────────────────────────────────────────────
     // Resolve holder type for integration-issued holders.
     // Uses the event "Invitee" type when it exists (INTEGRATION_HOLDER_TYPE
@@ -192,7 +206,6 @@ exports.generateVolunteerQR = async (req, res) => {
 
     // ── Generate QR pass ────────────────────────────────────────────────────
     const qrId = await qrService.generateQRId(event.eventCode, category.catCode);
-    const entryPoints = category.entryPoints || [];
 
     const payload = qrService.createPayload(
       { ...holder.toObject(), qrId },
@@ -249,4 +262,110 @@ exports.status = (req, res) => {
     message: "ISKCON Seva Pass API is operational",
     timestamp: new Date().toISOString(),
   });
+};
+
+/**
+ * GET /api/integration/events
+ *
+ * Returns all events. Used by the Seva Pass app to sync events so the admin
+ * doesn't have to re-create them manually.
+ *
+ * Query params:
+ *   ?status=upcoming|active|completed  — filter by date-derived status
+ *   ?search=RATHYATRA                  — search by name or eventCode
+ */
+exports.getAllEvents = async (req, res) => {
+  try {
+    const { status, search } = req.query;
+    const query = {};
+    const now = new Date();
+
+    if (status === "upcoming") {
+      query.dateStart = { $gt: now };
+    } else if (status === "active") {
+      query.dateStart = { $lte: now };
+      query.dateEnd = { $gte: now };
+    } else if (status === "completed") {
+      query.dateEnd = { $lt: now };
+    }
+
+    if (search) {
+      const re = new RegExp(search, "i");
+      query.$or = [{ name: re }, { eventCode: re }];
+    }
+
+    const events = await Event.find(query)
+      .select("name eventCode dateStart dateEnd venue description")
+      .sort({ dateStart: -1 });
+
+    res.json(events);
+  } catch (error) {
+    console.error("[Integration] getAllEvents error:", error);
+    res.status(500).json({ status: false, message: "Failed to fetch events" });
+  }
+};
+
+/**
+ * GET /api/integration/events/:eventCode/venues
+ *
+ * Returns the distinct venue objects attached to an event.
+ * The Seva Pass app uses this to present venue options when issuing passes.
+ */
+exports.getEventVenues = async (req, res) => {
+  try {
+    const { eventCode } = req.params;
+    const event = await Event.findOne({ eventCode: eventCode.toUpperCase() }).select("venue");
+
+    if (!event) {
+      return res.status(404).json({ status: false, message: "Event not found" });
+    }
+
+    const venues = (event.venue || []).map((v) => ({
+      name: v.name,
+      address: v.address,
+      coordinates: v.coordinates,
+    }));
+
+    res.json(venues);
+  } catch (error) {
+    console.error("[Integration] getEventVenues error:", error);
+    res.status(500).json({ status: false, message: "Failed to fetch venues" });
+  }
+};
+
+/**
+ * GET /api/integration/events/:eventCode/entry-points?venue=<venueName>
+ *
+ * Returns entry points for an event, optionally filtered by venue.
+ * Venue filtering works by matching entryPoint.location.building against
+ * the venue name (case-insensitive regex).
+ *
+ * The Seva Pass app uses this to know which entry points a pass grants
+ * access to at a given venue.
+ */
+exports.getEventEntryPoints = async (req, res) => {
+  try {
+    const { eventCode } = req.params;
+    const { venue } = req.query;
+
+    const event = await Event.findOne({ eventCode: eventCode.toUpperCase() }).select("_id");
+    if (!event) {
+      return res.status(404).json({ status: false, message: "Event not found" });
+    }
+
+    const query = { eventId: event._id, isActive: true };
+
+    if (venue) {
+      query["location.building"] = new RegExp(venue, "i");
+    }
+
+    const entryPoints = await EntryPoint.find(query)
+      .select("name stationLabel type location description")
+      .sort({ type: 1, name: 1 });
+
+    res.json(entryPoints);
+  } catch (error) {
+    console.error("[Integration] getEventEntryPoints error:", error);
+    res.status(500).json({ status: false, message: "Failed to fetch entry points" });
+  }
 };
