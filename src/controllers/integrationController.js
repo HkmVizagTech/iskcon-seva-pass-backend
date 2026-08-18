@@ -39,6 +39,9 @@ async function resolveCategory(eventId, requested) {
   if (requested) {
     attempts.push({ catCode: requested.toUpperCase() });
     attempts.push({ name: new RegExp(`^${escapeRegExp(requested)}$`, "i") });
+    // Partial / fuzzy match — "VIP" matches "VIP Guest", "Don" matches "Donor", etc.
+    attempts.push({ catCode: new RegExp(requested.toUpperCase(), "i") });
+    attempts.push({ name: new RegExp(requested, "i") });
   }
   attempts.push({ catCode: "INV" });
   attempts.push({ name: /^invitee$/i });
@@ -243,7 +246,7 @@ exports.generateVolunteerQR = async (req, res) => {
       phone,
       email: user_email || undefined,
       // Name defaults to phone if not provided — can be updated later
-      name: user_email ? user_email.split("@")[0] : `Devotee ${phone.slice(-4)}`,
+      name: req.body.name || (user_email ? user_email.split("@")[0] : `Devotee ${phone.slice(-4)}`),
       holderType: holderTypeLabel,
       holderTypeId,
       source: "third_party",   // mark origin
