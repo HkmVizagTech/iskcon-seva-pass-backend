@@ -17,7 +17,7 @@ exports.getCategories = async (req, res) => {
 exports.getCategory = async (req, res) => {
   try {
     const category = await Category.findById(req.params.catId)
-      .populate("holderTypeId", "name code icon color entryPoints")
+      .populate("holderTypeId", "name code icon color")
       .populate("entryPoints", "name stationLabel type");
     if (!category) return res.status(404).json({ error: "Category not found" });
     res.json(category);
@@ -33,9 +33,9 @@ exports.createCategory = async (req, res) => {
     const holderType = await HolderType.findOne({ _id: holderTypeId, eventId: req.params.eventId });
     if (!holderType) return res.status(400).json({ error: "Invalid holder type" });
 
-    let finalEntryPoints = entryPointIds?.length > 0
-      ? entryPointIds
-      : holderType.entryPoints.map((ep) => ep.toString());
+    // FIX: HolderType model has no entryPoints field — don't reference it.
+    // Use the provided entryPointIds, or leave empty (no entry points by default).
+    const finalEntryPoints = entryPointIds?.length > 0 ? entryPointIds : [];
 
     if (finalEntryPoints.length > 0) {
       const validCount = await EntryPoint.countDocuments({

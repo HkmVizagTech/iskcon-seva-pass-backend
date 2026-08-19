@@ -50,13 +50,16 @@ exports.createEvent = async (req, res) => {
       .filter((ep) => ["venue_entry", "prasadam"].includes(ep.type))
       .map((ep) => ep._id);
 
-    const [sponsorHT, donorHT, volunteerHT, generalHT, vipHT] =
+    // FIX: include Invitee as a default holder type — the Seva Pass devotee
+    // app issues passes under this type by default.
+    const [sponsorHT, donorHT, volunteerHT, generalHT, vipHT, inviteeHT] =
       await HolderType.insertMany([
         { eventId: event._id, name: "Sponsor", code: "SP", icon: "💰", color: "#F97316", isDefault: true },
         { eventId: event._id, name: "Donor", code: "DN", icon: "🙏", color: "#22C55E", isDefault: true },
         { eventId: event._id, name: "Volunteer", code: "VL", icon: "🤝", color: "#8B5CF6", isDefault: true },
         { eventId: event._id, name: "General Public", code: "GN", icon: "👤", color: "#3B82F6", isDefault: true },
         { eventId: event._id, name: "VIP Guest", code: "VP", icon: "⭐", color: "#EAB308", isDefault: true },
+        { eventId: event._id, name: "Invitee", code: "INV", icon: "🎟️", color: "#EC4899", isDefault: true },
       ]);
 
     await Category.insertMany([
@@ -65,6 +68,7 @@ exports.createEvent = async (req, res) => {
       { eventId: event._id, name: "Volunteer", catCode: "VL", holderTypeId: volunteerHT._id, entryPoints: venuePrasadamIds, color: "#8B5CF6", icon: "🤝" },
       { eventId: event._id, name: "General Public", catCode: "GN", holderTypeId: generalHT._id, entryPoints: entryPoints.filter((ep) => ep.type === "darshan").map((ep) => ep._id), color: "#3B82F6", icon: "👤" },
       { eventId: event._id, name: "VIP Guest", catCode: "VP", holderTypeId: vipHT._id, entryPoints: allEpIds, color: "#EAB308", icon: "⭐" },
+      { eventId: event._id, name: "Invitee", catCode: "INV", holderTypeId: inviteeHT._id, entryPoints: allEpIds, color: "#EC4899", icon: "🎟️" },
     ]);
 
     res.status(201).json({
