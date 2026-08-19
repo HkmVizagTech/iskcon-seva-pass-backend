@@ -526,7 +526,58 @@ exports.getEventCategories = async (req, res) => {
 };
 
 /**
- * GET /api/integration/events/:eventCode/venues
+ * PATCH /api/integration/events/:eventCode/devotee-categories
+ *
+ * Update the devoteeAppCategories array on an event.
+ * The Seva Pass app admin uses this to configure which pass types
+ * devotees can issue from the app, and with what limits.
+ *
+ * Body: { categories: [{ catCode, name, limit }] }
+ *   - catCode (required): the category code (e.g. "INV", "GN")
+ *   - name (optional): display label
+ *   - limit (optional): max passes for this category (null = unlimited)
+ * Pass null to clear all restrictions (all categories shown).
+ */
+exports.updateDevoteeCategories = async (req, res) => {
+  try {
+    const { eventCode } = req.params;
+    const { categories } = req.body || {};
+
+    const event = await Event.findOne({ eventCode: eventCode.toUpperCase() }).select("_id");
+    if (!event) {
+      return res.status(404).json({ status: false, message: "Event not found" });
+    }
+
+    // Validate categories array
+    if (categories !== null && !Array.isArray(categories)) {
+      return res.status(400).json({ status: false, message: "categories must be an array or null" });
+    }
+
+    const update = {};
+    if (categories === null) {
+      // Clear the field — all categories will be shown
+      update.$unset = { devoteeAppCategories: 1 };
+    } else {
+      // Validate each entry
+      const cleaned = [];
+      for (const c of categories) {
+        if (!c.catCode) continue;
+        cleaned.push({
+          catCode: String(c.catCode).toUpperCase(),
+          name: c.name || "",
+          limit: c.limit != null ? Number(c.limit) : null,
+        });
+      }
+      update.$set = { devoteeAppCategories: cleaned };
+    }
+
+    await Event.findByIdAndUpdate(event._id, update);
+    res.json({ status: true, message: "Devotee categories updated" });
+  } catch (error) {
+    console.error("[Integration] updateDevoteeCategories error:", error);
+    res.status(500).json({ status: false, message: "Failed to update devotee categories" });
+  }
+};
  *
  * Returns the distinct venue objects attached to an event.
  * The Seva Pass app uses this to present venue options when issuing passes.

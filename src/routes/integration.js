@@ -45,6 +45,10 @@ router.get("/events/:eventCode/entry-points", requireApiKey, integrationControll
 // GET /api/integration/events/:eventCode/categories
 router.get("/events/:eventCode/categories", requireApiKey, integrationController.getEventCategories);
 
+// ─── Update which categories the devotee app may use ──────────────────────────
+// PATCH /api/integration/events/:eventCode/devotee-categories
+router.patch("/events/:eventCode/devotee-categories", requireApiKey, integrationController.updateDevoteeCategories);
+
 // ─── Inbound from third-party (they call us) ─────────────────────────────────
 // POST /api/integration/generate-volunteer-qr
 // Their user marks interest → we generate QR → return it
