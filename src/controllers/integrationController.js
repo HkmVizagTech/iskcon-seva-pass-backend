@@ -203,6 +203,34 @@ exports.generateVolunteerQR = async (req, res) => {
       });
     }
 
+    // ── Enforce devotee-app category limits ─────────────────────────────────
+    // If the event has devoteeAppCategories with a limit for this category,
+    // count existing third-party holders under this category and reject if full.
+    if (event.devoteeAppCategories && event.devoteeAppCategories.length > 0) {
+      const rule = event.devoteeAppCategories.find(
+        (d) => d.catCode === (category.catCode || "").toUpperCase()
+      );
+      if (!rule) {
+        return res.status(403).json({
+          status: false,
+          message: `Category "${category.name}" is not available for the devotee app on this event.`,
+        });
+      }
+      if (rule.limit != null) {
+        const used = await Holder.countDocuments({
+          eventId: event._id,
+          catId: category._id,
+          source: "third_party",
+        });
+        if (used >= rule.limit) {
+          return res.status(403).json({
+            status: false,
+            message: `Category "${category.name}" has reached its limit of ${rule.limit} passes (${used} issued).`,
+          });
+        }
+      }
+    }
+
     // ── Filter entry points by venue if provided ──────────────────────────
     // The Seva Pass app sends venue name; we match it against location.building.
     const requestedVenue = (req.body.venue || "").trim();
@@ -423,17 +451,74 @@ exports.getAllEvents = async (req, res) => {
 exports.getEventCategories = async (req, res) => {
   try {
     const { eventCode } = req.params;
-    const event = await Event.findOne({ eventCode: eventCode.toUpperCase() }).select("_id");
+    const event = await Event.findOne({ eventCode: eventCode.toUpperCase() }).select("_id devoteeAppCategories");
     if (!event) {
       return res.status(404).json({ status: false, message: "Event not found" });
     }
 
-    const categories = await Category.find({ eventId: event._id, isActive: true })
+    // If the event has devoteeAppCategories configured, only return those.
+    // If empty/missing, return ALL active categories (backward compatible).
+    const allowedCodes = (event.devoteeAppCategories || []).map((d) => d.catCode);
+    const filter = { eventId: event._id, isActive: true };
+    if (allowedCodes.length > 0) {
+      filter.catCode = { $in: allowedCodes };
+    }
+
+    const categories = await Category.find(filter)
       .populate("entryPoints", "name stationLabel type")
       .select("name catCode entryPoints")
       .sort({ catCode: 1 });
 
-    res.json(categories);
+    // Attach limit info from devoteeAppCategories if configured.
+    const limitMap = {};
+    for (const d of event.devoteeAppCategories || []) {
+      limitMap[d.catCode] = { limit: d.limit, name: d.name };
+    }
+
+    // Count how many third-party passes exist per category for this event.
+    const Holder = require("../models/Holder");
+    const passCounts = await Holder.aggregate([
+      { $match: { eventId: event._id, source: "third_party" } },
+      {
+        $lookup: {
+          from: "categories",
+          localField: "catId",
+          foreignField: "_id",
+          as: "cat",
+        },
+      },
+      { $unwind: { path: "$cat", preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: "$cat.catCode",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const countMap = {};
+    for (const row of passCounts) {
+      if (row._id) countMap[row._id] = row.count;
+    }
+
+    const result = categories.map((c) => {
+      const obj = {
+        _id: c._id,
+        name: c.name,
+        catCode: c.catCode,
+        entryPoints: c.entryPoints,
+      };
+      if (allowedCodes.length > 0 && limitMap[c.catCode]) {
+        const info = limitMap[c.catCode];
+        const used = countMap[c.catCode] || 0;
+        obj.limit = info.limit;
+        obj.used = used;
+        obj.remaining = info.limit != null ? Math.max(0, info.limit - used) : null;
+      }
+      return obj;
+    });
+
+    res.json(result);
   } catch (error) {
     console.error("[Integration] getEventCategories error:", error);
     res.status(500).json({ status: false, message: "Failed to fetch categories" });

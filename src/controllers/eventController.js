@@ -222,6 +222,7 @@ exports.updateEvent = async (req, res) => {
       "scanStart", "scanEnd",   // gate/scan window — independent of ceremony time
       "thirdPartyEventId",       // community app event_id mapping
       "venue", "bannerImage", "donorThreshold", "settings",
+      "devoteeAppCategories",    // which categories the Seva Pass devotee app may show
     ];
 
     const $set = { updatedAt: new Date() };

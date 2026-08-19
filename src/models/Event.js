@@ -46,6 +46,19 @@ const eventSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  // Categories visible in the Seva Pass devotee app.
+  // When empty or not set, ALL active categories are shown (backward compatible).
+  // When populated, only the listed categories appear in the devotee app.
+  // Each entry can have an optional limit — the maximum number of passes of
+  // that category the devotee app may issue for this event.
+  devoteeAppCategories: [
+    {
+      catCode: { type: String, required: true, uppercase: true },
+      name: { type: String, trim: true },
+      limit: { type: Number, default: null }, // null = unlimited
+      _id: false,
+    },
+  ],
   settings: {
     freezeNewIssuances: {
       type: Boolean,
