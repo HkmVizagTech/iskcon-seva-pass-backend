@@ -578,9 +578,9 @@ exports.updateDevoteeCategories = async (req, res) => {
     res.status(500).json({ status: false, message: "Failed to update devotee categories" });
   }
 };
- *
- * Returns the distinct venue objects attached to an event.
- * The Seva Pass app uses this to present venue options when issuing passes.
+
+/**
+ * GET /api/integration/events/:eventCode/venues
  */
 exports.getEventVenues = async (req, res) => {
   try {
