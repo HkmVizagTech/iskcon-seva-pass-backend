@@ -330,6 +330,49 @@ exports.status = (req, res) => {
 };
 
 /**
+ * GET /api/integration/qr/:qrId
+ *
+ * Returns live QR pass status and redemption history for integration partners.
+ * Protected by requireApiKey (x-api-key header) — no JWT needed.
+ * Returns a flat response so the Seva Pass app can enrich pass lists with
+ * scanned status without needing JWT authentication.
+ */
+exports.getQRDetails = async (req, res) => {
+  try {
+    const { qrId } = req.params;
+    if (!qrId) {
+      return res.status(400).json({ status: false, message: "qrId is required" });
+    }
+
+    const qrPass = await QRPass.findOne({ qrId })
+      .populate("holderId", "name phone email")
+      .populate("eventId", "name eventCode")
+      .populate("catId", "name catCode")
+      .populate("entryPoints", "name stationLabel")
+      .lean();
+
+    if (!qrPass) {
+      return res.status(404).json({ status: false, message: "QR pass not found" });
+    }
+
+    return res.json({
+      status: qrPass.status || "active",
+      redemptionHistory: qrPass.redemptionHistory || [],
+      qrId: qrPass.qrId,
+      holder: qrPass.holderId || null,
+      event: qrPass.eventId || null,
+      category: qrPass.catId || null,
+      entryPoints: qrPass.entryPoints || [],
+      validFrom: qrPass.validFrom || null,
+      validUntil: qrPass.validUntil || null,
+    });
+  } catch (error) {
+    console.error("[Integration] getQRDetails error:", error);
+    return res.status(500).json({ status: false, message: "Failed to fetch QR details" });
+  }
+};
+
+/**
  * GET /api/integration/events
  *
  * Returns all events. Used by the Seva Pass app to sync events so the admin

@@ -60,4 +60,10 @@ router.post(
 router.post("/prasadam/qr", requireApiKey, prasadamController.issueSingle);
 router.post("/prasadam/qr/bulk", requireApiKey, prasadamController.issueBulk);
 
+// ─── QR pass details (live status + scan history) ────────────────────────────
+// GET /api/integration/qr/:qrId
+// Returns flat { status, redemptionHistory } — used by the Seva Pass app to
+// show real-time scan status on pass cards and detail modals.
+router.get("/qr/:qrId", requireApiKey, integrationController.getQRDetails);
+
 module.exports = router;
