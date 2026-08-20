@@ -458,9 +458,11 @@ exports.getEventCategories = async (req, res) => {
 
     // If the event has devoteeAppCategories configured, only return those.
     // If empty/missing, return ALL active categories (backward compatible).
+    // Pass ?all=true to bypass filter (used by admin ConfigureModal).
+    const bypassFilter = req.query.all === 'true' || req.query.all === '1';
     const allowedCodes = (event.devoteeAppCategories || []).map((d) => d.catCode);
     const filter = { eventId: event._id, isActive: true };
-    if (allowedCodes.length > 0) {
+    if (!bypassFilter && allowedCodes.length > 0) {
       filter.catCode = { $in: allowedCodes };
     }
 
