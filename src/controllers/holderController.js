@@ -493,6 +493,15 @@ exports.createHolder = async (req, res) => {
       event,
     }).catch((e) => console.error("[ThirdParty] createHolder push failed:", e.message));
 
+    const catCodeUpper = (categoryForCheck?.catCode || "").toUpperCase();
+    if (["SP", "DN", "INV"].includes(catCodeUpper)) {
+      thirdPartyService.pushSevaSponsor({ holder, event, qrPass, catCode: catCodeUpper })
+        .catch((e) => console.error("[ThirdParty] seva-sponsor push failed:", e.message));
+    } else if (catCodeUpper === "VL") {
+      thirdPartyService.pushStoreQrCode({ holder, event, qrPass })
+        .catch((e) => console.error("[ThirdParty] store-qr-code push failed:", e.message));
+    }
+
     res.status(201).json({
       success: true,
       holder,
@@ -936,6 +945,15 @@ async function processSingleRecord(
       qrImageBase64: qrImage,
       event,
     }).catch((e) => console.error("[ThirdParty] bulkImport push failed:", e.message));
+
+    const catCodeUpper = (category?.catCode || "").toUpperCase();
+    if (["SP", "DN", "INV"].includes(catCodeUpper)) {
+      thirdPartyService.pushSevaSponsor({ holder, event, qrPass, catCode: catCodeUpper })
+        .catch((e) => console.error("[ThirdParty] bulk seva-sponsor push failed:", e.message));
+    } else if (catCodeUpper === "VL") {
+      thirdPartyService.pushStoreQrCode({ holder, event, qrPass })
+        .catch((e) => console.error("[ThirdParty] bulk store-qr-code push failed:", e.message));
+    }
 
     return {
       success: true,

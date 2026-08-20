@@ -87,6 +87,98 @@ class ThirdPartyService {
   }
 
   /**
+   * Push a sponsor/donor/invitee record to the community app.
+   * Called after QR issuance for SP/DN/INV categories.
+   */
+  async pushSevaSponsor({ holder, event, qrPass, catCode }) {
+    if (!this.isConfigured()) return { skipped: true, reason: "sync disabled" };
+
+    const thirdPartyEventId = event?.thirdPartyEventId;
+    if (!thirdPartyEventId) {
+      return { skipped: true, reason: "event has no thirdPartyEventId mapped" };
+    }
+
+    try {
+      const bare10 = String(holder.phone || "").replace(/^91/, "").slice(-10);
+
+      const categoryMap = { SP: "sponsor", DN: "donor", INV: "invitee" };
+      const category = categoryMap[(catCode || "").toUpperCase()] || "donor";
+
+      const body = {
+        devotee_mobile_number: bare10,
+        donor_name: holder.name || "",
+        donor_mobile_number: bare10,
+        date_time: this._toDateTimeStr(new Date()).slice(0, 16),
+        category,
+        qrcode: qrPass?.qrId || "",
+      };
+
+      const response = await axios.post(
+        `${this.baseUrl}/api/v1/user/festivals/seva-sponsor`,
+        body,
+        { headers: { "Content-Type": "application/json", Accept: "application/json" }, timeout: 15000 },
+      );
+
+      const ok = response.data?.success === true;
+      console.log(
+        `[CommunityApp] seva-sponsor ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
+        JSON.stringify(response.data).slice(0, 200),
+      );
+      return { success: ok, response: response.data };
+    } catch (error) {
+      const detail = error.response?.data || error.message;
+      console.error(
+        `[CommunityApp] seva-sponsor FAILED for ${holder.phone}:`,
+        JSON.stringify(detail).slice(0, 300),
+      );
+      return { success: false, error: detail };
+    }
+  }
+
+  /**
+   * Push a volunteer QR code to the community app.
+   * Called after QR issuance for VL category.
+   */
+  async pushStoreQrCode({ holder, event, qrPass }) {
+    if (!this.isConfigured()) return { skipped: true, reason: "sync disabled" };
+
+    const thirdPartyEventId = event?.thirdPartyEventId;
+    if (!thirdPartyEventId) {
+      return { skipped: true, reason: "event has no thirdPartyEventId mapped" };
+    }
+
+    try {
+      const bare10 = String(holder.phone || "").replace(/^91/, "").slice(-10);
+
+      const body = {
+        volunteer_mobile_number: bare10,
+        event_id: thirdPartyEventId,
+        qrcode: qrPass?.qrId || "",
+      };
+
+      const response = await axios.post(
+        `${this.baseUrl}/api/v1/user/festivals/store-qr-code`,
+        body,
+        { headers: { "Content-Type": "application/json", Accept: "application/json" }, timeout: 15000 },
+      );
+
+      const ok = response.data?.success === true;
+      console.log(
+        `[CommunityApp] store-qr-code ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
+        JSON.stringify(response.data).slice(0, 200),
+      );
+      return { success: ok, response: response.data };
+    } catch (error) {
+      const detail = error.response?.data || error.message;
+      console.error(
+        `[CommunityApp] store-qr-code FAILED for ${holder.phone}:`,
+        JSON.stringify(detail).slice(0, 300),
+      );
+      return { success: false, error: detail };
+    }
+  }
+
+  /**
    * Format a Date/ISO string as "YYYY-MM-DD HH:MM:SS" in IST
    * (their docs require this exact format).
    */
