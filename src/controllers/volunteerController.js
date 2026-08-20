@@ -24,15 +24,46 @@ exports.createVolunteer = async (req, res) => {
     }
 
     // FIX: keep ONLY entry points that exist AND belong to an assigned event
-    let validEpIds = [];
+    let finalEpIds = [];
     if (assignedEntryPointIds && assignedEntryPointIds.length > 0) {
       const uniqueIds = [...new Set(assignedEntryPointIds.map(String))];
       const eventIds = (assignedEventIds || []).map(String);
       const entryPoints = await EntryPoint.find({
         _id: { $in: uniqueIds },
         ...(eventIds.length > 0 ? { eventId: { $in: eventIds } } : {}),
+      }).select("_id eventId");
+      finalEpIds = entryPoints.map((ep) => ep._id);
+
+      // FIX: auto-include stations for newly assigned events that have no
+      // stations selected. Without this, the scanner never shows the new
+      // event because it derives events from the stations it has.
+      if (eventIds.length > 0) {
+        const epEventIds = new Set(
+          entryPoints.map((ep) => ep.eventId.toString())
+        );
+        const eventsWithoutStations = eventIds.filter(
+          (eid) => !epEventIds.has(eid)
+        );
+
+        if (eventsWithoutStations.length > 0) {
+          const autoStationEps = await EntryPoint.find({
+            eventId: { $in: eventsWithoutStations },
+            isActive: true,
+          }).select("_id");
+          finalEpIds = [
+            ...finalEpIds,
+            ...autoStationEps.map((ep) => ep._id),
+          ];
+        }
+      }
+    } else if (assignedEventIds && assignedEventIds.length > 0) {
+      // No entry points provided but events are assigned — auto-include
+      // all active stations for those events so the scanner has something.
+      const autoStationEps = await EntryPoint.find({
+        eventId: { $in: assignedEventIds },
+        isActive: true,
       }).select("_id");
-      validEpIds = entryPoints.map((ep) => ep._id);
+      finalEpIds = autoStationEps.map((ep) => ep._id);
     }
 
     const volunteer = await User.create({
@@ -42,7 +73,7 @@ exports.createVolunteer = async (req, res) => {
       password,
       role: "volunteer",
       assignedEvents: assignedEventIds || [],
-      assignedEntryPoints: validEpIds,
+      assignedEntryPoints: finalEpIds,
       assignedVenues: assignedVenues || [],
     });
 
@@ -166,16 +197,40 @@ exports.updateVolunteer = async (req, res) => {
       //   2. Belong to one of the assigned events
       // This purges stale/duplicate IDs that accumulated from deleted events
       // or old re-assignments — the cause of "12 stations showing for 1 event".
-      const EntryPoint = require("../models/EntryPoint");
       const uniqueIds = [...new Set(assignedEntryPointIds.map(String))];
       const eventIds = (assignedEventIds || []).map(String);
 
       const validEps = await EntryPoint.find({
         _id: { $in: uniqueIds },
         ...(eventIds.length > 0 ? { eventId: { $in: eventIds } } : {}),
-      }).select("_id");
+      }).select("_id eventId");
 
-      updateData.assignedEntryPoints = validEps.map((ep) => ep._id);
+      let finalEpIds = validEps.map((ep) => ep._id);
+
+      // FIX: auto-include stations for newly assigned events that have no
+      // stations selected. Without this, the scanner never shows the new
+      // event because it derives events from the stations it has.
+      if (eventIds.length > 0) {
+        const epEventIds = new Set(
+          validEps.map((ep) => ep.eventId.toString())
+        );
+        const eventsWithoutStations = eventIds.filter(
+          (eid) => !epEventIds.has(eid)
+        );
+
+        if (eventsWithoutStations.length > 0) {
+          const autoStationEps = await EntryPoint.find({
+            eventId: { $in: eventsWithoutStations },
+            isActive: true,
+          }).select("_id");
+          finalEpIds = [
+            ...finalEpIds,
+            ...autoStationEps.map((ep) => ep._id),
+          ];
+        }
+      }
+
+      updateData.assignedEntryPoints = finalEpIds;
     }
 
     if (req.body.assignedVenues !== undefined)
@@ -270,6 +325,7 @@ exports.volunteerLogin = async (req, res) => {
     }
 
     const volunteer = await User.findOne(query)
+      .populate("assignedEvents", "name eventCode dateStart dateEnd")
       .populate({
         path: "assignedEntryPoints",
         select: "name stationLabel type _id allowGroupCount eventId isActive",
@@ -302,7 +358,7 @@ exports.volunteerLogin = async (req, res) => {
     // Only return stations belonging to the volunteer's assigned events.
     // Orphan stations from old events are excluded.
     const assignedEventIds = new Set(
-      (volunteer.assignedEvents || []).map((e) => e.toString())
+      (volunteer.assignedEvents || []).map((e) => (e._id || e).toString())
     );
 
     const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
@@ -321,6 +377,23 @@ exports.volunteerLogin = async (req, res) => {
         eventMap.set(evId, {
           _id: evId, name: ev?.name || "Event", eventCode: ev?.eventCode || "",
           dateStart: ev?.dateStart, dateEnd: ev?.dateEnd,
+        });
+      }
+    }
+
+    // FIX: Also include events from assignedEvents that have no stations yet.
+    // This happens when an admin assigns a new event but stations haven't been
+    // auto-included yet. The scanner needs to see these events so the volunteer
+    // knows they were assigned — even if they can't scan for them yet.
+    for (const ev of volunteer.assignedEvents || []) {
+      const evId = (ev._id || ev).toString();
+      if (!eventMap.has(evId)) {
+        eventMap.set(evId, {
+          _id: evId,
+          name: ev.name || "Event",
+          eventCode: ev.eventCode || "",
+          dateStart: ev.dateStart,
+          dateEnd: ev.dateEnd,
         });
       }
     }

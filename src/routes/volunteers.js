@@ -15,6 +15,7 @@ router.get("/me", protect, async (req, res) => {
 
     const volunteer = await User.findOne({ _id: req.user._id, role: "volunteer" })
       .select("-password")
+      .populate("assignedEvents", "name eventCode dateStart dateEnd")
       .populate({
         path: "assignedEntryPoints",
         select: "name stationLabel type _id allowGroupCount eventId isActive",
@@ -26,7 +27,7 @@ router.get("/me", protect, async (req, res) => {
     // Only return stations that belong to an event the volunteer is assigned to.
     // Stations from old/removed events are orphans and should not appear.
     const assignedEventIds = new Set(
-      (volunteer.assignedEvents || []).map((e) => e.toString())
+      (volunteer.assignedEvents || []).map((e) => (e._id || e).toString())
     );
 
     const activeStations = (volunteer.assignedEntryPoints || []).filter((ep) => {
@@ -50,6 +51,23 @@ router.get("/me", protect, async (req, res) => {
           eventCode: ev?.eventCode || "",
           dateStart: ev?.dateStart,
           dateEnd: ev?.dateEnd,
+        });
+      }
+    }
+
+    // FIX: Also include events from assignedEvents that have no stations yet.
+    // This happens when an admin assigns a new event but stations haven't been
+    // auto-included yet. The scanner needs to see these events so the volunteer
+    // knows they were assigned — even if they can't scan for them yet.
+    for (const ev of volunteer.assignedEvents || []) {
+      const evId = (ev._id || ev).toString();
+      if (!eventMap.has(evId)) {
+        eventMap.set(evId, {
+          _id: evId,
+          name: ev.name || "Event",
+          eventCode: ev.eventCode || "",
+          dateStart: ev.dateStart,
+          dateEnd: ev.dateEnd,
         });
       }
     }
