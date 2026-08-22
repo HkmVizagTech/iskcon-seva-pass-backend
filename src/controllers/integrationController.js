@@ -329,6 +329,16 @@ exports.generateVolunteerQR = async (req, res) => {
     // Deliver the QR to the holder's phone (non-fatal)
     await trySendWhatsApp(phone, qrImage, holder, event, entryPoints);
 
+    // Push to community mobile app (non-fatal, fire-and-forget)
+    const qrPass = { qrId };
+    thirdPartyService.pushHolder({ holder, qrPass, qrImageBase64: qrImage, event }).catch(() => {});
+    const catCode = (category.catCode || "").toUpperCase();
+    if (["SP", "DN", "INV"].includes(catCode)) {
+      thirdPartyService.pushSevaSponsor({ holder, event, qrPass, catCode, categoryName: category.name }).catch(() => {});
+    } else if (catCode === "VL") {
+      thirdPartyService.pushStoreQrCode({ holder, event, qrPass }).catch(() => {});
+    }
+
     // Return in their expected format
     return res.status(200).json({
       status: true,
@@ -484,6 +494,16 @@ exports.generateVolunteerQRBulk = async (req, res) => {
           validFrom: event.dateStart, validUntil: event.dateEnd,
           deliveryMethod: "third_party", deliveryStatus: "sent", deliveredAt: new Date(),
         });
+
+        // Push to community mobile app (non-fatal, fire-and-forget)
+        const qrPassObj = { qrId };
+        thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: qrImage, event }).catch(() => {});
+        const catCode = (category.catCode || "").toUpperCase();
+        if (["SP", "DN", "INV"].includes(catCode)) {
+          thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
+        } else if (catCode === "VL") {
+          thirdPartyService.pushStoreQrCode({ holder, event, qrPass: qrPassObj }).catch(() => {});
+        }
 
         results.push({
           success: true, reused: false,

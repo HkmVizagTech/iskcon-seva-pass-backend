@@ -462,7 +462,7 @@ exports.createHolder = async (req, res) => {
       };
 
       try {
-        if (deliveryMethod === "whatsapp" || deliveryMethod === "both") {
+        if (deliveryMethod === "whatsapp" || deliveryMethod === "both" || deliveryMethod === "mobile_whatsapp") {
           const waResult = await whatsappService.sendQRMessage(
             phone,
             qrImage,
@@ -899,7 +899,7 @@ async function processSingleRecord(
     // The holder + QRPass are already persisted. We record failure status
     // and include the record in the "failed" list for re-delivery,
     // but we don't orphan the holder record.
-    if (deliveryMethod === "whatsapp") {
+    if (deliveryMethod === "whatsapp" || deliveryMethod === "both" || deliveryMethod === "mobile_whatsapp") {
       try {
         await whatsappService.sendQRMessage(
           formattedPhone,

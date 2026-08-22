@@ -15,6 +15,7 @@ const Category = require("../models/Category");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
 const qrService = require("../services/qrService");
+const thirdPartyService = require("../services/thirdPartyService");
 
 function normalisePhone(phone) {
   if (!phone) return null;
@@ -113,6 +114,10 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
     deliveryStatus: "sent",
     deliveredAt: new Date(),
   });
+
+  // Push to community mobile app (non-fatal, fire-and-forget)
+  const qrPassObj = { qrId };
+  thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: qrImage, event }).catch(() => {});
 
   return {
     success: true,
