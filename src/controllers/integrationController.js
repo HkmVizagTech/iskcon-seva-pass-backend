@@ -346,6 +346,173 @@ exports.generateVolunteerQR = async (req, res) => {
 };
 
 /**
+ * POST /api/integration/generate-volunteer-qr/bulk
+ *
+ * Bulk version — accepts an array of holders and returns per-holder results.
+ * Shares event + category lookup once for efficiency.
+ *
+ * Request body:
+ *   { event_id, category?, venue?, preacher?, preacherId?, holders: [{ name?, user_phone_number, user_email? }, ...] }
+ *
+ * Max 200 holders per call.
+ */
+exports.generateVolunteerQRBulk = async (req, res) => {
+  try {
+    const { event_id, holders } = req.body;
+
+    if (!event_id) {
+      return res.status(400).json({ status: false, message: "event_id is required" });
+    }
+    if (!Array.isArray(holders) || holders.length === 0) {
+      return res.status(400).json({ status: false, message: "holders must be a non-empty array" });
+    }
+    if (holders.length > 200) {
+      return res.status(400).json({ status: false, message: "Maximum 200 holders per bulk request" });
+    }
+
+    const event = await Event.findOne({
+      $or: [
+        { eventCode: String(event_id).toUpperCase() },
+        { _id: String(event_id).match(/^[0-9a-fA-F]{24}$/) ? event_id : null },
+      ],
+    });
+    if (!event) {
+      return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
+    }
+
+    const requestedCategory = (req.body.category || "").trim();
+    const category = await resolveCategory(event._id, requestedCategory);
+    if (!category) {
+      return res.status(400).json({ status: false, message: "No suitable category found for this event." });
+    }
+
+    if (event.devoteeAppCategories && event.devoteeAppCategories.length > 0) {
+      const rule = event.devoteeAppCategories.find(
+        (d) => d.catCode === (category.catCode || "").toUpperCase()
+      );
+      if (!rule) {
+        return res.status(403).json({
+          status: false,
+          message: `Category "${category.name}" is not available for the devotee app on this event.`,
+        });
+      }
+    }
+
+    const requestedVenue = (req.body.venue || "").trim();
+    let entryPoints = category.entryPoints || [];
+    if (requestedVenue && entryPoints.length > 0) {
+      const venueRe = new RegExp(escapeRegExp(requestedVenue), "i");
+      const filtered = entryPoints.filter((ep) => ep.location && ep.location.building && venueRe.test(ep.location.building));
+      if (filtered.length > 0) entryPoints = filtered;
+    }
+
+    const preacher = (req.body.preacher || "").trim();
+    const preacherId = req.body.preacherId || null;
+    let resolvedPreacher = null;
+    if (preacher) {
+      try { resolvedPreacher = await resolvePreacherFromString(preacher); } catch (e) { /* ignore */ }
+    }
+    const finalPreacherName = resolvedPreacher?.preacherName || preacher || "";
+    const finalPreacherId = resolvedPreacher?.preacherId || preacherId || null;
+
+    let holderTypeId = null;
+    let holderTypeLabel = "self";
+    try {
+      const typeName = (process.env.INTEGRATION_HOLDER_TYPE || "invitee").trim();
+      let holderType = await HolderType.findOne({
+        eventId: event._id, isActive: true,
+        $or: [{ code: typeName.toUpperCase() }, { name: new RegExp("^" + escapeRegExp(typeName) + "$", "i") }],
+      });
+      if (!holderType) holderType = await HolderType.findOne({ eventId: event._id, isDefault: true, isActive: true });
+      if (holderType) { holderTypeId = holderType._id; holderTypeLabel = holderType.name; }
+    } catch (e) { /* non-fatal */ }
+
+    const results = [];
+    for (const h of holders) {
+      try {
+        const phoneRaw = h.user_phone_number || h.phone || "";
+        const phone = normalisePhone(String(phoneRaw));
+        if (!phone) {
+          results.push({ success: false, error: "Invalid phone number", input: h });
+          continue;
+        }
+
+        const existingHolder = await Holder.findOne({ eventId: event._id, phone });
+        if (existingHolder) {
+          const existingPass = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
+          if (existingPass) {
+            const payload = qrService.createPayload(
+              { ...existingHolder.toObject(), qrId: existingPass.qrId },
+              event, null, [],
+            );
+            const { image: qrImage } = await qrService.generateQRCode(payload);
+            results.push({
+              success: true, reused: true,
+              name: existingHolder.name, phone,
+              qr_id: existingPass.qrId, qr_code: qrImage,
+            });
+            continue;
+          }
+        }
+
+        const holderName = h.name || h.user_email?.split("@")[0] || `Devotee ${phone.slice(-4)}`;
+        let holder;
+        try {
+          holder = await Holder.create({
+            eventId: event._id, catId: category._id, phone,
+            email: h.user_email || undefined,
+            name: holderName, holderType: holderTypeLabel, holderTypeId,
+            source: "third_party", issuedBy: null,
+            ...(finalPreacherName ? { preacher: finalPreacherName } : {}),
+            ...(finalPreacherId ? { preacherId: finalPreacherId } : {}),
+          });
+        } catch (e) {
+          if (e.code === 11000) {
+            holder = await Holder.findOne({ eventId: event._id, phone });
+            if (!holder) { results.push({ success: false, error: e.message, input: h }); continue; }
+          } else { throw e; }
+        }
+
+        const qrId = await qrService.generateQRId(event.eventCode, category.catCode);
+        const payload = qrService.createPayload({ ...holder.toObject(), qrId }, event, category, entryPoints);
+        const { image: qrImage, signedPayload } = await qrService.generateQRCode(payload);
+
+        await QRPass.create({
+          qrId, holderId: holder._id, eventId: event._id, catId: category._id,
+          entryPoints: entryPoints.map((ep) => ep._id),
+          payloadSigned: signedPayload,
+          validFrom: event.dateStart, validUntil: event.dateEnd,
+          deliveryMethod: "third_party", deliveryStatus: "sent", deliveredAt: new Date(),
+        });
+
+        results.push({
+          success: true, reused: false,
+          name: holder.name, phone,
+          qr_id: qrId, qr_code: qrImage,
+        });
+      } catch (e) {
+        results.push({ success: false, error: e.message, input: h });
+      }
+    }
+
+    const succeeded = results.filter((r) => r.success).length;
+    const failed = results.length - succeeded;
+
+    return res.status(200).json({
+      status: true,
+      message: `Processed ${results.length} holders — ${succeeded} succeeded, ${failed} failed`,
+      total: results.length,
+      succeeded,
+      failed,
+      results,
+    });
+  } catch (error) {
+    console.error("[Integration] generateVolunteerQRBulk error:", error);
+    return res.status(500).json({ status: false, message: "Failed to process bulk QR generation" });
+  }
+};
+
+/**
  * GET /api/integration/status
  * Health check — lets the third party verify our API is reachable.
  */

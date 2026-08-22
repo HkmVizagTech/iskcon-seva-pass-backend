@@ -58,6 +58,14 @@ router.post(
   integrationController.generateVolunteerQR,
 );
 
+// ─── Bulk volunteer QR generation ────────────────────────────────────────────
+// POST /api/integration/generate-volunteer-qr/bulk
+router.post(
+  "/generate-volunteer-qr/bulk",
+  requireApiKey,
+  integrationController.generateVolunteerQRBulk,
+);
+
 // ─── Prasadam Coupon integration (community app) ─────────────────────────────
 // Matches events by our own MongoDB Event _id, shared directly with the
 // community app — no eventCode translation needed.

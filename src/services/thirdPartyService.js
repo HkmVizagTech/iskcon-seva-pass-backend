@@ -90,7 +90,7 @@ class ThirdPartyService {
    * Push a sponsor/donor/invitee record to the community app.
    * Called after QR issuance for SP/DN/INV categories.
    */
-  async pushSevaSponsor({ holder, event, qrPass, catCode }) {
+  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, sevaSlotName }) {
     if (!this.isConfigured()) return { skipped: true, reason: "sync disabled" };
 
     const thirdPartyEventId = event?.thirdPartyEventId;
@@ -104,6 +104,8 @@ class ThirdPartyService {
       const categoryMap = { SP: "sponsor", DN: "donor", INV: "invitee" };
       const category = categoryMap[(catCode || "").toUpperCase()] || "donor";
 
+      const sevaTypeMap = { sponsor: "abhisekam", donor: "darshan", invitee: "darshan" };
+
       const body = {
         devotee_mobile_number: bare10,
         donor_name: holder.name || "",
@@ -111,6 +113,9 @@ class ThirdPartyService {
         date_time: this._toDateTimeStr(new Date()).slice(0, 16),
         category,
         qrcode: qrPass?.qrId || "",
+        seva_type: sevaTypeMap[category] || "darshan",
+        holder: holder.name || "",
+        instruction: sevaSlotName || categoryName || event?.name || "",
       };
 
       const response = await axios.post(
