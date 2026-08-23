@@ -47,7 +47,7 @@ const qrPassSchema = new mongoose.Schema({
   paymentAmount: Number,
   deliveryMethod: {
     type: String,
-    enum: ["whatsapp", "email", "print", "screen", "none", "third_party"],
+    enum: ["whatsapp", "email", "print", "screen", "none", "third_party", "both", "mobile", "mobile_whatsapp"],
     default: "none",
   },
   deliveredAt: Date,
