@@ -1,6 +1,7 @@
 const HolderType = require("../models/HolderType");
 const EntryPoint = require("../models/EntryPoint");
 const Holder = require("../models/Holder");
+const QRPass = require("../models/QRPass");
 
 // Full CRUD for the merged HolderType entity (absorbs the old
 // categoryController capabilities: entry points, access-control roles,
@@ -121,16 +122,54 @@ exports.deleteHolderType = async (req, res) => {
     }
 
     const activeHolderCount = await Holder.countDocuments({ catId: req.params.htId });
-    if (activeHolderCount > 0) {
+    if (activeHolderCount > 0 && !req.query.moveToTypeId) {
       return res.status(409).json({
         error: `Cannot delete: ${activeHolderCount} holder(s) are assigned to this type. Reassign them first.`,
         activeHolderCount,
       });
     }
 
+    // Optional reassign-and-delete: move all holders (and their QR passes)
+    // to the target type in the same event, then remove this type.
+    let reassignedHolders = 0;
+    let reassignedPasses = 0;
+    if (activeHolderCount > 0 && req.query.moveToTypeId) {
+      const target = await HolderType.findOne({
+        _id: req.query.moveToTypeId,
+        eventId: existing.eventId,
+      });
+      if (!target) return res.status(400).json({ error: "Target pass type not found for this event" });
+      if (String(target._id) === String(existing._id)) {
+        return res.status(400).json({ error: "Target pass type must be different from the one being deleted" });
+      }
+
+      const holderRes = await Holder.updateMany(
+        { catId: existing._id },
+        { $set: { catId: target._id } },
+      );
+      reassignedHolders = holderRes.modifiedCount ?? activeHolderCount;
+
+      // Keep QR passes pointing at a live type — scan feed, reports and the
+      // app resolve catId for display/grouping. Entry-point enforcement is
+      // unaffected (it uses the pass's own entryPoints array).
+      const passRes = await QRPass.updateMany(
+        { catId: existing._id },
+        { $set: { catId: target._id } },
+      );
+      reassignedPasses = passRes.modifiedCount ?? 0;
+    }
+
     await HolderType.findByIdAndDelete(req.params.htId);
-    res.json({ success: true, message: "Holder type deleted successfully" });
+    res.json({
+      success: true,
+      message: reassignedHolders > 0
+        ? `Pass type deleted. ${reassignedHolders} holder(s) and ${reassignedPasses} pass(es) moved to the target type.`
+        : "Holder type deleted successfully",
+      reassignedHolders,
+      reassignedPasses,
+    });
   } catch (error) {
+    console.error("deleteHolderType error:", error);
     res.status(500).json({ error: "Failed to delete holder type" });
   }
 };
