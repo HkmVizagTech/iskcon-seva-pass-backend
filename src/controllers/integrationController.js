@@ -6,15 +6,15 @@
 // We create/find the holder in our system and return the QR code.
 
 const Event = require("../models/Event");
-const Category = require("../models/Category");
+const HolderType = require("../models/HolderType");
 const EntryPoint = require("../models/EntryPoint");
 const Holder = require("../models/Holder");
-const HolderType = require("../models/HolderType");
 const QRPass = require("../models/QRPass");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
 const whatsappService = require("../services/whatsappService");
 const { resolvePreacherFromString } = require("./preacherController");
+const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
 
 // Helper: escape regex special chars for safe name matching
 function escapeRegExp(text) {
@@ -30,9 +30,9 @@ function normalisePhone(phone) {
   if (digits.length === 11 && digits.startsWith("0")) return "91" + digits.slice(1);
   return digits;
 }
-// Resolve the category a QR is issued under, in priority order:
+// Resolve the merged pass type a QR is issued under, in priority order:
 //   1. requested (catCode or exact name) — from the Seva Pass app's pass-type picker
-//   2. an "Invitee" category (code INV / name matching "invitee")
+//   2. an "Invitee" type (catCode INV / name matching "invitee")
 //   3. legacy defaults: General Public (GN) → name "general" → name "volunteer"
 async function resolveCategory(eventId, requested) {
   const attempts = [];
@@ -50,8 +50,8 @@ async function resolveCategory(eventId, requested) {
   attempts.push({ name: /volunteer/i });
 
   for (const q of attempts) {
-    const category = await Category.findOne({ eventId, ...q }).populate("entryPoints");
-    if (category) return category;
+    const holderType = await HolderType.findOne({ eventId, ...q }).populate("entryPoints");
+    if (holderType) return holderType;
   }
   return null;
 }
@@ -245,29 +245,8 @@ exports.generateVolunteerQR = async (req, res) => {
     }
 
     // ── Create or update holder ─────────────────────────────────────────────
-    // Resolve holder type for integration-issued holders.
-    // Uses the event "Invitee" type when it exists (INTEGRATION_HOLDER_TYPE
-    // overrides the name/code), else the event default type, else none.
-    // Non-fatal: a missing type falls back to the old "self" behaviour.
-    let holderTypeId = null;
-    let holderTypeLabel = "self";
-    try {
-      const typeName = (process.env.INTEGRATION_HOLDER_TYPE || "invitee").trim();
-      let holderType = await HolderType.findOne({
-        eventId: event._id,
-        isActive: true,
-        $or: [{ code: typeName.toUpperCase() }, { name: new RegExp("^" + typeName + "$", "i") }],
-      });
-      if (!holderType) {
-        holderType = await HolderType.findOne({ eventId: event._id, isDefault: true, isActive: true });
-      }
-      if (holderType) {
-        holderTypeId = holderType._id;
-        holderTypeLabel = holderType.name;
-      }
-    } catch (e) {
-      console.warn("[Integration] holder type lookup failed:", e.message);
-    }
+    // holderType is a denormalized label derived from the resolved pass type
+    // (shared codeMap) so legacy reports grouping by the string keep working.
     const holderData = {
       eventId: event._id,
       catId: category._id,
@@ -275,8 +254,7 @@ exports.generateVolunteerQR = async (req, res) => {
       email: user_email || undefined,
       // Name defaults to phone if not provided — can be updated later
       name: req.body.name || (user_email ? user_email.split("@")[0] : `Devotee ${phone.slice(-4)}`),
-      holderType: holderTypeLabel,
-      holderTypeId,
+      holderType: deriveHolderTypeLabel(category),
       source: "third_party",   // mark origin
       issuedBy: null,
       // Preacher attribution — links this pass to the devotee who issued it.
@@ -425,18 +403,6 @@ exports.generateVolunteerQRBulk = async (req, res) => {
     const finalPreacherName = resolvedPreacher?.preacherName || preacher || "";
     const finalPreacherId = resolvedPreacher?.preacherId || preacherId || null;
 
-    let holderTypeId = null;
-    let holderTypeLabel = "self";
-    try {
-      const typeName = (process.env.INTEGRATION_HOLDER_TYPE || "invitee").trim();
-      let holderType = await HolderType.findOne({
-        eventId: event._id, isActive: true,
-        $or: [{ code: typeName.toUpperCase() }, { name: new RegExp("^" + escapeRegExp(typeName) + "$", "i") }],
-      });
-      if (!holderType) holderType = await HolderType.findOne({ eventId: event._id, isDefault: true, isActive: true });
-      if (holderType) { holderTypeId = holderType._id; holderTypeLabel = holderType.name; }
-    } catch (e) { /* non-fatal */ }
-
     const results = [];
     for (const h of holders) {
       try {
@@ -471,7 +437,7 @@ exports.generateVolunteerQRBulk = async (req, res) => {
           holder = await Holder.create({
             eventId: event._id, catId: category._id, phone,
             email: h.user_email || undefined,
-            name: holderName, holderType: holderTypeLabel, holderTypeId,
+            name: holderName, holderType: deriveHolderTypeLabel(category),
             source: "third_party", issuedBy: null,
             ...(finalPreacherName ? { preacher: finalPreacherName } : {}),
             ...(finalPreacherId ? { preacherId: finalPreacherId } : {}),
@@ -653,7 +619,7 @@ exports.getEventCategories = async (req, res) => {
       filter.catCode = { $in: allowedCodes };
     }
 
-    const categories = await Category.find(filter)
+    const categories = await HolderType.find(filter)
       .populate("entryPoints", "name stationLabel type")
       .select("name catCode entryPoints")
       .sort({ catCode: 1 });

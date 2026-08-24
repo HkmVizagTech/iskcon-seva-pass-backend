@@ -1,6 +1,5 @@
 const Event = require("../models/Event");
 const EntryPoint = require("../models/EntryPoint");
-const Category = require("../models/Category");
 const QRPass = require("../models/QRPass");
 const PaidTier = require("../models/PaidTier");
 const HolderType = require("../models/HolderType");
@@ -60,31 +59,22 @@ exports.createEvent = async (req, res) => {
       .filter((ep) => ["venue_entry", "prasadam"].includes(ep.type))
       .map((ep) => ep._id);
 
-    // FIX: include Invitee as a default holder type — the Seva Pass devotee
-    // app issues passes under this type by default.
-    const [sponsorHT, donorHT, volunteerHT, generalHT, vipHT, inviteeHT] =
-      await HolderType.insertMany([
-        { eventId: event._id, name: "Sponsor", code: "SP", icon: "💰", color: "#F97316", isDefault: true },
-        { eventId: event._id, name: "Donor", code: "DN", icon: "🙏", color: "#22C55E", isDefault: true },
-        { eventId: event._id, name: "Volunteer", code: "VL", icon: "🤝", color: "#8B5CF6", isDefault: true },
-        { eventId: event._id, name: "General Public", code: "GN", icon: "👤", color: "#3B82F6", isDefault: true },
-        { eventId: event._id, name: "VIP Guest", code: "VP", icon: "⭐", color: "#EAB308", isDefault: true },
-        { eventId: event._id, name: "Invitee", code: "INV", icon: "🎟️", color: "#EC4899", isDefault: true },
-      ]);
-
-    await Category.insertMany([
-      { eventId: event._id, name: "Sponsor", catCode: "SP", holderTypeId: sponsorHT._id, entryPoints: allEpIds, color: "#F97316", icon: "💰" },
-      { eventId: event._id, name: "Donor", catCode: "DN", holderTypeId: donorHT._id, entryPoints: darshanPrasadamIds, color: "#22C55E", icon: "🙏" },
-      { eventId: event._id, name: "Volunteer", catCode: "VL", holderTypeId: volunteerHT._id, entryPoints: venuePrasadamIds, color: "#8B5CF6", icon: "🤝" },
-      { eventId: event._id, name: "General Public", catCode: "GN", holderTypeId: generalHT._id, entryPoints: entryPoints.filter((ep) => ep.type === "darshan").map((ep) => ep._id), color: "#3B82F6", icon: "👤" },
-      { eventId: event._id, name: "VIP Guest", catCode: "VP", holderTypeId: vipHT._id, entryPoints: allEpIds, color: "#EAB308", icon: "⭐" },
-      { eventId: event._id, name: "Invitee", catCode: "INV", holderTypeId: inviteeHT._id, entryPoints: allEpIds, color: "#EC4899", icon: "🎟️" },
+    // MERGED: single set of 6 default pass types (HolderType absorbed Category).
+    // Invitee is included because the Seva Pass devotee app issues passes
+    // under it by default.
+    await HolderType.insertMany([
+      { eventId: event._id, name: "Sponsor", catCode: "SP", entryPoints: allEpIds, color: "#F97316", icon: "💰", isDefault: true, isActive: true },
+      { eventId: event._id, name: "Donor", catCode: "DN", entryPoints: darshanPrasadamIds, color: "#22C55E", icon: "🙏", isDefault: true, isActive: true },
+      { eventId: event._id, name: "Volunteer", catCode: "VL", entryPoints: venuePrasadamIds, color: "#8B5CF6", icon: "🤝", isDefault: true, isActive: true },
+      { eventId: event._id, name: "General Public", catCode: "GN", entryPoints: entryPoints.filter((ep) => ep.type === "darshan").map((ep) => ep._id), color: "#3B82F6", icon: "👤", isDefault: true, isActive: true },
+      { eventId: event._id, name: "VIP Guest", catCode: "VP", entryPoints: allEpIds, color: "#EAB308", icon: "⭐", isDefault: true, isActive: true },
+      { eventId: event._id, name: "Invitee", catCode: "INV", entryPoints: allEpIds, color: "#EC4899", icon: "🎟️", isDefault: true, isActive: true },
     ]);
 
     res.status(201).json({
       success: true,
       event,
-      message: "Event created with default entry points, holder types, and categories",
+      message: "Event created with default entry points and pass types",
     });
   } catch (error) {
     console.error("Create event error:", error);
@@ -205,18 +195,16 @@ exports.getEventDetails = async (req, res) => {
       eventObj.venue = eventObj.venue ? [eventObj.venue] : [];
     }
 
-    const [entryPoints, categories, recentScans] = await Promise.all([
+    const [entryPoints, holderTypes, recentScans] = await Promise.all([
       EntryPoint.find({ eventId: event._id }),
-      Category.find({ eventId: event._id })
-        .populate("holderTypeId", "name code icon color")
-        .populate("entryPoints", "name stationLabel type"),
+      HolderType.find({ eventId: event._id }).populate("entryPoints", "name stationLabel type"),
       QRPass.find({ eventId: event._id })
         .sort({ createdAt: -1 })
         .limit(10)
         .populate("holderId", "name phone"),
     ]);
 
-    res.json({ event, entryPoints, categories, recentActivity: recentScans });
+    res.json({ event, entryPoints, categories: holderTypes, recentActivity: recentScans });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch event details" });
   }
@@ -301,7 +289,6 @@ exports.deleteEvent = async (req, res) => {
 
     await Promise.all([
       EntryPoint.deleteMany({ eventId }),
-      Category.deleteMany({ eventId }),
       HolderType.deleteMany({ eventId }),
       Holder.deleteMany({ eventId }),
       QRPass.deleteMany({ eventId }),

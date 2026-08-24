@@ -1,7 +1,7 @@
 const User = require("../models/User");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
-const Category = require("../models/Category");
+const HolderType = require("../models/HolderType");
 const EntryPoint = require("../models/EntryPoint");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
@@ -293,7 +293,7 @@ exports.getMyHolders = async (req, res) => {
       if (mongoose.isValidObjectId(cat)) {
         catIds = [cat];
       } else {
-        const cats = await Category.find({
+        const cats = await HolderType.find({
           $or: [
             { catCode: cat.toUpperCase() },
             { name: new RegExp(`^${escapeRegExp(cat)}$`, "i") },

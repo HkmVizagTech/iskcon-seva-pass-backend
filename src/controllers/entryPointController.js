@@ -1,5 +1,5 @@
 const EntryPoint = require("../models/EntryPoint");
-const Category = require("../models/Category");
+const HolderType = require("../models/HolderType");
 const User = require("../models/User");
 const QRPass = require("../models/QRPass");
 
@@ -76,15 +76,15 @@ exports.deleteEntryPoint = async (req, res) => {
     });
     if (!ep) return res.status(404).json({ error: "Entry point not found" });
 
-    // Cascade: remove from categories and volunteers
+    // Cascade: remove from pass types and volunteers
     await Promise.all([
-      Category.updateMany({ entryPoints: epId }, { $pull: { entryPoints: ep._id } }),
+      HolderType.updateMany({ entryPoints: epId }, { $pull: { entryPoints: ep._id } }),
       User.updateMany({ assignedEntryPoints: epId }, { $pull: { assignedEntryPoints: ep._id } }),
     ]);
 
     res.json({
       success: true,
-      message: "Entry point deleted and removed from categories and volunteers",
+      message: "Entry point deleted and removed from pass types and volunteers",
     });
   } catch (error) {
     res.status(500).json({ error: "Failed to delete entry point: " + error.message });

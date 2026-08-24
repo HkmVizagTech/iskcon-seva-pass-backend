@@ -11,11 +11,12 @@
 
 const mongoose = require("mongoose");
 const Event = require("../models/Event");
-const Category = require("../models/Category");
+const HolderType = require("../models/HolderType");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
+const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
 
 function normalisePhone(phone) {
   if (!phone) return null;
@@ -30,27 +31,26 @@ function isValidObjectId(id) {
   return typeof id === "string" && /^[0-9a-fA-F]{24}$/.test(id);
 }
 
-// Resolve (or create-on-first-use) the Prasadam category for an event.
+// Resolve (or create-on-first-use) the Prasadam pass type for an event.
 // Looks for catCode "PR" or a name containing "prasad". If none exists,
 // creates one automatically so the integration works without manual setup.
 async function resolvePrasadamCategory(event) {
-  let category = await Category.findOne({
+  let category = await HolderType.findOne({
     eventId: event._id,
     $or: [{ catCode: "PR" }, { name: /prasad/i }],
   }).populate("entryPoints");
 
   if (category) return category;
 
-  // Auto-create a minimal Prasadam category + a default entry point reference.
+  // Auto-create a minimal Prasadam type + a default entry point reference.
   // No entryPoints attached — the QR will carry no gate restriction unless
-  // the temple later assigns one via the dashboard (Events → Categories).
-  category = await Category.create({
+  // the temple later assigns one via the dashboard.
+  category = await HolderType.create({
     eventId: event._id,
     name: "Prasadam Coupon",
     catCode: "PR",
     color: "#16A34A",
     icon: "🍛",
-    holderTypeId: null,
     entryPoints: [],
   });
   return category;
@@ -91,7 +91,7 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
     phone: normPhone,
     email: email || undefined,
     name: name || `Devotee ${normPhone.slice(-4)}`,
-    holderType: "self",
+    holderType: deriveHolderTypeLabel(category),
     source: "third_party",
     customFields: quantity ? { prasadamQuantity: quantity } : undefined,
   });

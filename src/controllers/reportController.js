@@ -1,5 +1,6 @@
 const Event = require("../models/Event");
 const Holder = require("../models/Holder");
+const HolderType = require("../models/HolderType");
 const QRPass = require("../models/QRPass");
 const ScanLog = require("../models/ScanLog");
 const EntryPoint = require("../models/EntryPoint");
@@ -40,13 +41,17 @@ exports.getEventSummary = async (req, res) => {
       { $sort: { granted: -1 } },
     ]);
 
-    // By Holder Type — scoped to holders of this event
+    // By Pass Type — scoped to holders of this event.
+    // Groups via holder.catId → merged HolderType name; falls back to the
+    // legacy denormalized holderType string for records without a type.
     const byHolderType = await ScanLog.aggregate([
       { $match: { epId: { $in: epIds }, result: "granted" } },
       { $lookup: { from: "holders", localField: "holderId", foreignField: "_id", as: "holder" } },
       { $unwind: { path: "$holder", preserveNullAndEmptyArrays: true } },
       { $match: { "holder.eventId": eventObjectId } },
-      { $group: { _id: "$holder.holderType", count: { $sum: 1 } } },
+      { $lookup: { from: "categories", localField: "holder.catId", foreignField: "_id", as: "cat" } },
+      { $unwind: { path: "$cat", preserveNullAndEmptyArrays: true } },
+      { $group: { _id: { $ifNull: ["$cat.name", "$holder.holderType"] }, count: { $sum: 1 } } },
       { $sort: { count: -1 } },
     ]);
 
@@ -71,10 +76,17 @@ exports.getEventSummary = async (req, res) => {
 exports.getHolderDetailsReport = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { holderType, venue, preacher, entryPoint } = req.query;
+    const { catCode, venue, preacher, entryPoint } = req.query;
 
     const holderQuery = { eventId };
-    if (holderType) holderQuery.holderType = holderType;
+    // Filter by pass type via catCode (comma-separated list supported).
+    if (catCode) {
+      const codes = String(catCode).split(",").map((c) => c.trim().toUpperCase()).filter(Boolean);
+      if (codes.length > 0) {
+        const types = await HolderType.find({ eventId, catCode: { $in: codes } }).select("_id").lean();
+        holderQuery.catId = { $in: types.map((t) => t._id) };
+      }
+    }
     if (venue) holderQuery.venueName = new RegExp(venue, "i");
     if (preacher) holderQuery.preacher = new RegExp(preacher, "i");
 
@@ -316,8 +328,20 @@ exports.getDashboardStats = async (req, res) => {
     ]);
     const scanRate = totalPasses > 0 ? ((totalScans / totalPasses) * 100).toFixed(1) : 0;
 
+    // Pass-type stats grouped via catId → merged HolderType name, scoped to
+    // the admin's allowed events (matches the scoping of the counts above).
+    // Falls back to the legacy holderType string for records without a type.
+    const typeMatch = scopedEventIds
+      ? { eventId: { $in: scopedEventIds.map((id) => (typeof id === "string" ? new mongoose.Types.ObjectId(id) : id)) } }
+      : {};
     const holderTypeStats = await Holder.aggregate([
-      { $group: { _id: "$holderType", count: { $sum: 1 } } },
+      { $match: typeMatch },
+      { $group: { _id: "$catId", count: { $sum: 1 }, legacy: { $first: "$holderType" } } },
+      { $lookup: { from: "categories", localField: "_id", foreignField: "_id", as: "cat" } },
+      { $unwind: { path: "$cat", preserveNullAndEmptyArrays: true } },
+      { $project: { count: 1, label: { $ifNull: ["$cat.name", "$legacy"] } } },
+      { $group: { _id: "$label", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
     ]);
 
     const scansByEP = await ScanLog.aggregate([

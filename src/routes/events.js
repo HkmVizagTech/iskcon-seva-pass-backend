@@ -2,7 +2,6 @@ const express = require("express");
 const router = express.Router();
 const eventController = require("../controllers/eventController");
 const entryPointController = require("../controllers/entryPointController");
-const categoryController = require("../controllers/categoryController");
 const holderTypeController = require("../controllers/holderTypeController");
 const holderController = require("../controllers/holderController");
 const { protect, authorize } = require("../middleware/auth");
@@ -73,37 +72,16 @@ router.delete(
   entryPointController.deleteEntryPoint,
 );
 
-// Categories
-router.get("/:eventId/categories", protect, categoryController.getCategories);
-router.get(
-  "/:eventId/categories/:catId",
-  protect,
-  categoryController.getCategory,
-);
-router.post(
-  "/:eventId/categories",
-  protect,
-  authorize("super_admin", "event_admin"),
-  categoryController.createCategory,
-);
-router.patch(
-  "/:eventId/categories/:catId",
-  protect,
-  authorize("super_admin", "event_admin"),
-  categoryController.updateCategory,
-);
-router.delete(
-  "/:eventId/categories/:catId",
-  protect,
-  authorize("super_admin"),
-  categoryController.deleteCategory,
-);
-
-// Holder Types
+// Holder Types — merged pass-type entity (absorbs the old categories CRUD)
 router.get(
   "/:eventId/holder-types",
   protect,
   holderTypeController.getHolderTypes,
+);
+router.get(
+  "/:eventId/holder-types/:htId",
+  protect,
+  holderTypeController.getHolderType,
 );
 router.post(
   "/:eventId/holder-types",

@@ -16,12 +16,13 @@ function normalisePhone(phone) {
 // causing ReferenceError when any exported function was called before the
 // module fully evaluated.
 const Event = require("../models/Event");
-const Category = require("../models/Category");
+const HolderType = require("../models/HolderType");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
 const EntryPoint = require("../models/EntryPoint");
 const qrService = require("../services/qrService");
 const whatsappService = require("../services/whatsappService");
+const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
 const fs = require("fs");
 const path = require("path");
 
@@ -297,7 +298,6 @@ exports.createHolder = async (req, res) => {
       phone,
       email,
       catId,
-      holderType,
       lifetimeDonation,
       entryPoints,
       overrideReason,
@@ -321,8 +321,8 @@ exports.createHolder = async (req, res) => {
     const incomingTier = (req.body.subCategory || req.body.tier || "").toString().trim().toUpperCase();
     const incomingSlotCode = (req.body.sevaSlotCode || req.body.slotCode || "").toString().trim().toUpperCase();
 
-    // Resolve category to check if it's a Sponsor category (catCode SP)
-    const categoryForCheck = await Category.findById(catId).select("catCode name").lean();
+    // Resolve pass type to check if it's a Sponsor type (catCode SP)
+    const categoryForCheck = await HolderType.findById(catId).select("catCode name").lean();
     const isSponsorCategory = (categoryForCheck?.catCode || "").toUpperCase() === "SP";
 
     // Resolve SevaSlot from the slot code (sponsors only)
@@ -375,9 +375,9 @@ exports.createHolder = async (req, res) => {
       }
     }
 
-    const category = await Category.findById(catId).populate("entryPoints");
+    const category = await HolderType.findById(catId).populate("entryPoints");
     if (!category) {
-      return res.status(404).json({ error: "Category not found" });
+      return res.status(404).json({ error: "Pass type not found" });
     }
 
     const finalEntryPoints =
@@ -392,7 +392,8 @@ exports.createHolder = async (req, res) => {
       phone: normalisePhone(phone) || phone,
       email,
       whatsappNumber: normalisePhone(phone) || phone,
-      holderType: holderType || "custom",
+      // Denormalized label derived from the pass type (shared codeMap)
+      holderType: deriveHolderTypeLabel(category),
       lifetimeDonation: Number(lifetimeDonation || 0),
       issuedBy: req.user?._id || req.user?.userId,
       // FIX: normalise phone so duplicate detection works across manual + bulk imports
@@ -583,7 +584,7 @@ exports.bulkImportHolders = async (req, res) => {
   console.log("📦 BULK IMPORT - body:", JSON.stringify(req.body));
   try {
     const { eventId } = req.params;
-    const { categoryId, holderType, deliveryMethod = "whatsapp", preacherId } = req.body;
+    const { categoryId, deliveryMethod = "whatsapp", preacherId } = req.body;
 
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -593,8 +594,8 @@ exports.bulkImportHolders = async (req, res) => {
     if (!event) return res.status(404).json({ error: "Event not found" });
 
     const category =
-      await Category.findById(categoryId).populate("entryPoints");
-    if (!category) return res.status(404).json({ error: "Category not found" });
+      await HolderType.findById(categoryId).populate("entryPoints");
+    if (!category) return res.status(404).json({ error: "Pass type not found" });
 
     let records = [];
     const filePath = req.file.path;
@@ -624,7 +625,6 @@ exports.bulkImportHolders = async (req, res) => {
           record,
           event,
           category,
-          holderType || "general",
           deliveryMethod,
           req.user?._id || req.user?.userId,
           preacherId || null,
@@ -726,10 +726,10 @@ exports.downloadFailedImport = async (req, res) => {
 
 exports.getCategoryEntryPoints = async (req, res) => {
   try {
-    const category = await Category.findById(req.params.categoryId).populate(
+    const category = await HolderType.findById(req.params.categoryId).populate(
       "entryPoints",
     );
-    if (!category) return res.status(404).json({ error: "Category not found" });
+    if (!category) return res.status(404).json({ error: "Pass type not found" });
     res.json({
       category: { name: category.name, code: category.catCode },
       entryPoints: category.entryPoints.map((ep) => ({
@@ -762,7 +762,6 @@ async function processSingleRecord(
   record,
   event,
   category,
-  holderType,
   deliveryMethod,
   userId,
   bulkPreacherId = null,
@@ -853,7 +852,7 @@ async function processSingleRecord(
           name,
           phone: formattedPhone,
           whatsappNumber: formattedPhone,
-          holderType,
+          holderType: deriveHolderTypeLabel(category),
           source: "bulk_import",
           subCategory: isSponsor ? (tier || undefined) : undefined,        // bahumana tier
           sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,  // seva slot (timing)

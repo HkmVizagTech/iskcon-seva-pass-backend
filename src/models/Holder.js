@@ -6,12 +6,9 @@ const holderSchema = new mongoose.Schema({
     ref: "Event",
     required: true,
   },
+  // References the merged HolderType doc (legacy field name kept for
+  // compatibility with existing records, QR IDs and API consumers).
   catId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Category",
-    required: false,
-  },
-  holderTypeId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "HolderType",
     required: false,

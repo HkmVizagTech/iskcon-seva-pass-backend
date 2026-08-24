@@ -18,7 +18,7 @@ const qrPassSchema = new mongoose.Schema({
   },
   catId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: "Category",
+    ref: "HolderType",
   },
   entryPoints: [
     {
