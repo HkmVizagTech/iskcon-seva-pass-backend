@@ -1089,3 +1089,69 @@ exports.manualEntry = async (req, res) => {
     res.status(500).json({ error: "Manual entry failed", detail: error.message });
   }
 };
+
+// ── Retry the community app push for an existing QR pass ────────────────────
+// Does NOT re-issue the QR or resend WhatsApp — only retries the
+// harekrishnavizag.co.in sync (register-volunteer / seva-sponsor /
+// store-qr-code), and updates communityAppSync with the fresh result.
+exports.retryCommunitySync = async (req, res) => {
+  try {
+    const { qrId } = req.params;
+    const qrPass = await QRPass.findOne({ qrId: qrId.toUpperCase() })
+      .populate({ path: "holderId", select: "name phone email subCategory catId sevaSlotId" })
+      .populate("eventId")
+      .populate("catId", "name catCode");
+
+    if (!qrPass) return res.status(404).json({ error: "QR pass not found" });
+
+    const holder = qrPass.holderId;
+    const event = qrPass.eventId;
+    const category = qrPass.catId;
+    const catCodeUpper = (category?.catCode || "").toUpperCase();
+
+    let sevaSlotName = "";
+    if (holder?.sevaSlotId) {
+      const SevaSlot = require("../models/SevaSlot");
+      const slot = await SevaSlot.findById(holder.sevaSlotId).select("name time");
+      if (slot) sevaSlotName = slot.time ? `${slot.name} · ${slot.time}` : slot.name;
+    }
+
+    let result;
+    if (["SP", "DN", "INV"].includes(catCodeUpper)) {
+      result = await thirdPartyService.pushSevaSponsor({
+        holder, event, qrPass, catCode: catCodeUpper,
+        categoryName: category?.name || "",
+        sevaSlotName,
+      });
+    } else if (catCodeUpper === "VL") {
+      result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+    } else {
+      // pushHolder needs the QR image — regenerate it from the already-signed payload
+      const QRCode = require("qrcode");
+      const qrImage = await QRCode.toDataURL(qrPass.payloadSigned, {
+        errorCorrectionLevel: "L", margin: 2, width: 350,
+        color: { dark: "#000000", light: "#FFFFFF" },
+      });
+      result = await thirdPartyService.pushHolder({ holder, qrPass, qrImageBase64: qrImage, event });
+    }
+
+    qrPass.communityAppSync = {
+      attempted: !!result.attempted,
+      success: !!result.success,
+      skipped: !!result.skipped,
+      reason: result.reason || null,
+      responseBody: result.responseBody || null,
+      attemptedAt: new Date(),
+    };
+    await qrPass.save();
+
+    return res.json({
+      success: true,
+      message: result.success ? "Community app sync succeeded" : (result.skipped ? "Sync skipped" : "Community app sync failed"),
+      communityAppSync: qrPass.communityAppSync,
+    });
+  } catch (error) {
+    console.error("retryCommunitySync error:", error);
+    res.status(500).json({ error: "Retry failed", detail: error.message });
+  }
+};

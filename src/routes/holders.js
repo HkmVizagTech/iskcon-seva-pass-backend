@@ -10,6 +10,12 @@ const upload = require("../middleware/upload");
 
 // QR operations
 router.get("/qr/:qrId", protect, holderController.getQRDetails);
+router.post(
+  "/qr/:qrId/retry-community-sync",
+  protect,
+  authorize("super_admin", "event_admin", "campaign_manager"),
+  holderController.retryCommunitySync,
+);
 router.patch(
   "/qr/:qrId/revoke",
   protect,
