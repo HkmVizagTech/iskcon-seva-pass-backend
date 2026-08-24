@@ -31,9 +31,11 @@ exports.createEvent = async (req, res) => {
     const event = await Event.create(eventData);
 
     // Community app integration: default thirdPartyEventId to our own
-    // event _id unless the caller explicitly provided a different value.
+    // eventCode (e.g. "SKJ26V") unless the caller explicitly provided a
+    // different value. Confirmed via live testing that their API expects
+    // this short code, not our MongoDB _id.
     if (!event.thirdPartyEventId) {
-      event.thirdPartyEventId = event._id.toString();
+      event.thirdPartyEventId = event.eventCode;
       await event.save();
     }
 
