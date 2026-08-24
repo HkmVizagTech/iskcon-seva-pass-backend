@@ -64,7 +64,11 @@ class ThirdPartyService {
         `${this.baseUrl}/api/v1/user/festivals/register-volunteer`,
         form,
         {
-          headers: { ...form.getHeaders(), Accept: "application/json" },
+          headers: {
+            ...form.getHeaders(),
+            Accept: "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; ISKCON-SevaPass/1.0; +https://harekrishnavizag.org)",
+          },
           timeout: 15000,
         },
       );
