@@ -45,7 +45,22 @@ exports.scanQR = async (req, res) => {
       clientScanId,
     } = req.body;
 
-    const incomingQrData = qrData || qr_payload;
+    let incomingQrData = qrData || qr_payload;
+    // DEFENSIVE FIX: some scanner clients (native BarcodeDetector path in
+    // html5-qrcode) occasionally send a stringified wrapper object instead
+    // of the raw signed payload — e.g. '{"String":"<actual-payload>",...}'.
+    // Unwrap it here too, as a second line of defence even if the client
+    // hasn't yet picked up the matching frontend fix.
+    if (typeof incomingQrData === "string" && incomingQrData.startsWith('{"String"')) {
+      try {
+        const parsed = JSON.parse(incomingQrData);
+        if (parsed && typeof parsed.String === "string") {
+          incomingQrData = parsed.String;
+        }
+      } catch (_) {
+        // fall through with the raw value
+      }
+    }
     const incomingEpId = epId || ep_id;
     const incomingStationLabel = stationLabel || station_label || "";
     // FIX: cap groupCount to prevent malicious/accidental huge increments
