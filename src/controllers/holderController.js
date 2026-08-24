@@ -854,6 +854,7 @@ async function processSingleRecord(
           phone: formattedPhone,
           whatsappNumber: formattedPhone,
           holderType,
+          source: "bulk_import",
           subCategory: isSponsor ? (tier || undefined) : undefined,        // bahumana tier
           sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,  // seva slot (timing)
           preacher: preacher || "",
