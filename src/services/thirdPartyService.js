@@ -1,17 +1,16 @@
 // ─── Community App integration (harekrishnavizag.co.in) ────────────────────
-// Pushes every QR we issue to their register-volunteer API so it shows up
-// in their community app too.
+// Pushes every QR we issue to their APIs so it shows up in their community
+// app too. There are three distinct push flows depending on category:
+//   - pushHolder        → register-volunteer   (used for every holder)
+//   - pushSevaSponsor   → seva-sponsor          (SP / DN / INV categories)
+//   - pushStoreQrCode   → store-qr-code         (VL — volunteer category)
 //
-// Their API doc:
-//   POST https://harekrishnavizag.co.in/api/v1/user/festivals/register-volunteer
-//   Content-Type: multipart/form-data
-//   Access restricted by IP whitelist — no API key/bearer token needed.
-//   Fields: event_id, event_start_date, event_end_date,
-//           user_phone_number, user_email, qr_code (base64/URL)
+// IMPORTANT: their server runs a ModSecurity WAF that returns 406 for any
+// request without a realistic browser-like User-Agent header — this fires
+// BEFORE their app-level IP whitelist check even runs. Every request below
+// MUST include the same headers or it gets silently blocked at the WAF.
 //
-// event_id mapping: each of OUR events can optionally have a
-// `thirdPartyEventId` field set (e.g. "event_5") which is what gets sent
-// as their event_id. If not set for an event, the push is skipped.
+// Access is otherwise restricted purely by IP whitelist — no API key needed.
 //
 // Config (env vars):
 //   THIRD_PARTY_API_URL       — base URL, defaults to https://harekrishnavizag.co.in
@@ -19,6 +18,11 @@
 
 const axios = require("axios");
 const FormData = require("form-data");
+
+const COMMON_HEADERS = {
+  Accept: "application/json",
+  "User-Agent": "Mozilla/5.0 (compatible; ISKCON-SevaPass/1.0; +https://harekrishnavizag.org)",
+};
 
 class ThirdPartyService {
   constructor() {
@@ -30,19 +34,20 @@ class ThirdPartyService {
     return this.enabled && !!this.baseUrl;
   }
 
-  /**
-   * Push a holder's QR pass to the community app.
-   * Called after every successful QR issuance (single or bulk).
-   * Non-fatal — never blocks our own issuance flow.
-   */
-  async pushHolder({ holder, qrPass, qrImageBase64, event }) {
-    if (!this.isConfigured()) return { skipped: true, reason: "sync disabled" };
+  _skipResult(reason) {
+    return { attempted: false, skipped: true, success: false, reason };
+  }
 
-    // Only push if this event is mapped to a community app event_id
-    const thirdPartyEventId = event?.thirdPartyEventId;
-    if (!thirdPartyEventId) {
-      return { skipped: true, reason: "event has no thirdPartyEventId mapped" };
-    }
+  _checkPrereqs(event) {
+    if (!this.isConfigured()) return this._skipResult("Sync disabled (THIRD_PARTY_SYNC_ENABLED not set)");
+    if (!event?.thirdPartyEventId) return this._skipResult("Event has no thirdPartyEventId mapped");
+    return null;
+  }
+
+  async pushHolder({ holder, qrPass, qrImageBase64, event }) {
+    const skip = this._checkPrereqs(event);
+    if (skip) return skip;
+    const thirdPartyEventId = event.thirdPartyEventId;
 
     try {
       const form = new FormData();
@@ -50,71 +55,44 @@ class ThirdPartyService {
       form.append("event_start_date", this._toDateTimeStr(event.dateStart));
       form.append("event_end_date", this._toDateTimeStr(event.dateEnd));
 
-      // Their doc shows a bare 10-digit number in the example payload
       const bare10 = String(holder.phone || "").replace(/^91/, "").slice(-10);
       form.append("user_phone_number", bare10);
-
       if (holder.email) form.append("user_email", holder.email);
 
-      // qr_code — base64 (without the data: prefix) or a hosted URL.
       const base64Only = String(qrImageBase64 || "").replace(/^data:image\/\w+;base64,/, "");
       form.append("qr_code", base64Only);
 
       const response = await axios.post(
         `${this.baseUrl}/api/v1/user/festivals/register-volunteer`,
         form,
-        {
-          headers: {
-            ...form.getHeaders(),
-            Accept: "application/json",
-            "User-Agent": "Mozilla/5.0 (compatible; ISKCON-SevaPass/1.0; +https://harekrishnavizag.org)",
-          },
-          timeout: 15000,
-        },
+        { headers: { ...form.getHeaders(), ...COMMON_HEADERS }, timeout: 15000 },
       );
 
       const ok = response.data?.success === true;
-      console.log(
-        `[CommunityApp] register-volunteer ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
-        JSON.stringify(response.data).slice(0, 200),
-      );
-      return { success: ok, response: response.data };
+      console.log(`[CommunityApp] register-volunteer ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
+        JSON.stringify(response.data).slice(0, 200));
+      return { attempted: true, success: ok, skipped: false, responseBody: JSON.stringify(response.data).slice(0, 500) };
     } catch (error) {
-      // Non-fatal — log and continue. Never block local issuance.
-      const detail = error.response?.data || error.message;
-      console.error(
-        `[CommunityApp] register-volunteer FAILED for ${holder.phone}:`,
-        JSON.stringify(detail).slice(0, 300),
-      );
-      return { success: false, error: detail };
+      return this._logAndReturnError("register-volunteer", holder.phone, error);
     }
   }
 
-  /**
-   * Push a sponsor/donor/invitee record to the community app.
-   * Called after QR issuance for SP/DN/INV categories.
-   */
   async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, sevaSlotName }) {
-    if (!this.isConfigured()) return { skipped: true, reason: "sync disabled" };
-
-    const thirdPartyEventId = event?.thirdPartyEventId;
-    if (!thirdPartyEventId) {
-      return { skipped: true, reason: "event has no thirdPartyEventId mapped" };
-    }
+    const skip = this._checkPrereqs(event);
+    if (skip) return skip;
+    const thirdPartyEventId = event.thirdPartyEventId;
 
     try {
       const bare10 = String(holder.phone || "").replace(/^91/, "").slice(-10);
-
       const categoryMap = { SP: "sponsor", DN: "donor", INV: "invitee" };
       const category = categoryMap[(catCode || "").toUpperCase()] || "donor";
-
       const sevaTypeMap = { sponsor: "abhisekam", donor: "darshan", invitee: "darshan" };
 
       const body = {
         devotee_mobile_number: bare10,
         donor_name: holder.name || "",
         donor_mobile_number: bare10,
-        date_time: this._toDateTimeStr(new Date()).slice(0, 16),
+        date_time: this._toDateTimeStr(new Date()),
         category,
         qrcode: qrPass?.qrId || "",
         seva_type: sevaTypeMap[category] || "darshan",
@@ -125,40 +103,25 @@ class ThirdPartyService {
       const response = await axios.post(
         `${this.baseUrl}/api/v1/user/festivals/seva-sponsor`,
         body,
-        { headers: { "Content-Type": "application/json", Accept: "application/json" }, timeout: 15000 },
+        { headers: { "Content-Type": "application/json", ...COMMON_HEADERS }, timeout: 15000 },
       );
 
       const ok = response.data?.success === true;
-      console.log(
-        `[CommunityApp] seva-sponsor ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
-        JSON.stringify(response.data).slice(0, 200),
-      );
-      return { success: ok, response: response.data };
+      console.log(`[CommunityApp] seva-sponsor ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
+        JSON.stringify(response.data).slice(0, 200));
+      return { attempted: true, success: ok, skipped: false, responseBody: JSON.stringify(response.data).slice(0, 500) };
     } catch (error) {
-      const detail = error.response?.data || error.message;
-      console.error(
-        `[CommunityApp] seva-sponsor FAILED for ${holder.phone}:`,
-        JSON.stringify(detail).slice(0, 300),
-      );
-      return { success: false, error: detail };
+      return this._logAndReturnError("seva-sponsor", holder.phone, error);
     }
   }
 
-  /**
-   * Push a volunteer QR code to the community app.
-   * Called after QR issuance for VL category.
-   */
   async pushStoreQrCode({ holder, event, qrPass }) {
-    if (!this.isConfigured()) return { skipped: true, reason: "sync disabled" };
-
-    const thirdPartyEventId = event?.thirdPartyEventId;
-    if (!thirdPartyEventId) {
-      return { skipped: true, reason: "event has no thirdPartyEventId mapped" };
-    }
+    const skip = this._checkPrereqs(event);
+    if (skip) return skip;
+    const thirdPartyEventId = event.thirdPartyEventId;
 
     try {
       const bare10 = String(holder.phone || "").replace(/^91/, "").slice(-10);
-
       const body = {
         volunteer_mobile_number: bare10,
         event_id: thirdPartyEventId,
@@ -168,29 +131,32 @@ class ThirdPartyService {
       const response = await axios.post(
         `${this.baseUrl}/api/v1/user/festivals/store-qr-code`,
         body,
-        { headers: { "Content-Type": "application/json", Accept: "application/json" }, timeout: 15000 },
+        { headers: { "Content-Type": "application/json", ...COMMON_HEADERS }, timeout: 15000 },
       );
 
       const ok = response.data?.success === true;
-      console.log(
-        `[CommunityApp] store-qr-code ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
-        JSON.stringify(response.data).slice(0, 200),
-      );
-      return { success: ok, response: response.data };
+      console.log(`[CommunityApp] store-qr-code ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
+        JSON.stringify(response.data).slice(0, 200));
+      return { attempted: true, success: ok, skipped: false, responseBody: JSON.stringify(response.data).slice(0, 500) };
     } catch (error) {
-      const detail = error.response?.data || error.message;
-      console.error(
-        `[CommunityApp] store-qr-code FAILED for ${holder.phone}:`,
-        JSON.stringify(detail).slice(0, 300),
-      );
-      return { success: false, error: detail };
+      return this._logAndReturnError("store-qr-code", holder.phone, error);
     }
   }
 
-  /**
-   * Format a Date/ISO string as "YYYY-MM-DD HH:MM:SS" in IST
-   * (their docs require this exact format).
-   */
+  _logAndReturnError(label, phone, error) {
+    const status = error.response?.status;
+    const detail = error.response?.data || error.message;
+    const detailStr = typeof detail === "string" ? detail.slice(0, 300) : JSON.stringify(detail).slice(0, 300);
+    console.error(`[CommunityApp] ${label} FAILED for ${phone} (HTTP ${status || "?"}):`, detailStr);
+    return {
+      attempted: true,
+      success: false,
+      skipped: false,
+      reason: `HTTP ${status || "?"}: ${detailStr}`,
+      responseBody: detailStr,
+    };
+  }
+
   _toDateTimeStr(date) {
     if (!date) return "";
     const d = new Date(date);

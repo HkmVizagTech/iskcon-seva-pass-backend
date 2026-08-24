@@ -163,3 +163,14 @@ router.get("/:eventId/sync-status", _p2, _a2("super_admin","event_admin"), async
       : "OK — push will fire on next QR issuance",
   });
 });
+
+// ── Diagnostic: what outbound IP does Railway actually use? ─────────────────
+router.get("/__diag/outbound-ip", async (req, res) => {
+  try {
+    const axios = require("axios");
+    const r = await axios.get("https://api.ipify.org?format=json", { timeout: 8000 });
+    res.json({ outboundIp: r.data.ip });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});

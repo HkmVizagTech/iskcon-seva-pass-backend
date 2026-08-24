@@ -485,25 +485,38 @@ exports.createHolder = async (req, res) => {
       await qrPass.save();
     }
 
-    // ── Push to third-party system (non-blocking) ──
-    thirdPartyService.pushHolder({
-      holder,
-      qrPass,
-      qrImageBase64: qrImage,
-      event,
-    }).catch((e) => console.error("[ThirdParty] createHolder push failed:", e.message));
-
-    const catCodeUpper = (categoryForCheck?.catCode || "").toUpperCase();
-    if (["SP", "DN", "INV"].includes(catCodeUpper)) {
-      thirdPartyService.pushSevaSponsor({
-        holder, event, qrPass, catCode: catCodeUpper,
-        categoryName: categoryForCheck?.name || "",
-        sevaSlotName: sevaSlot?.name || "",
-      }).catch((e) => console.error("[ThirdParty] seva-sponsor push failed:", e.message));
-    } else if (catCodeUpper === "VL") {
-      thirdPartyService.pushStoreQrCode({ holder, event, qrPass })
-        .catch((e) => console.error("[ThirdParty] store-qr-code push failed:", e.message));
-    }
+    // ── Push to third-party system (non-blocking, result persisted for visibility) ──
+    (async () => {
+      try {
+        const catCodeUpper = (categoryForCheck?.catCode || "").toUpperCase();
+        let result;
+        if (["SP", "DN", "INV"].includes(catCodeUpper)) {
+          result = await thirdPartyService.pushSevaSponsor({
+            holder, event, qrPass, catCode: catCodeUpper,
+            categoryName: categoryForCheck?.name || "",
+            sevaSlotName: sevaSlot?.name || "",
+          });
+        } else if (catCodeUpper === "VL") {
+          result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+        } else {
+          result = await thirdPartyService.pushHolder({
+            holder, qrPass, qrImageBase64: qrImage, event,
+          });
+        }
+        await QRPass.findByIdAndUpdate(qrPass._id, {
+          communityAppSync: {
+            attempted: !!result.attempted,
+            success: !!result.success,
+            skipped: !!result.skipped,
+            reason: result.reason || null,
+            responseBody: result.responseBody || null,
+            attemptedAt: new Date(),
+          },
+        });
+      } catch (e) {
+        console.error("[ThirdParty] createHolder push failed:", e.message);
+      }
+    })();
 
     res.status(201).json({
       success: true,
@@ -941,25 +954,38 @@ async function processSingleRecord(
       await qrPass.save();
     }
 
-    // ── Push to third-party system (non-blocking) ──
-    thirdPartyService.pushHolder({
-      holder,
-      qrPass,
-      qrImageBase64: qrImage,
-      event,
-    }).catch((e) => console.error("[ThirdParty] bulkImport push failed:", e.message));
-
-    const catCodeUpper = (category?.catCode || "").toUpperCase();
-    if (["SP", "DN", "INV"].includes(catCodeUpper)) {
-      thirdPartyService.pushSevaSponsor({
-        holder, event, qrPass, catCode: catCodeUpper,
-        categoryName: category?.name || "",
-        sevaSlotName: sevaSlot?.name || "",
-      }).catch((e) => console.error("[ThirdParty] bulk seva-sponsor push failed:", e.message));
-    } else if (catCodeUpper === "VL") {
-      thirdPartyService.pushStoreQrCode({ holder, event, qrPass })
-        .catch((e) => console.error("[ThirdParty] bulk store-qr-code push failed:", e.message));
-    }
+    // ── Push to third-party system (non-blocking, result persisted for visibility) ──
+    (async () => {
+      try {
+        const catCodeUpper = (category?.catCode || "").toUpperCase();
+        let result;
+        if (["SP", "DN", "INV"].includes(catCodeUpper)) {
+          result = await thirdPartyService.pushSevaSponsor({
+            holder, event, qrPass, catCode: catCodeUpper,
+            categoryName: category?.name || "",
+            sevaSlotName: sevaSlot?.name || "",
+          });
+        } else if (catCodeUpper === "VL") {
+          result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+        } else {
+          result = await thirdPartyService.pushHolder({
+            holder, qrPass, qrImageBase64: qrImage, event,
+          });
+        }
+        await QRPass.findByIdAndUpdate(qrPass._id, {
+          communityAppSync: {
+            attempted: !!result.attempted,
+            success: !!result.success,
+            skipped: !!result.skipped,
+            reason: result.reason || null,
+            responseBody: result.responseBody || null,
+            attemptedAt: new Date(),
+          },
+        });
+      } catch (e) {
+        console.error("[ThirdParty] bulkImport push failed:", e.message);
+      }
+    })();
 
     return {
       success: true,

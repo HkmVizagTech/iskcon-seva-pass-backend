@@ -51,6 +51,16 @@ const qrPassSchema = new mongoose.Schema({
     default: "none",
   },
   deliveredAt: Date,
+  // Community app (harekrishnavizag.co.in) push tracking — set after every
+  // attempt so failures are visible without needing server log access.
+  communityAppSync: {
+    attempted: { type: Boolean, default: false },
+    success: { type: Boolean, default: false },
+    skipped: { type: Boolean, default: false },
+    reason: String,
+    responseBody: String,
+    attemptedAt: Date,
+  },
   deliveryStatus: {
     type: String,
     enum: ["pending", "sent", "delivered", "failed"],
