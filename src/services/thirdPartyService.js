@@ -93,7 +93,7 @@ class ThirdPartyService {
         devotee_mobile_number: bare10,
         donor_name: holder.name || "",
         donor_mobile_number: bare10,
-        date_time: this._toDateTimeStr(new Date()),
+        date_time: this._toDateTimeStr(new Date()).slice(0, 16),
         category,
         qrcode: qrPass?.qrId || "",
         seva_type: sevaTypeMap[category] || "darshan",
