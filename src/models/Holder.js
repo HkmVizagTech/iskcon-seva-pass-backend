@@ -28,9 +28,8 @@ const holderSchema = new mongoose.Schema({
   // Independent of bahumana tier — a tier-A sponsor may attend any slot.
   sevaSlotId: { type: mongoose.Schema.Types.ObjectId, ref: "SevaSlot" },
 
-  // Bahumana TIER — A / B / C. Drives which gift/kit the desk hands over.
-  // Independent of seva slot: tier B can attend the morning slot, etc.
-  // (Sponsors only — ignored for all other categories.)
+  // Category tier — A / B / C / NONE. For sponsors drives bahumana gift/kit.
+  // Applies to any pass type (sponsors, donors, invitees, etc.).
   subCategory: { type: String, trim: true, uppercase: true },
 
   source: {

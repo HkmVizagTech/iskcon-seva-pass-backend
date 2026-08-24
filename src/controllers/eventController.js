@@ -63,8 +63,8 @@ exports.createEvent = async (req, res) => {
     // Invitee is included because the Seva Pass devotee app issues passes
     // under it by default.
     await HolderType.insertMany([
-      { eventId: event._id, name: "Sponsor", catCode: "SP", entryPoints: allEpIds, color: "#F97316", icon: "💰", isDefault: true, isActive: true },
-      { eventId: event._id, name: "Donor", catCode: "DN", entryPoints: darshanPrasadamIds, color: "#22C55E", icon: "🙏", isDefault: true, isActive: true },
+      { eventId: event._id, name: "Sponsor", catCode: "SP", entryPoints: allEpIds, color: "#F97316", icon: "💰", isDefault: true, isActive: true, categories: ["A", "B", "C"] },
+      { eventId: event._id, name: "Donor", catCode: "DN", entryPoints: darshanPrasadamIds, color: "#22C55E", icon: "🙏", isDefault: true, isActive: true, categories: ["A", "B", "C"] },
       { eventId: event._id, name: "Volunteer", catCode: "VL", entryPoints: venuePrasadamIds, color: "#8B5CF6", icon: "🤝", isDefault: true, isActive: true },
       { eventId: event._id, name: "General Public", catCode: "GN", entryPoints: entryPoints.filter((ep) => ep.type === "darshan").map((ep) => ep._id), color: "#3B82F6", icon: "👤", isDefault: true, isActive: true },
       { eventId: event._id, name: "VIP Guest", catCode: "VP", entryPoints: allEpIds, color: "#EAB308", icon: "⭐", isDefault: true, isActive: true },
@@ -74,7 +74,7 @@ exports.createEvent = async (req, res) => {
     res.status(201).json({
       success: true,
       event,
-      message: "Event created with default entry points and pass types",
+      message: "Event created with default entry points and holder types",
     });
   } catch (error) {
     console.error("Create event error:", error);

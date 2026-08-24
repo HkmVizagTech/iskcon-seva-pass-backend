@@ -61,6 +61,10 @@ const holderTypeSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  categories: {
+    type: [String],
+    default: [],
+  },
   createdAt: {
     type: Date,
     default: Date.now,

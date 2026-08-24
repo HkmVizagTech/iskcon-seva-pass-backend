@@ -148,9 +148,11 @@ exports.resendQR = async (req, res) => {
 exports.getHolders = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { search, page = 1, limit = 20 } = req.query;
+    const { search, catId, page = 1, limit = 20 } = req.query;
 
     const query = { eventId };
+
+    if (catId) query.catId = catId;
 
     if (search) {
       query.$or = [
@@ -401,8 +403,9 @@ exports.createHolder = async (req, res) => {
       preacher: preacher || "",
       preacherId: preacherId || null,
       venueName: venueName || primaryVenue?.name || "",
-      // Sponsor only: tier (bahumana) + seva slot (timing) — independent
-      subCategory: isSponsorCategory ? (incomingTier || undefined) : undefined,
+      // Category tier (A/B/C) — applies to any pass type
+      subCategory: incomingTier || undefined,
+      // Seva slot (timing) — sponsors only
       sevaSlotId: isSponsorCategory ? (sevaSlot?._id || undefined) : undefined,
       // Reason given when issuing a second pass to the same phone number
       overrideReason: (req.body.overrideReason || "").toString().trim() || undefined,
@@ -803,10 +806,11 @@ async function processSingleRecord(
   )
     .toString()
     .trim();
-  // TWO separate sponsor columns:
-  //   Tier         → A/B/C bahumana gift  (column: Tier / Bahumana)
-  //   SubCategory  → seva slot code        (column: SubCategory / Seva Slot)
-  const tier = (record.Tier || record.tier || record.Bahumana || record.bahumana || "").toString().trim().toUpperCase();
+  // TWO separate columns:
+  //   Category/Tier → A/B/C category tier  (column: Category / Tier / Bahumana)
+  //   SubCategory   → seva slot code        (column: SubCategory / Seva Slot)
+  let tier = (record.Category || record.category || record.Tier || record.tier || record.Bahumana || record.bahumana || "").toString().trim().toUpperCase();
+  if (tier === "NONE" || tier === "N/A" || tier === "-") tier = "";
   const slotCode = (record.SubCategory || record["Sub Category"] || record.subcategory || record.Subcategory || record["Seva Slot"] || record["seva slot"] || "").toString().trim().toUpperCase();
   const preacherRaw = (record.Preacher || record.preacher || "").toString().trim();
   // Resolve preacher from CSV value — tries shortCode match first, then name
@@ -871,8 +875,8 @@ async function processSingleRecord(
           whatsappNumber: formattedPhone,
           holderType: deriveHolderTypeLabel(category),
           source: "bulk_import",
-          subCategory: isSponsor ? (tier || undefined) : undefined,        // bahumana tier
-          sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,  // seva slot (timing)
+          subCategory: tier || undefined,                                    // category tier (A/B/C/NONE — any pass type)
+          sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,  // seva slot (timing — sponsors only)
           preacher: preacher || "",
           // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
           preacherId: csvPreacherId || bulkPreacherId || null,
