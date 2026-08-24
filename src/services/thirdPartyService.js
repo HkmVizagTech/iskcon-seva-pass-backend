@@ -96,7 +96,7 @@ class ThirdPartyService {
         category,
         qrcode: qrPass?.qrId || "",
         seva_type: sevaTypeMap[category] || "darshan",
-        holder: holder.name || "",
+        holder: categoryName || catCode || "",
         instruction: sevaSlotName || categoryName || event?.name || "",
       };
 
