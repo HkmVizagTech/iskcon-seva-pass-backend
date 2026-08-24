@@ -142,3 +142,24 @@ router.post(
 );
 
 module.exports = router;
+
+// ── Diagnostic: check community app sync configuration ──────────────────────
+const { protect: _p2, authorize: _a2 } = require("../middleware/auth");
+router.get("/:eventId/sync-status", _p2, _a2("super_admin","event_admin"), async (req, res) => {
+  const Event = require("../models/Event");
+  const event = await Event.findById(req.params.eventId).select("name thirdPartyEventId");
+  if (!event) return res.status(404).json({ error: "Event not found" });
+
+  res.json({
+    eventName: event.name,
+    thirdPartyEventId: event.thirdPartyEventId || null,
+    syncEnabled: process.env.THIRD_PARTY_SYNC_ENABLED === "true",
+    apiUrl: process.env.THIRD_PARTY_API_URL || "https://harekrishnavizag.co.in",
+    willPush: !!(event.thirdPartyEventId && process.env.THIRD_PARTY_SYNC_ENABLED === "true"),
+    reason: !event.thirdPartyEventId
+      ? "Event has no thirdPartyEventId set"
+      : process.env.THIRD_PARTY_SYNC_ENABLED !== "true"
+      ? "THIRD_PARTY_SYNC_ENABLED is not set to 'true' on the server"
+      : "OK — push will fire on next QR issuance",
+  });
+});

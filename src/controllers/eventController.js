@@ -29,6 +29,14 @@ exports.createEvent = async (req, res) => {
     }
 
     const event = await Event.create(eventData);
+
+    // Community app integration: default thirdPartyEventId to our own
+    // event _id unless the caller explicitly provided a different value.
+    if (!event.thirdPartyEventId) {
+      event.thirdPartyEventId = event._id.toString();
+      await event.save();
+    }
+
     const primaryVenue = event.venue?.[0];
 
     const defaultEntryPoints = [
