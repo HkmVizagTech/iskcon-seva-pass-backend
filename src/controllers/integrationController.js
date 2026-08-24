@@ -313,6 +313,9 @@ exports.generateVolunteerQR = async (req, res) => {
     const catCode = (category.catCode || "").toUpperCase();
     if (["SP", "DN", "INV"].includes(catCode)) {
       thirdPartyService.pushSevaSponsor({ holder, event, qrPass, catCode, categoryName: category.name }).catch(() => {});
+      // seva-sponsor dedupes on devotee+donor pair only — also register the
+      // raw qrcode string so multi-QR holders all show up in their app.
+      thirdPartyService.pushStoreQrCode({ holder, event, qrPass }).catch(() => {});
     } else if (catCode === "VL") {
       thirdPartyService.pushStoreQrCode({ holder, event, qrPass }).catch(() => {});
     }
@@ -467,6 +470,9 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         const catCode = (category.catCode || "").toUpperCase();
         if (["SP", "DN", "INV"].includes(catCode)) {
           thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
+          // seva-sponsor dedupes on devotee+donor pair only — also register the
+          // raw qrcode string so multi-QR holders all show up in their app.
+          thirdPartyService.pushStoreQrCode({ holder, event, qrPass: qrPassObj }).catch(() => {});
         } else if (catCode === "VL") {
           thirdPartyService.pushStoreQrCode({ holder, event, qrPass: qrPassObj }).catch(() => {});
         }

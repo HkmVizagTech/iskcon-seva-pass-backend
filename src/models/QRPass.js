@@ -60,6 +60,17 @@ const qrPassSchema = new mongoose.Schema({
     reason: String,
     responseBody: String,
     attemptedAt: Date,
+    // Second leg for SP/DN/INV: store-qr-code registration of the raw qrcode
+    // string (seva-sponsor dedupes on devotee+donor pair only, so extra QRs
+    // for the same phone would otherwise never reach their app).
+    qrStoreSync: {
+      attempted: Boolean,
+      success: Boolean,
+      skipped: Boolean,
+      reason: String,
+      responseBody: String,
+      attemptedAt: Date,
+    },
   },
   deliveryStatus: {
     type: String,

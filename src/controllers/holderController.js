@@ -491,12 +491,18 @@ exports.createHolder = async (req, res) => {
       try {
         const catCodeUpper = (categoryForCheck?.catCode || "").toUpperCase();
         let result;
+        let qrStoreResult = null;
         if (["SP", "DN", "INV"].includes(catCodeUpper)) {
           result = await thirdPartyService.pushSevaSponsor({
             holder, event, qrPass, catCode: catCodeUpper,
             categoryName: categoryForCheck?.name || "",
             sevaSlotName: sevaSlot?.name || "",
           });
+          // seva-sponsor dedupes on the devotee+donor pair only — a second QR
+          // for the same phone is silently dropped on their side. Always also
+          // register the raw qrcode string via store-qr-code so every pass of
+          // a multi-QR holder shows up in their app.
+          qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
         } else if (catCodeUpper === "VL") {
           result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
         } else {
@@ -504,7 +510,7 @@ exports.createHolder = async (req, res) => {
             holder, qrPass, qrImageBase64: qrImage, event,
           });
         }
-        await QRPass.findByIdAndUpdate(qrPass._id, {
+        const syncUpdate = {
           communityAppSync: {
             attempted: !!result.attempted,
             success: !!result.success,
@@ -513,7 +519,18 @@ exports.createHolder = async (req, res) => {
             responseBody: result.responseBody || null,
             attemptedAt: new Date(),
           },
-        });
+        };
+        if (qrStoreResult) {
+          syncUpdate.communityAppSync.qrStoreSync = {
+            attempted: !!qrStoreResult.attempted,
+            success: !!qrStoreResult.success,
+            skipped: !!qrStoreResult.skipped,
+            reason: qrStoreResult.reason || null,
+            responseBody: qrStoreResult.responseBody || null,
+            attemptedAt: new Date(),
+          };
+        }
+        await QRPass.findByIdAndUpdate(qrPass._id, syncUpdate);
       } catch (e) {
         console.error("[ThirdParty] createHolder push failed:", e.message);
       }
@@ -959,12 +976,18 @@ async function processSingleRecord(
       try {
         const catCodeUpper = (category?.catCode || "").toUpperCase();
         let result;
+        let qrStoreResult = null;
         if (["SP", "DN", "INV"].includes(catCodeUpper)) {
           result = await thirdPartyService.pushSevaSponsor({
             holder, event, qrPass, catCode: catCodeUpper,
             categoryName: category?.name || "",
             sevaSlotName: sevaSlot?.name || "",
           });
+          // seva-sponsor dedupes on the devotee+donor pair only — a second QR
+          // for the same phone is silently dropped on their side. Always also
+          // register the raw qrcode string via store-qr-code so every pass of
+          // a multi-QR holder shows up in their app.
+          qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
         } else if (catCodeUpper === "VL") {
           result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
         } else {
@@ -972,7 +995,7 @@ async function processSingleRecord(
             holder, qrPass, qrImageBase64: qrImage, event,
           });
         }
-        await QRPass.findByIdAndUpdate(qrPass._id, {
+        const syncUpdate = {
           communityAppSync: {
             attempted: !!result.attempted,
             success: !!result.success,
@@ -981,7 +1004,18 @@ async function processSingleRecord(
             responseBody: result.responseBody || null,
             attemptedAt: new Date(),
           },
-        });
+        };
+        if (qrStoreResult) {
+          syncUpdate.communityAppSync.qrStoreSync = {
+            attempted: !!qrStoreResult.attempted,
+            success: !!qrStoreResult.success,
+            skipped: !!qrStoreResult.skipped,
+            reason: qrStoreResult.reason || null,
+            responseBody: qrStoreResult.responseBody || null,
+            attemptedAt: new Date(),
+          };
+        }
+        await QRPass.findByIdAndUpdate(qrPass._id, syncUpdate);
       } catch (e) {
         console.error("[ThirdParty] bulkImport push failed:", e.message);
       }
@@ -1116,12 +1150,16 @@ exports.retryCommunitySync = async (req, res) => {
     }
 
     let result;
+    let qrStoreResult = null;
     if (["SP", "DN", "INV"].includes(catCodeUpper)) {
       result = await thirdPartyService.pushSevaSponsor({
         holder, event, qrPass, catCode: catCodeUpper,
         categoryName: category?.name || "",
         sevaSlotName,
       });
+      // Retry the store-qr-code leg too (see createHolder — seva-sponsor
+      // alone drops extra QRs for the same phone on their side).
+      qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
     } else if (catCodeUpper === "VL") {
       result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
     } else {
@@ -1134,19 +1172,33 @@ exports.retryCommunitySync = async (req, res) => {
       result = await thirdPartyService.pushHolder({ holder, qrPass, qrImageBase64: qrImage, event });
     }
 
+    const overallSuccess = result.success && (!qrStoreResult || qrStoreResult.success);
+    const overallSkipped = result.skipped && (!qrStoreResult || qrStoreResult.skipped);
     qrPass.communityAppSync = {
       attempted: !!result.attempted,
-      success: !!result.success,
-      skipped: !!result.skipped,
+      success: !!overallSuccess,
+      skipped: !!overallSkipped,
       reason: result.reason || null,
       responseBody: result.responseBody || null,
       attemptedAt: new Date(),
     };
+    if (qrStoreResult) {
+      qrPass.communityAppSync.qrStoreSync = {
+        attempted: !!qrStoreResult.attempted,
+        success: !!qrStoreResult.success,
+        skipped: !!qrStoreResult.skipped,
+        reason: qrStoreResult.reason || null,
+        responseBody: qrStoreResult.responseBody || null,
+        attemptedAt: new Date(),
+      };
+    }
     await qrPass.save();
 
     return res.json({
       success: true,
-      message: result.success ? "Community app sync succeeded" : (result.skipped ? "Sync skipped" : "Community app sync failed"),
+      message: overallSuccess
+        ? "Community app sync succeeded"
+        : (overallSkipped ? "Sync skipped" : "Community app sync failed"),
       communityAppSync: qrPass.communityAppSync,
     });
   } catch (error) {
