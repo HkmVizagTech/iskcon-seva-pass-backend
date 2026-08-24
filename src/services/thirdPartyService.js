@@ -89,6 +89,7 @@ class ThirdPartyService {
       const sevaTypeMap = { sponsor: "abhisekam", donor: "darshan", invitee: "darshan" };
 
       const body = {
+        event_id: thirdPartyEventId,
         devotee_mobile_number: bare10,
         donor_name: holder.name || "",
         donor_mobile_number: bare10,
