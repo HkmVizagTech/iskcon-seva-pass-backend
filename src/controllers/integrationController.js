@@ -135,10 +135,12 @@ exports.generateVolunteerQR = async (req, res) => {
       });
     }
 
-    // ── Find event by eventCode or _id ─────────────────────────────────────
+    // ── Find event by eventCode, thirdPartyEventId, or _id ────────────────
+    const eventIdStr = String(event_id).toUpperCase();
     const event = await Event.findOne({
       $or: [
-        { eventCode: String(event_id).toUpperCase() },
+        { eventCode: eventIdStr },
+        { thirdPartyEventId: event_id },
         { _id: String(event_id).match(/^[0-9a-fA-F]{24}$/) ? event_id : null },
       ],
     });
@@ -361,9 +363,11 @@ exports.generateVolunteerQRBulk = async (req, res) => {
       return res.status(400).json({ status: false, message: "Maximum 200 holders per bulk request" });
     }
 
+    const eventIdStr = String(event_id).toUpperCase();
     const event = await Event.findOne({
       $or: [
-        { eventCode: String(event_id).toUpperCase() },
+        { eventCode: eventIdStr },
+        { thirdPartyEventId: event_id },
         { _id: String(event_id).match(/^[0-9a-fA-F]{24}$/) ? event_id : null },
       ],
     });
@@ -420,15 +424,10 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         if (existingHolder) {
           const existingPass = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
           if (existingPass) {
-            const payload = qrService.createPayload(
-              { ...existingHolder.toObject(), qrId: existingPass.qrId },
-              event, null, [],
-            );
-            const { image: qrImage } = await qrService.generateQRCode(payload);
             results.push({
               success: true, reused: true,
               name: existingHolder.name, phone,
-              qr_id: existingPass.qrId, qr_code: qrImage,
+              qr_id: existingPass.qrId,
             });
             continue;
           }
@@ -454,7 +453,7 @@ exports.generateVolunteerQRBulk = async (req, res) => {
 
         const qrId = await qrService.generateQRId(event.eventCode, category.catCode);
         const payload = qrService.createPayload({ ...holder.toObject(), qrId }, event, category, entryPoints);
-        const { image: qrImage, signedPayload } = await qrService.generateQRCode(payload);
+        const { signedPayload } = await qrService.generateQRCode(payload);
 
         await QRPass.create({
           qrId, holderId: holder._id, eventId: event._id, catId: category._id,
@@ -468,7 +467,7 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         // Individual seva-sponsor + register-volunteer pushes stay per-holder;
         // store-qr-code is batched after the loop.
         const qrPassObj = { qrId };
-        thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: qrImage, event }).catch(() => {});
+        thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: null, event }).catch(() => {});
         const catCode = (category.catCode || "").toUpperCase();
         if (["SP", "DN", "INV"].includes(catCode)) {
           thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
@@ -477,7 +476,7 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         results.push({
           success: true, reused: false,
           name: holder.name, phone,
-          qr_id: qrId, qr_code: qrImage,
+          qr_id: qrId,
         });
       } catch (e) {
         results.push({ success: false, error: e.message, input: h });
