@@ -49,20 +49,11 @@ router.get("/events/:eventCode/categories", requireApiKey, integrationController
 // PATCH /api/integration/events/:eventCode/devotee-categories
 router.patch("/events/:eventCode/devotee-categories", requireApiKey, integrationController.updateDevoteeCategories);
 
-// ─── Inbound from third-party (they call us) ─────────────────────────────────
+// ─── Bulk volunteer QR generation (public — no auth) ────────────────────────
 // POST /api/integration/generate-volunteer-qr
-// Their user marks interest → we generate QR → return it
+// The mobile app calls this when a devotee selects volunteers and taps "Generate QR"
 router.post(
   "/generate-volunteer-qr",
-  requireApiKey,
-  integrationController.generateVolunteerQR,
-);
-
-// ─── Bulk volunteer QR generation ────────────────────────────────────────────
-// POST /api/integration/generate-volunteer-qr/bulk
-router.post(
-  "/generate-volunteer-qr/bulk",
-  requireApiKey,
   integrationController.generateVolunteerQRBulk,
 );
 
