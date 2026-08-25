@@ -144,6 +144,34 @@ class ThirdPartyService {
     }
   }
 
+  async pushStoreQrCodeBulk(entries, event) {
+    const skip = this._checkPrereqs(event);
+    if (skip) return skip;
+    if (!entries || entries.length === 0) return this._skipResult("No entries to push");
+    const thirdPartyEventId = event.thirdPartyEventId;
+
+    try {
+      const body = entries.map((e) => ({
+        volunteer_mobile_number: String(e.phone || "").replace(/^91/, "").slice(-10),
+        event_id: thirdPartyEventId,
+        qrcode: e.qrId || "",
+      }));
+
+      const response = await axios.post(
+        `${this.baseUrl}/api/v1/user/festivals/store-qr-code`,
+        body,
+        { headers: { "Content-Type": "application/json", ...COMMON_HEADERS }, timeout: 30000 },
+      );
+
+      const ok = response.data?.success === true;
+      console.log(`[CommunityApp] store-qr-code BULK (${entries.length} entries) ${ok ? "OK" : "non-success"} → event_id ${thirdPartyEventId}:`,
+        JSON.stringify(response.data).slice(0, 300));
+      return { attempted: true, success: ok, skipped: false, count: entries.length, responseBody: JSON.stringify(response.data).slice(0, 500) };
+    } catch (error) {
+      return this._logAndReturnError("store-qr-code-bulk", `${entries.length} entries`, error);
+    }
+  }
+
   _logAndReturnError(label, phone, error) {
     const status = error.response?.status;
     const detail = error.response?.data || error.message;

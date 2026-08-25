@@ -465,16 +465,13 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         });
 
         // Push to community mobile app (non-fatal, fire-and-forget)
+        // Individual seva-sponsor + register-volunteer pushes stay per-holder;
+        // store-qr-code is batched after the loop.
         const qrPassObj = { qrId };
         thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: qrImage, event }).catch(() => {});
         const catCode = (category.catCode || "").toUpperCase();
         if (["SP", "DN", "INV"].includes(catCode)) {
           thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
-          // seva-sponsor dedupes on devotee+donor pair only — also register the
-          // raw qrcode string so multi-QR holders all show up in their app.
-          thirdPartyService.pushStoreQrCode({ holder, event, qrPass: qrPassObj }).catch(() => {});
-        } else if (catCode === "VL") {
-          thirdPartyService.pushStoreQrCode({ holder, event, qrPass: qrPassObj }).catch(() => {});
         }
 
         results.push({
@@ -485,6 +482,16 @@ exports.generateVolunteerQRBulk = async (req, res) => {
       } catch (e) {
         results.push({ success: false, error: e.message, input: h });
       }
+    }
+
+    // Batch push all QR strings to community app in one call
+    const qrEntries = results
+      .filter((r) => r.success && r.qr_id && r.phone)
+      .map((r) => ({ phone: r.phone, qrId: r.qr_id }));
+    if (qrEntries.length > 0) {
+      thirdPartyService.pushStoreQrCodeBulk(qrEntries, event).catch((e) => {
+        console.error("[Integration] bulk store-qr-code push failed:", e.message);
+      });
     }
 
     const succeeded = results.filter((r) => r.success).length;

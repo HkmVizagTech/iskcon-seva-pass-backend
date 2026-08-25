@@ -648,6 +648,7 @@ exports.bulkImportHolders = async (req, res) => {
           deliveryMethod,
           req.user?._id || req.user?.userId,
           preacherId || null,
+          { skipStoreQrCode: true },
         );
         if (result.success) {
           results.success.push(result);
@@ -698,6 +699,18 @@ exports.bulkImportHolders = async (req, res) => {
     }
 
     try { fs.unlinkSync(filePath); } catch (_) {}
+
+    // Batch push all QR strings to community app in one call
+    if (results.success.length > 0) {
+      const qrEntries = results.success
+        .filter((r) => r.qrId && r.phone)
+        .map((r) => ({ phone: r.phone, qrId: r.qrId }));
+      if (qrEntries.length > 0) {
+        thirdPartyService.pushStoreQrCodeBulk(qrEntries, event).catch((e) => {
+          console.error("[ThirdParty] bulk store-qr-code push failed:", e.message);
+        });
+      }
+    }
 
     res.json({
       success: true,
@@ -785,6 +798,7 @@ async function processSingleRecord(
   deliveryMethod,
   userId,
   bulkPreacherId = null,
+  { skipStoreQrCode = false } = {},
 ) {
   const name = (record.Name || record.name || "").toString().trim();
   const phone = (
@@ -987,13 +1001,13 @@ async function processSingleRecord(
             categoryName: category?.name || "",
             sevaSlotName: sevaSlot?.name || "",
           });
-          // seva-sponsor dedupes on the devotee+donor pair only — a second QR
-          // for the same phone is silently dropped on their side. Always also
-          // register the raw qrcode string via store-qr-code so every pass of
-          // a multi-QR holder shows up in their app.
-          qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+          if (!skipStoreQrCode) {
+            qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+          }
         } else if (catCodeUpper === "VL") {
-          result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+          if (!skipStoreQrCode) {
+            result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+          }
         } else {
           result = await thirdPartyService.pushHolder({
             holder, qrPass, qrImageBase64: qrImage, event,
