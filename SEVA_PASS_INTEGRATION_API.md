@@ -1,6 +1,10 @@
-# Hare Krishna Vizag — Seva Pass API Documentation
+# Hare Krishna Vizag
+
+# Seva Pass API Documentation
 
 ## Generate QR Pass
+
+---
 
 **Base URL**
 
@@ -35,14 +39,12 @@ Every endpoint in this API returns a response in the following shape:
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| status | boolean | Yes | true if the request was processed successfully, false on validation/error. |
-| message | string | Yes | Human-readable description of the result. |
-| total | number | Yes | Total number of holders processed. |
-| succeeded | number | Yes | Number of QR passes successfully generated. |
-| failed | number | Yes | Number of failures. |
-| results | array | Yes | Per-holder result array. See Response Fields below. |
+- **status** (boolean) — true if the request was processed successfully, false on validation/error.
+- **message** (string) — Human-readable description of the result.
+- **total** (number) — Total number of holders processed.
+- **succeeded** (number) — Number of QR passes successfully generated.
+- **failed** (number) — Number of failures.
+- **results** (array) — Per-holder result array. See Response Fields below.
 
 ---
 
@@ -58,12 +60,10 @@ POST /api/integration/generate-volunteer-qr
 
 **Request Body Parameters**
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| event_id | string | Yes | Event ID of the festival. Matches by event code (e.g. "TST2"), third-party event ID, or MongoDB ObjectId. |
-| holders | array | Yes | Array of volunteer objects. Maximum 200 per request. |
-| holders[].user_phone_number | string | Yes | Exactly 10 digits. Mobile number of the volunteer. New holder is created if not found. |
-| holders[].name | string | No | Full name of the volunteer. If not provided, auto-generated as "Devotee" followed by the last 4 digits of the phone number. |
+- **event_id** (string, required) — Event ID of the festival. Matches by event code (e.g. "TST2"), third-party event ID, or MongoDB ObjectId.
+- **holders** (array, required) — Array of volunteer objects. Maximum 200 per request.
+- **holders[].user_phone_number** (string, required) — Exactly 10 digits. Mobile number of the volunteer. New holder is created if not found.
+- **holders[].name** (string, optional) — Full name of the volunteer. If not provided, auto-generated as "Devotee" followed by the last 4 digits of the phone number.
 
 ---
 
@@ -138,7 +138,7 @@ Success — Volunteer already has an active QR (duplicate check):
 }
 ```
 
-> Note: A duplicate is detected by the combination of event and phone number. If a holder already has an active QR pass for the given event, the existing qr_id is returned with `"reused": true`. No duplicate QR pass is created.
+> Note: A duplicate is detected by the combination of event and phone number. If a holder already has an active QR pass for the given event, the existing qr_id is returned with "reused": true. No duplicate QR pass is created.
 
 Partial failure — Some holders succeeded, some failed:
 
@@ -181,22 +181,20 @@ HTTP 200 OK
 
 **Response Fields**
 
-| Field | Type | Description |
-|-------|------|-------------|
-| results[].success | boolean | Whether this holder's QR pass was generated successfully. |
-| results[].reused | boolean | true if an existing QR pass was returned (holder already had one for this event). |
-| results[].qr_id | string | The QR pass identifier. Use this value to render the QR code image on the client side. |
-| results[].name | string | Name of the volunteer. |
-| results[].phone | string | Normalized phone number (12-digit with country code, e.g. "919876543210"). |
-| results[].error | string | Error description. Only present when success is false. |
+- **results[].success** (boolean) — Whether this holder's QR pass was generated successfully.
+- **results[].reused** (boolean) — true if an existing QR pass was returned (holder already had one for this event).
+- **results[].qr_id** (string) — The QR pass identifier. Use this value to render the QR code image on the client side.
+- **results[].name** (string) — Name of the volunteer.
+- **results[].phone** (string) — Normalized phone number (12-digit with country code, e.g. "919876543210").
+- **results[].error** (string) — Error description. Only present when success is false.
 
 ---
 
 **QR ID Format**
 
-QR IDs follow the pattern: `{eventCode}-{categoryCode}-{sequence}`
+QR IDs follow the pattern: {eventCode}-{categoryCode}-{sequence}
 
-Example: `TST2-INV-0001`, `TST2-SP-0042`
+Example: TST2-INV-0001, TST2-SP-0042
 
 The mobile app should convert this QR ID string into a QR code image for display.
 
@@ -204,7 +202,7 @@ The mobile app should convert this QR ID string into a QR code image for display
 
 **Event ID Resolution**
 
-The `event_id` field is matched in the following order:
+The event_id field is matched in the following order:
 
 1. Event code (e.g. "TST2") — case-insensitive
 2. Third-party event ID (e.g. "EVT1024") — if configured on the event
