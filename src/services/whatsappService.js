@@ -3,12 +3,19 @@ const FormData = require("form-data");
 
 class WhatsAppService {
   constructor() {
+    // Flaxxa (legacy provider)
     this.baseUrl =
       process.env.WHATSAPP_API_URL || "https://wapi.flaxxa.com/api/v1";
     this.token = process.env.WHATSAPP_API_KEY;
+
+    // Gupshup
+    this.gupshupEnabled = process.env.GUPSHUP_ENABLED === "true";
+    this.gupshupApiKey = process.env.GUPSHUP_API_KEY || "";
+    this.gupshupSourceNumber = process.env.GUPSHUP_SOURCE_NUMBER || "";
+    this.gupshupAppName = process.env.GUPSHUP_APP_NAME || "";
+    this.backendPublicUrl = (process.env.BACKEND_PUBLIC_URL || "").replace(/\/$/, "");
   }
 
-  // Build the date string from validFrom (IST)
   _formatDate(validFrom) {
     if (!validFrom) return "Event Date";
     try {
@@ -23,8 +30,8 @@ class WhatsAppService {
     return "Event Date";
   }
 
-  // Send via Flaxxa and return { success, messageId, phone, flaxxaStatus }
-  async _sendTemplate(phone, imageBuffer, templateName, parameters) {
+  // ── Flaxxa provider ────────────────────────────────────────────────────────
+  async _sendFlaxxa(phone, imageBuffer, templateName, parameters) {
     const form = new FormData();
     form.append("token", this.token);
     form.append("phone", phone);
@@ -44,88 +51,141 @@ class WhatsAppService {
     const status = response.data?.status;
     const msgId  = response.data?.message_id || response.data?.id;
 
-    console.log("✅ Flaxxa response:", JSON.stringify({
+    console.log("[WhatsApp] Flaxxa response:", JSON.stringify({
       status, message_id: msgId, phone, template: templateName,
       error: response.data?.error || response.data?.message || null,
       raw: JSON.stringify(response.data).slice(0, 200),
     }));
 
     if (status !== "success" && status !== "sent") {
-      console.warn("⚠️ Flaxxa non-success:", status, JSON.stringify(response.data).slice(0, 200));
+      console.warn("[WhatsApp] Flaxxa non-success:", status, JSON.stringify(response.data).slice(0, 200));
     }
 
-    return { success: true, messageId: msgId, phone, flaxxaStatus: status };
+    return { success: true, messageId: msgId, phone, provider: "flaxxa", flaxxaStatus: status };
   }
 
+  // ── Gupshup provider ──────────────────────────────────────────────────────
+  async _sendGupshup(phone, qrId, templateId, params) {
+    if (!this.backendPublicUrl) {
+      throw new Error("BACKEND_PUBLIC_URL is required for Gupshup (QR image must be publicly accessible)");
+    }
+
+    const imageUrl = `${this.backendPublicUrl}/api/qr/${qrId}/image`;
+
+    const body = new URLSearchParams();
+    body.append("channel", "whatsapp");
+    body.append("source", this.gupshupSourceNumber);
+    body.append("src.name", this.gupshupAppName);
+    body.append("destination", phone);
+    body.append("template", JSON.stringify({ id: templateId, params }));
+    body.append("message", JSON.stringify({ type: "image", image: { link: imageUrl } }));
+
+    console.log("[WhatsApp] Gupshup request:", JSON.stringify({
+      phone, templateId, params, imageUrl,
+    }));
+
+    const response = await axios.post(
+      "https://api.gupshup.io/wa/api/v1/template/msg",
+      body.toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          apikey: this.gupshupApiKey,
+        },
+        timeout: 30000,
+      },
+    );
+
+    const msgId = response.data?.messageId;
+    const status = response.data?.status;
+
+    console.log("[WhatsApp] Gupshup response:", JSON.stringify({
+      status, messageId: msgId, phone,
+      raw: JSON.stringify(response.data).slice(0, 200),
+    }));
+
+    if (status !== "submitted" && status !== "success") {
+      console.warn("[WhatsApp] Gupshup non-success:", status, JSON.stringify(response.data).slice(0, 300));
+    }
+
+    return { success: true, messageId: msgId, phone, provider: "gupshup" };
+  }
+
+  // ── Main entry point ──────────────────────────────────────────────────────
   async sendQRMessage(to, qrImageBase64, holderName, eventName, passDetails) {
-    if (!this.token) throw new Error("WHATSAPP_API_KEY is required");
+    const useGupshup = this.gupshupEnabled && this.gupshupApiKey;
+    if (!useGupshup && !this.token) {
+      throw new Error("No WhatsApp provider configured (set GUPSHUP_ENABLED+GUPSHUP_API_KEY or WHATSAPP_API_KEY)");
+    }
 
     const phone = this.formatPhone(to);
-    const entries = this.formatEntryPoints(passDetails.entryPoints || []);
     const venue   = passDetails.venue || "ISKCON Temple, Visakhapatnam";
     const dateStr = this._formatDate(passDetails.validFrom);
-    const help    = process.env.HELP_CONTACT || "8977761187";
+
+    const isSponsor = passDetails.isSponsor === true || !!passDetails.sevaSlot;
+
+    console.log("[WhatsApp] Send:", JSON.stringify({
+      phone, holder: holderName, event: eventName,
+      venue, date: dateStr, sponsor: isSponsor,
+      provider: useGupshup ? "gupshup" : "flaxxa",
+      sevaSlot: isSponsor && passDetails.sevaSlot
+        ? (passDetails.sevaSlot.displayLabel || passDetails.sevaSlot.name)
+        : null,
+    }));
+
+    if (isSponsor && useGupshup && passDetails.qrId) {
+      // ── GUPSHUP: sponsor template (4 body params + image header) ────────
+      // "Hare Krishna {{1}}! ... Seva Pass for {{2}} ... Date: {{3}} ... Venue: {{4}}"
+      const templateId = process.env.GUPSHUP_TEMPLATE_SPONSOR
+        || "a9fd6274-a5ec-49f4-bd36-2fb3aee66611";
+
+      return this._sendGupshup(phone, passDetails.qrId, templateId, [
+        holderName,  // {{1}} Name
+        eventName,   // {{2}} Event
+        dateStr,     // {{3}} Date
+        venue,       // {{4}} Venue
+      ]);
+    }
+
+    // ── Flaxxa path (general template or sponsor fallback) ────────────────
+    if (!this.token) {
+      throw new Error("WHATSAPP_API_KEY required for Flaxxa (non-Gupshup path)");
+    }
 
     const base64Data  = qrImageBase64.replace(/^data:image\/\w+;base64,/, "");
     const imageBuffer = Buffer.from(base64Data, "base64");
-
-    // Sponsor = catCode 'SP' OR has a seva slot. Don't rely on sevaSlot alone
-    // because a sponsor may not have a slot assigned yet.
-    const isSponsor = passDetails.isSponsor === true || !!passDetails.sevaSlot;
-
-    console.log("📤 WhatsApp Send:");
-    console.log("  Phone:", phone);
-    console.log("  Holder:", holderName);
-    console.log("  Event:", eventName);
-    console.log("  Venue:", venue);
-    console.log("  Date:", dateStr);
-    console.log("  Sponsor:", isSponsor);
-    if (isSponsor) {
-      const sl = passDetails.sevaSlot;
-      console.log("  Seva Slot:", sl.displayLabel || sl.name);
-    }
+    const entries = this.formatEntryPoints(passDetails.entryPoints || []);
+    const help    = process.env.HELP_CONTACT || "8977761187";
 
     if (isSponsor) {
-      // ── SPONSOR TEMPLATE ────────────────────────────────────────────────
-      // Template: iskcon_sponsor_pass  (7 variables)
-      // {{1}} Name  {{2}} Event  {{3}} Date  {{4}} Venue
-      // {{5}} Seva slot ("A — Pratistha Abhisheka · 7:00 AM")
-      // {{6}} Access points  {{7}} Help
       const sl = passDetails.sevaSlot;
       const slotName = sl.name + (sl.time ? ` · ${sl.time}` : "");
-      // Prepend bahumana tier so recipient sees "B — Prathama Abhisheka · 7:00 AM"
-      const tier = passDetails.tier || ""; // e.g. "B"
+      const tier = passDetails.tier || "";
       const sevaLabel = tier ? `${tier} — ${slotName}` : slotName;
 
-      // Template: sponsor_qr_message (5 variables)
-      // {{1}} Name  {{2}} Event name  {{3}} Date  {{4}} Venue  {{5}} Seva Slot
-      return this._sendTemplate(phone, imageBuffer,
+      return this._sendFlaxxa(phone, imageBuffer,
         process.env.WA_TEMPLATE_SPONSOR || "sponsor_qr_message",
         [
-          { type: "text", text: holderName },  // {{1}} Hare Krishna {{1}}!
-          { type: "text", text: eventName },   // {{2}} Seva Pass for {{2}}
-          { type: "text", text: dateStr },     // {{3}} Date
-          { type: "text", text: venue },       // {{4}} Venue
-          { type: "text", text: sevaLabel },   // {{5}} Seva Slot
-        ],
-      );
-    } else {
-      // ── GENERAL TEMPLATE ────────────────────────────────────────────────
-      // Template: iskcon_common_pass  (6 variables)
-      // {{1}} Name  {{2}} Event  {{3}} Date  {{4}} Venue
-      // {{5}} Access points  {{6}} Help
-      return this._sendTemplate(phone, imageBuffer,
-        process.env.WA_TEMPLATE_GENERAL || "iskcon_common_pass",
-        [
-          { type: "text", text: holderName },  // {{1}}
-          { type: "text", text: eventName },   // {{2}}
-          { type: "text", text: dateStr },     // {{3}}
-          { type: "text", text: venue },       // {{4}}
-          { type: "text", text: entries },     // {{5}}
-          { type: "text", text: help },        // {{6}}
+          { type: "text", text: holderName },
+          { type: "text", text: eventName },
+          { type: "text", text: dateStr },
+          { type: "text", text: venue },
+          { type: "text", text: sevaLabel },
         ],
       );
     }
+
+    return this._sendFlaxxa(phone, imageBuffer,
+      process.env.WA_TEMPLATE_GENERAL || "iskcon_common_pass",
+      [
+        { type: "text", text: holderName },
+        { type: "text", text: eventName },
+        { type: "text", text: dateStr },
+        { type: "text", text: venue },
+        { type: "text", text: entries },
+        { type: "text", text: help },
+      ],
+    );
   }
 
   formatPhone(phone) {
