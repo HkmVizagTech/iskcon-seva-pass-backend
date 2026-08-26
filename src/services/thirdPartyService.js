@@ -77,7 +77,7 @@ class ThirdPartyService {
     }
   }
 
-  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, subCategory, preacherPhone, sevaSlotName }) {
+  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, subCategory, preacherPhone, sevaSlotName, instruction }) {
     const skip = this._checkPrereqs(event);
     if (skip) return skip;
     const thirdPartyEventId = event.thirdPartyEventId;
@@ -119,7 +119,10 @@ class ThirdPartyService {
         qrcode: qrPass?.qrId || "",
         seva_type: sevaTypeMap[passType] || "darshan",
         holder: holderLabel,
-        instruction: sevaSlotName || categoryName || event?.name || "",
+        // Custom instruction (rich HTML) typed by the admin takes priority.
+        // Falls back to seva slot / category / event name when not set,
+        // preserving the previous auto-derived behaviour.
+        instruction: instruction || sevaSlotName || categoryName || event?.name || "",
       };
 
       const response = await axios.post(

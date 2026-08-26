@@ -337,6 +337,9 @@ exports.createHolder = async (req, res) => {
     //   • slotCode            → seva slot code — drives timing/seating
     const incomingTier = (req.body.subCategory || req.body.tier || "").toString().trim().toUpperCase();
     const incomingSlotCode = (req.body.sevaSlotCode || req.body.slotCode || "").toString().trim().toUpperCase();
+    // Custom instruction (rich HTML from the dashboard editor) — passthrough,
+    // no case/trim transforms since it may contain meaningful HTML markup.
+    const incomingInstruction = (req.body.instruction || "").toString().trim();
 
     // Resolve pass type to check if it's a Sponsor type (catCode SP)
     const categoryForCheck = await HolderType.findById(catId).select("catCode name").lean();
@@ -424,6 +427,7 @@ exports.createHolder = async (req, res) => {
       sevaSlotId: isSponsorCategory ? (sevaSlot?._id || undefined) : undefined,
       // Reason given when issuing a second pass to the same phone number
       overrideReason: (req.body.overrideReason || "").toString().trim() || undefined,
+      instruction: incomingInstruction || undefined,
     });
 
     const qrId = await qrService.generateQRId(
@@ -518,6 +522,7 @@ exports.createHolder = async (req, res) => {
             subCategory: holder?.subCategory || "",
             preacherPhone,
             sevaSlotName: sevaSlot?.name || "",
+            instruction: holder?.instruction || "",
           });
           // seva-sponsor dedupes on the devotee+donor pair only — a second QR
           // for the same phone is silently dropped on their side. Always also
@@ -838,6 +843,28 @@ async function processSingleRecord(
   let tier = (record.Category || record.category || record.Tier || record.tier || record.Bahumana || record.bahumana || "").toString().trim().toUpperCase();
   if (tier === "NONE" || tier === "N/A" || tier === "-") tier = "";
   const slotCode = (record.SubCategory || record["Sub Category"] || record.subcategory || record.Subcategory || record["Seva Slot"] || record["seva slot"] || "").toString().trim().toUpperCase();
+
+  // Custom instructions — reads Instruction1, Instruction2, Instruction3, ...
+  // (any number of numbered columns, case-insensitive) and joins them into
+  // an HTML bullet list for the community app's rich-text instruction field.
+  // A single plain "Instruction" column (no number) is also supported.
+  const instructionLines = [];
+  const recordKeys = Object.keys(record || {});
+  for (const key of recordKeys) {
+    if (/^instruction\s*\d+$/i.test(key.trim())) {
+      const val = (record[key] || "").toString().trim();
+      if (val) instructionLines.push({ n: parseInt(key.replace(/\D/g, ""), 10), val });
+    }
+  }
+  instructionLines.sort((a, b) => a.n - b.n);
+  let rowInstruction = instructionLines.length > 0
+    ? `<ul>${instructionLines.map((l) => `<li>${l.val}</li>`).join("")}</ul>`
+    : "";
+  if (!rowInstruction) {
+    const plain = (record.Instruction || record.instruction || "").toString().trim();
+    if (plain) rowInstruction = plain;
+  }
+
   const preacherRaw = (record.Preacher || record.preacher || "").toString().trim();
   // Resolve preacher from CSV value — tries shortCode match first, then name
   // e.g. "MKGD" in the Preacher column → links to Mukunda Gauranga Dasa's User record
@@ -912,6 +939,7 @@ async function processSingleRecord(
               .filter(Boolean)
               .join(" | ") || undefined,
           customFields: { sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode },
+          instruction: rowInstruction || undefined,
           issuedBy: userId,
         });
       } catch (createErr) {
@@ -1015,6 +1043,7 @@ async function processSingleRecord(
             subCategory: holder?.subCategory || "",
             preacherPhone,
             sevaSlotName: sevaSlot?.name || "",
+            instruction: holder?.instruction || "",
           });
           if (!skipStoreQrCode) {
             qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
@@ -1164,7 +1193,7 @@ exports.retryCommunitySync = async (req, res) => {
   try {
     const { qrId } = req.params;
     const qrPass = await QRPass.findOne({ qrId: qrId.toUpperCase() })
-      .populate({ path: "holderId", select: "name phone email subCategory catId sevaSlotId preacherId" })
+      .populate({ path: "holderId", select: "name phone email subCategory catId sevaSlotId preacherId instruction" })
       .populate("eventId")
       .populate("catId", "name catCode");
 
@@ -1192,6 +1221,7 @@ exports.retryCommunitySync = async (req, res) => {
         subCategory: holder?.subCategory || "",
         preacherPhone,
         sevaSlotName,
+        instruction: holder?.instruction || "",
       });
       // Retry the store-qr-code leg too (see createHolder — seva-sponsor
       // alone drops extra QRs for the same phone on their side).

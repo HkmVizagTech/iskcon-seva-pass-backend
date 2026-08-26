@@ -91,6 +91,10 @@ const holderSchema = new mongoose.Schema({
     default: Date.now,
   },
   overrideReason: String,
+  // Custom rich-text instruction (HTML) shown alongside the QR pass on the
+  // community app — set via the dashboard's rich text editor (single Issue
+  // QR) or Instruction1/Instruction2/... columns (bulk import). Optional.
+  instruction: String,
   customFields: mongoose.Schema.Types.Mixed,
   createdAt: {
     type: Date,
