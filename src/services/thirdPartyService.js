@@ -77,7 +77,7 @@ class ThirdPartyService {
     }
   }
 
-  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, sevaSlotName }) {
+  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, subCategory, sevaSlotName }) {
     const skip = this._checkPrereqs(event);
     if (skip) return skip;
     const thirdPartyEventId = event.thirdPartyEventId;
@@ -88,6 +88,11 @@ class ThirdPartyService {
       const category = categoryMap[(catCode || "").toUpperCase()] || "donor";
       const sevaTypeMap = { sponsor: "abhisekam", donor: "darshan", invitee: "darshan" };
 
+      // "holder" field carries the pass sub-category (e.g. "Bahumana A") when
+      // the Excel sheet / Issue QR form specified one, falling back to the
+      // pass type name (e.g. "Sponsor") when no sub-category was set.
+      const holderLabel = subCategory || categoryName || catCode || "";
+
       const body = {
         event_id: thirdPartyEventId,
         devotee_mobile_number: bare10,
@@ -97,7 +102,7 @@ class ThirdPartyService {
         category,
         qrcode: qrPass?.qrId || "",
         seva_type: sevaTypeMap[category] || "darshan",
-        holder: categoryName || catCode || "",
+        holder: holderLabel,
         instruction: sevaSlotName || categoryName || event?.name || "",
       };
 

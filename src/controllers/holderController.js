@@ -499,6 +499,7 @@ exports.createHolder = async (req, res) => {
           result = await thirdPartyService.pushSevaSponsor({
             holder, event, qrPass, catCode: catCodeUpper,
             categoryName: categoryForCheck?.name || "",
+            subCategory: holder?.subCategory || "",
             sevaSlotName: sevaSlot?.name || "",
           });
           // seva-sponsor dedupes on the devotee+donor pair only — a second QR
@@ -648,7 +649,7 @@ exports.bulkImportHolders = async (req, res) => {
           deliveryMethod,
           req.user?._id || req.user?.userId,
           preacherId || null,
-          { skipStoreQrCode: true },
+          { skipStoreQrCode: false },
         );
         if (result.success) {
           results.success.push(result);
@@ -700,17 +701,11 @@ exports.bulkImportHolders = async (req, res) => {
 
     try { fs.unlinkSync(filePath); } catch (_) {}
 
-    // Batch push all QR strings to community app in one call
-    if (results.success.length > 0) {
-      const qrEntries = results.success
-        .filter((r) => r.qrId && r.phone)
-        .map((r) => ({ phone: r.phone, qrId: r.qrId }));
-      if (qrEntries.length > 0) {
-        thirdPartyService.pushStoreQrCodeBulk(qrEntries, event).catch((e) => {
-          console.error("[ThirdParty] bulk store-qr-code push failed:", e.message);
-        });
-      }
-    }
+    // Community app push now happens per-holder inside processSingleRecord
+    // (routes to seva-sponsor for Sponsor/Donor/Invitee with the correct
+    // subCategory tag, or store-qr-code for Volunteer/General) — the old
+    // batch-only store-qr-code call here has been removed since it ignored
+    // category entirely and pushed every holder as a plain volunteer QR.
 
     res.json({
       success: true,
@@ -999,6 +994,7 @@ async function processSingleRecord(
           result = await thirdPartyService.pushSevaSponsor({
             holder, event, qrPass, catCode: catCodeUpper,
             categoryName: category?.name || "",
+            subCategory: holder?.subCategory || "",
             sevaSlotName: sevaSlot?.name || "",
           });
           if (!skipStoreQrCode) {
@@ -1173,6 +1169,7 @@ exports.retryCommunitySync = async (req, res) => {
       result = await thirdPartyService.pushSevaSponsor({
         holder, event, qrPass, catCode: catCodeUpper,
         categoryName: category?.name || "",
+        subCategory: holder?.subCategory || "",
         sevaSlotName,
       });
       // Retry the store-qr-code leg too (see createHolder — seva-sponsor
