@@ -20,9 +20,24 @@ const HolderType = require("../models/HolderType");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
 const EntryPoint = require("../models/EntryPoint");
+const User = require("../models/User");
 const qrService = require("../services/qrService");
 const whatsappService = require("../services/whatsappService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
+
+// ─── Helper: look up a preacher's phone for the community app's
+// devotee_mobile_number field (identifies which preacher's devotee this
+// sponsor/donor was registered under). Returns undefined if not resolvable
+// so the push falls back to the sponsor's own number.
+async function resolvePreacherPhone(preacherId) {
+  if (!preacherId) return undefined;
+  try {
+    const preacherUser = await User.findById(preacherId).select("phone").lean();
+    return preacherUser?.phone || undefined;
+  } catch (_) {
+    return undefined;
+  }
+}
 const fs = require("fs");
 const path = require("path");
 
@@ -496,10 +511,11 @@ exports.createHolder = async (req, res) => {
         let result;
         let qrStoreResult = null;
         if (["SP", "DN", "INV"].includes(catCodeUpper)) {
+          const preacherPhone = await resolvePreacherPhone(holder?.preacherId);
           result = await thirdPartyService.pushSevaSponsor({
             holder, event, qrPass, catCode: catCodeUpper,
             categoryName: categoryForCheck?.name || "",
-            subCategory: holder?.subCategory || "",
+            preacherPhone,
             sevaSlotName: sevaSlot?.name || "",
           });
           // seva-sponsor dedupes on the devotee+donor pair only — a second QR
@@ -991,10 +1007,11 @@ async function processSingleRecord(
         let result;
         let qrStoreResult = null;
         if (["SP", "DN", "INV"].includes(catCodeUpper)) {
+          const preacherPhone = await resolvePreacherPhone(holder?.preacherId);
           result = await thirdPartyService.pushSevaSponsor({
             holder, event, qrPass, catCode: catCodeUpper,
             categoryName: category?.name || "",
-            subCategory: holder?.subCategory || "",
+            preacherPhone,
             sevaSlotName: sevaSlot?.name || "",
           });
           if (!skipStoreQrCode) {
@@ -1145,7 +1162,7 @@ exports.retryCommunitySync = async (req, res) => {
   try {
     const { qrId } = req.params;
     const qrPass = await QRPass.findOne({ qrId: qrId.toUpperCase() })
-      .populate({ path: "holderId", select: "name phone email subCategory catId sevaSlotId" })
+      .populate({ path: "holderId", select: "name phone email subCategory catId sevaSlotId preacherId" })
       .populate("eventId")
       .populate("catId", "name catCode");
 
@@ -1166,10 +1183,11 @@ exports.retryCommunitySync = async (req, res) => {
     let result;
     let qrStoreResult = null;
     if (["SP", "DN", "INV"].includes(catCodeUpper)) {
+      const preacherPhone = await resolvePreacherPhone(holder?.preacherId);
       result = await thirdPartyService.pushSevaSponsor({
         holder, event, qrPass, catCode: catCodeUpper,
         categoryName: category?.name || "",
-        subCategory: holder?.subCategory || "",
+        preacherPhone,
         sevaSlotName,
       });
       // Retry the store-qr-code leg too (see createHolder — seva-sponsor

@@ -77,7 +77,7 @@ class ThirdPartyService {
     }
   }
 
-  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, subCategory, sevaSlotName }) {
+  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, preacherPhone, sevaSlotName }) {
     const skip = this._checkPrereqs(event);
     if (skip) return skip;
     const thirdPartyEventId = event.thirdPartyEventId;
@@ -88,14 +88,21 @@ class ThirdPartyService {
       const category = categoryMap[(catCode || "").toUpperCase()] || "donor";
       const sevaTypeMap = { sponsor: "abhisekam", donor: "darshan", invitee: "darshan" };
 
-      // "holder" field carries the pass sub-category (e.g. "Bahumana A") when
-      // the Excel sheet / Issue QR form specified one, falling back to the
-      // pass type name (e.g. "Sponsor") when no sub-category was set.
-      const holderLabel = subCategory || categoryName || catCode || "";
+      // devotee_mobile_number = the PREACHER's phone, so the community app
+      // can recognise which devotee this sponsor/donor was brought in by.
+      // Falls back to the sponsor's own number if no preacher is on record,
+      // so the field is never left empty.
+      const preacherBare10 = preacherPhone
+        ? String(preacherPhone).replace(/^91/, "").slice(-10)
+        : bare10;
+
+      // "holder" field carries the pass TYPE name (Sponsor / Donor / Invitee)
+      // per their sample payload — not the bahumana tier.
+      const holderLabel = categoryName || catCode || "";
 
       const body = {
         event_id: thirdPartyEventId,
-        devotee_mobile_number: bare10,
+        devotee_mobile_number: preacherBare10,
         donor_name: holder.name || "",
         donor_mobile_number: bare10,
         date_time: this._toDateTimeStr(new Date()),
