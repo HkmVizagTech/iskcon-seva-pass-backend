@@ -28,6 +28,17 @@ function normalisePhone(phone) {
   if (digits.length === 11 && digits.startsWith("0")) return "91" + digits.slice(1);
   return digits;
 }
+
+// Helper: the UTC instant of today's midnight in IST (Asia/Kolkata, UTC+5:30).
+// Computed explicitly rather than via the server's local timezone, so the
+// "one fresh pass per day" boundary is the same whether the process runs in
+// IST, UTC, or anything else.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+function istDayStart(now = new Date()) {
+  const shifted = new Date(now.getTime() + IST_OFFSET_MS);
+  shifted.setUTCHours(0, 0, 0, 0);
+  return new Date(shifted.getTime() - IST_OFFSET_MS);
+}
 // Resolve the merged pass type a QR is issued under, in priority order:
 //   1. requested (catCode or exact name) — from the Seva Pass app's pass-type picker
 //   2. an "Invitee" type (catCode INV / name matching "invitee")
@@ -91,6 +102,16 @@ async function resolveVolunteerCategory(eventId, requested) {
  * `category` is optional (catCode or exact type name). Omitted — the normal
  * case — passes are issued under the event's Volunteer type (catCode "VL").
  *
+ * Safe to call any number of times a day. Per holder the outcome is one of:
+ *   reused:   true  — existing pass not yet scanned, or already scanned TODAY,
+ *                     returned as-is (same QR for repeat taps within a day)
+ *   reissued: true  — previous pass was last scanned on an earlier day, so it
+ *                     was expired and a fresh QR minted (the day-2 path)
+ *   both false      — brand new holder, first pass
+ *
+ * Net effect: at most one new volunteer QR per person per IST calendar day,
+ * and only for volunteers who actually scanned on a previous day.
+ *
  * Max 200 holders per call.
  */
 exports.generateVolunteerQRBulk = async (req, res) => {
@@ -144,32 +165,76 @@ exports.generateVolunteerQRBulk = async (req, res) => {
           continue;
         }
 
+        // ── Reuse vs reissue ──────────────────────────────────────────────
+        // A volunteer's pass dies at an entry point the moment it is scanned
+        // there: validateQR/redeemQR reject any further scan whose
+        // redemptionHistory already holds a "granted" entry for that epId,
+        // and that check has NO date component. So yesterday's pass is dead
+        // weight — the app would show a QR the gate refuses.
+        //
+        // Rotate on a DAY boundary, not on "has ever been scanned":
+        //   never scanned      → reuse (nothing consumed yet)
+        //   scanned today      → reuse (today's pass is still the live one —
+        //                        reissuing here would hand back a clean
+        //                        history and let the volunteer re-enter a
+        //                        gate they already used this morning)
+        //   scanned, not today → expire it, mint a fresh QR for today
+        //
+        // Scoped to this endpoint, so only VOLUNTEER passes ever rotate.
+        // Sponsor/donor/invitee passes are issued elsewhere and untouched.
+        let reissued = false;
         const existingHolder = await Holder.findOne({ eventId: event._id, phone });
         if (existingHolder) {
           const existingPass = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
           if (existingPass) {
-            results.push({
-              success: true, reused: true,
-              name: existingHolder.name, phone,
-              qr_id: existingPass.qrId,
-            });
-            continue;
+            const granted = (existingPass.redemptionHistory || []).filter(
+              (rh) => rh.result === "granted" && rh.scannedAt,
+            );
+            const dayStartMs = istDayStart().getTime();
+            const usedToday = granted.some((rh) => new Date(rh.scannedAt).getTime() >= dayStartMs);
+
+            if (granted.length === 0 || usedToday) {
+              results.push({
+                success: true, reused: true,
+                name: existingHolder.name, phone,
+                qr_id: existingPass.qrId,
+              });
+              continue;
+            }
+            // "expired" (not "used") so the scanner shows "Pass has expired"
+            // if someone presents yesterday's screenshot at the gate.
+            existingPass.status = "expired";
+            await existingPass.save();
+            reissued = true;
+            console.log(
+              `[Integration] volunteer QR reissue for ${phone}: retired ${existingPass.qrId} ` +
+              `(${granted.length} scan(s), last ${granted[granted.length - 1].scannedAt.toISOString()})`,
+            );
           }
         }
 
         const holderName = h.name || `Devotee ${phone.slice(-4)}`;
-        let holder;
-        try {
-          holder = await Holder.create({
-            eventId: event._id, catId: category._id, phone,
-            name: holderName, holderType: deriveHolderTypeLabel(category),
-            source: "third_party", issuedBy: null,
-          });
-        } catch (e) {
-          if (e.code === 11000) {
-            holder = await Holder.findOne({ eventId: event._id, phone });
-            if (!holder) { results.push({ success: false, error: e.message, input: h }); continue; }
-          } else { throw e; }
+        let holder = existingHolder;
+        if (!holder) {
+          try {
+            holder = await Holder.create({
+              eventId: event._id, catId: category._id, phone,
+              name: holderName, holderType: deriveHolderTypeLabel(category),
+              source: "third_party", issuedBy: null,
+            });
+          } catch (e) {
+            if (e.code === 11000) {
+              holder = await Holder.findOne({ eventId: event._id, phone });
+              if (!holder) { results.push({ success: false, error: e.message, input: h }); continue; }
+            } else { throw e; }
+          }
+        } else if (String(holder.catId) !== String(category._id)) {
+          // Holder was created under a different pass type (e.g. the old INV
+          // fallback). Realign it with the pass we are about to issue so
+          // reports grouping by holderType match the QR's catCode.
+          holder.catId = category._id;
+          holder.holderType = deriveHolderTypeLabel(category);
+          await holder.save();
         }
 
         const qrId = await qrService.generateQRId(event.eventCode, category.catCode);
@@ -196,7 +261,7 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         }
 
         results.push({
-          success: true, reused: false,
+          success: true, reused: false, reissued,
           name: holder.name, phone,
           qr_id: qrId,
         });
