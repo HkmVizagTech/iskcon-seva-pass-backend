@@ -1238,8 +1238,13 @@ exports.retryCommunitySync = async (req, res) => {
       result = await thirdPartyService.pushHolder({ holder, qrPass, qrImageBase64: qrImage, event });
     }
 
-    const overallSuccess = result.success && (!qrStoreResult || qrStoreResult.success);
-    const overallSkipped = result.skipped && (!qrStoreResult || qrStoreResult.skipped);
+    // Top-level success reflects the PRIMARY push (seva-sponsor / store-qr-code
+    // / register-volunteer as applicable) — not the secondary qrStoreSync leg,
+    // which is a known separate limitation (requires the phone to already be
+    // registered as a volunteer on their side) and shouldn't mask a genuine
+    // sponsor-save success.
+    const overallSuccess = result.success;
+    const overallSkipped = result.skipped;
     qrPass.communityAppSync = {
       attempted: !!result.attempted,
       success: !!overallSuccess,
