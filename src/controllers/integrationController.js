@@ -54,6 +54,31 @@ async function resolveCategory(eventId, requested) {
   return null;
 }
 
+// Resolve the VOLUNTEER pass type for /generate-volunteer-qr.
+//
+// Deliberately separate from resolveCategory(): that helper's fallback chain
+// starts at Invitee (INV), so calling it with no requested type silently
+// issued every volunteer an INV pass — wrong catCode in the QR ID, holderType
+// "invitee" on the Holder, and a bogus seva-sponsor push to the community app.
+// This resolver only ever lands on a volunteer type, and returns null (→ a
+// clear 400) rather than guessing when the event has none configured.
+async function resolveVolunteerCategory(eventId, requested) {
+  const attempts = [];
+  if (requested) {
+    attempts.push({ catCode: String(requested).toUpperCase() });
+    attempts.push({ name: new RegExp(`^${escapeRegExp(requested)}$`, "i") });
+  }
+  attempts.push({ catCode: "VL" });
+  attempts.push({ name: /^volunteer/i });
+  attempts.push({ name: /volunteer/i });
+
+  for (const q of attempts) {
+    const holderType = await HolderType.findOne({ eventId, ...q }).populate("entryPoints");
+    if (holderType) return holderType;
+  }
+  return null;
+}
+
 /**
  * POST /api/integration/generate-volunteer-qr
  *
@@ -61,7 +86,10 @@ async function resolveCategory(eventId, requested) {
  * volunteers and taps "Generate QR".
  *
  * Request body:
- *   { event_id, holders: [{ user_phone_number, name? }, ...] }
+ *   { event_id, holders: [{ user_phone_number, name? }, ...], category? }
+ *
+ * `category` is optional (catCode or exact type name). Omitted — the normal
+ * case — passes are issued under the event's Volunteer type (catCode "VL").
  *
  * Max 200 holders per call.
  */
@@ -91,9 +119,17 @@ exports.generateVolunteerQRBulk = async (req, res) => {
       return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
     }
 
-    const category = await resolveCategory(event._id, null);
+    // This endpoint issues VOLUNTEER passes — resolve the volunteer pass type,
+    // never the generic fallback chain (which starts at Invitee).
+    // `category` in the body is optional and lets the app override the type.
+    const category = await resolveVolunteerCategory(event._id, req.body.category);
     if (!category) {
-      return res.status(400).json({ status: false, message: "No suitable category found for this event." });
+      return res.status(400).json({
+        status: false,
+        message:
+          `No volunteer pass type configured for event ${event.eventCode}. ` +
+          `Add a pass type with catCode "VL" (or a type named "Volunteer") to this event.`,
+      });
     }
 
     const entryPoints = category.entryPoints || [];
@@ -151,6 +187,9 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         // Push to community mobile app (non-fatal, fire-and-forget)
         const qrPassObj = { qrId };
         thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: null, event }).catch(() => {});
+        // Only fires if the caller explicitly overrode `category` to a
+        // sponsor/donor/invitee type. A volunteer pass (VL) must NOT be
+        // pushed as a seva-sponsor — it goes out via store-qr-code below.
         const catCode = (category.catCode || "").toUpperCase();
         if (["SP", "DN", "INV"].includes(catCode)) {
           thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
@@ -182,6 +221,9 @@ exports.generateVolunteerQRBulk = async (req, res) => {
     return res.status(200).json({
       status: true,
       message: `Processed ${results.length} holders — ${succeeded} succeeded, ${failed} failed`,
+      // Echo the pass type the QRs were issued under so the caller can verify
+      // it is the volunteer category and not a silent fallback.
+      category: { code: category.catCode, name: category.name },
       total: results.length,
       succeeded,
       failed,
