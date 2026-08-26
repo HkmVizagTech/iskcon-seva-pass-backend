@@ -128,11 +128,12 @@ class ThirdPartyService {
 
     try {
       const bare10 = String(holder.phone || "").replace(/^91/, "").slice(-10);
-      const body = {
+      // Their API requires an array payload even for a single entry.
+      const body = [{
         volunteer_mobile_number: bare10,
         event_id: thirdPartyEventId,
         qrcode: qrPass?.qrId || "",
-      };
+      }];
 
       const response = await axios.post(
         `${this.baseUrl}/api/v1/user/festivals/store-qr-code`,
