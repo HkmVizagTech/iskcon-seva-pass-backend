@@ -102,11 +102,12 @@ class ThirdPartyService {
       const holderLabel = categoryName || catCode || "";
 
       // "category" field carries the A/B/C sub-category tier. Their API's
-      // validation requires this field to always have a value (confirmed:
-      // null, "", and omitting the key all get rejected with 422 "category
-      // field is required") — so fall back to "NA" when no tier is set,
-      // pending their team confirming a proper "no tier" convention.
-      const categoryLabel = subCategory || "NA";
+      // validation requires this field to always have a value (real null,
+      // "", and an omitted key are all rejected with 422 "category field
+      // is required" — confirmed live). Per instruction, we send the
+      // literal string "null" when a holder has no tier set, which their
+      // validation accepts.
+      const categoryLabel = subCategory || "null";
 
       const body = {
         event_id: thirdPartyEventId,
