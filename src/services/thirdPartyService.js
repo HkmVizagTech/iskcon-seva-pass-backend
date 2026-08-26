@@ -77,15 +77,17 @@ class ThirdPartyService {
     }
   }
 
-  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, preacherPhone, sevaSlotName }) {
+  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, subCategory, preacherPhone, sevaSlotName }) {
     const skip = this._checkPrereqs(event);
     if (skip) return skip;
     const thirdPartyEventId = event.thirdPartyEventId;
 
     try {
       const bare10 = String(holder.phone || "").replace(/^91/, "").slice(-10);
-      const categoryMap = { SP: "sponsor", DN: "donor", INV: "invitee" };
-      const category = categoryMap[(catCode || "").toUpperCase()] || "donor";
+      // seva_type still needs the machine pass-type value internally —
+      // kept as a local lookup, no longer sent as the "category" field.
+      const passTypeMap = { SP: "sponsor", DN: "donor", INV: "invitee" };
+      const passType = passTypeMap[(catCode || "").toUpperCase()] || "donor";
       const sevaTypeMap = { sponsor: "abhisekam", donor: "darshan", invitee: "darshan" };
 
       // devotee_mobile_number = the PREACHER's phone, so the community app
@@ -96,9 +98,15 @@ class ThirdPartyService {
         ? String(preacherPhone).replace(/^91/, "").slice(-10)
         : bare10;
 
-      // "holder" field carries the pass TYPE name (Sponsor / Donor / Invitee)
-      // per their sample payload — not the bahumana tier.
+      // "holder" field carries the pass TYPE name (Sponsor / Donor / Invitee).
       const holderLabel = categoryName || catCode || "";
+
+      // "category" field carries the A/B/C sub-category tier. Their API's
+      // validation requires this field to always have a value (confirmed:
+      // null, "", and omitting the key all get rejected with 422 "category
+      // field is required") — so fall back to "NA" when no tier is set,
+      // pending their team confirming a proper "no tier" convention.
+      const categoryLabel = subCategory || "NA";
 
       const body = {
         event_id: thirdPartyEventId,
@@ -106,9 +114,9 @@ class ThirdPartyService {
         donor_name: holder.name || "",
         donor_mobile_number: bare10,
         date_time: this._toDateTimeStr(new Date()),
-        category,
+        category: categoryLabel,
         qrcode: qrPass?.qrId || "",
-        seva_type: sevaTypeMap[category] || "darshan",
+        seva_type: sevaTypeMap[passType] || "darshan",
         holder: holderLabel,
         instruction: sevaSlotName || categoryName || event?.name || "",
       };

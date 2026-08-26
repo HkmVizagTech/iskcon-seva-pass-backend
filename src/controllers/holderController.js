@@ -515,6 +515,7 @@ exports.createHolder = async (req, res) => {
           result = await thirdPartyService.pushSevaSponsor({
             holder, event, qrPass, catCode: catCodeUpper,
             categoryName: categoryForCheck?.name || "",
+            subCategory: holder?.subCategory || "",
             preacherPhone,
             sevaSlotName: sevaSlot?.name || "",
           });
@@ -1011,6 +1012,7 @@ async function processSingleRecord(
           result = await thirdPartyService.pushSevaSponsor({
             holder, event, qrPass, catCode: catCodeUpper,
             categoryName: category?.name || "",
+            subCategory: holder?.subCategory || "",
             preacherPhone,
             sevaSlotName: sevaSlot?.name || "",
           });
@@ -1187,6 +1189,7 @@ exports.retryCommunitySync = async (req, res) => {
       result = await thirdPartyService.pushSevaSponsor({
         holder, event, qrPass, catCode: catCodeUpper,
         categoryName: category?.name || "",
+        subCategory: holder?.subCategory || "",
         preacherPhone,
         sevaSlotName,
       });
