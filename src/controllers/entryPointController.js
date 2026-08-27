@@ -6,7 +6,7 @@ const QRPass = require("../models/QRPass");
 const EP_ALLOWED_FIELDS = [
   "name", "stationLabel", "type", "description",
   "linkedEpId", "allowGroupCount", "multiEntryAllowed",
-  "isPaid", "isActive", "maxCapacity", "location",
+  "isPaid", "isActive", "maxCapacity", "location", "redemptionGroupId",
 ];
 
 exports.getEntryPoints = async (req, res) => {
@@ -22,6 +22,7 @@ exports.createEntryPoint = async (req, res) => {
   try {
     const data = { ...req.body, eventId: req.params.eventId };
     if (data.linkedEpId === "" || data.linkedEpId === "none") data.linkedEpId = null;
+    if (data.redemptionGroupId === "" || data.redemptionGroupId === "none") data.redemptionGroupId = null;
     if (data.maxCapacity === "" || data.maxCapacity === 0) data.maxCapacity = null;
     const entryPoint = await EntryPoint.create(data);
     res.status(201).json(entryPoint);
@@ -38,6 +39,7 @@ exports.updateEntryPoint = async (req, res) => {
       if (req.body[field] !== undefined) $set[field] = req.body[field];
     }
     if ($set.linkedEpId === "" || $set.linkedEpId === "none") $set.linkedEpId = null;
+    if ($set.redemptionGroupId === "" || $set.redemptionGroupId === "none") $set.redemptionGroupId = null;
     if ($set.maxCapacity === "" || $set.maxCapacity === 0) $set.maxCapacity = null;
 
     const entryPoint = await EntryPoint.findOneAndUpdate(

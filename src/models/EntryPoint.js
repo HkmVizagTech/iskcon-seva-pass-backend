@@ -32,6 +32,15 @@ const entryPointSchema = new mongoose.Schema({
     ref: "EntryPoint",
     default: null,
   },
+  // Shared redemption group — entry points with the SAME redemptionGroupId are
+  // treated as ONE logical entrance: the pass is scanned only once across all
+  // of them (e.g. two Bahumana desks, one per venue, that count as a single
+  // combined scan). null = standalone (each EP scanned independently).
+  redemptionGroupId: {
+    type: String,
+    default: null,
+    index: true,
+  },
   allowGroupCount: {
     type: Boolean,
     default: false,

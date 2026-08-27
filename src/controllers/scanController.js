@@ -178,7 +178,10 @@ exports.scanQR = async (req, res) => {
     const redemption = await qrService.redeemQR(
       validatedQrId, incomingEpId, userId, finalStationLabel,
       deviceInfo, incomingGroupCount,
-      { multiEntryAllowed: validation.entryPoint?.multiEntryAllowed },
+      {
+        multiEntryAllowed: validation.entryPoint?.multiEntryAllowed,
+        redemptionGroupEpIds: validation.redemptionGroupEpIds || null,
+      },
     );
 
     if (!redemption.redeemed) {
@@ -368,7 +371,10 @@ exports.syncOfflineScans = async (req, res) => {
               deviceInfo: { offlineOrigin: true, groupCount },
               offlineSync: { isOffline: true, syncedAt: new Date() },
             }),
-            qrService.redeemQR(validatedQrId, epId, req.user._id || req.user.userId, finalStationLabel, { offlineOrigin: true }, groupCount),
+            qrService.redeemQR(validatedQrId, epId, req.user._id || req.user.userId, finalStationLabel, { offlineOrigin: true }, groupCount, {
+              multiEntryAllowed: validation.entryPoint?.multiEntryAllowed,
+              redemptionGroupEpIds: validation.redemptionGroupEpIds || null,
+            }),
             EntryPoint.findByIdAndUpdate(epId, { $inc: { currentCount: groupCount } }),
           ]);
         } else {

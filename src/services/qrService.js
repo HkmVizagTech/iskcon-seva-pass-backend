@@ -117,7 +117,7 @@ class QRService {
           .populate({ path: "holderId", select: "name subCategory sevaSlotId catId", populate: [{ path: "catId", select: "name" }, { path: "sevaSlotId", select: "code name time displayLabel" }] })
           .lean(),
         EntryPoint.findById(epId)
-          .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed stationLabel")
+          .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed stationLabel type redemptionGroupId")
           .lean(),
       ]);
 
@@ -134,6 +134,30 @@ class QRService {
         return { valid: false, reason: "invalid", message: "Pass is not active" };
       }
       const qrPass = qrPassAny;
+
+      // Resolve the shared-redemption group for this entry point (if any).
+      // Two ways an EP can be part of ONE combined entrance (scanned only once
+      // across the whole group, e.g. Bahumana desks one per venue):
+      //   1. EXPLICIT — EPs share the same redemptionGroupId (any type).
+      //   2. AUTOMATIC — every `bahumana`-type EP of the event is combined, so
+      //      the user can claim bahumana at ANY one venue only, not both.
+      // redemptionGroupEpIds ALWAYS includes the current EP, so downstream
+      // group-aware checks are a drop-in for the single-EP path.
+      const epIdStr = epId.toString();
+      let redemptionGroupEpIds = null;
+      const explicitGroup = entryPoint && entryPoint.redemptionGroupId;
+      const isBahumanaAuto = entryPoint && entryPoint.type === "bahumana";
+      if (explicitGroup || isBahumanaAuto) {
+        const match = explicitGroup
+          ? { eventId: qrPass.eventId, redemptionGroupId: entryPoint.redemptionGroupId }
+          : { eventId: qrPass.eventId, type: "bahumana" };
+        const groupEps = await EntryPoint.find(match).select("_id").lean();
+        redemptionGroupEpIds = [
+          ...new Set(
+            groupEps.map((e) => e._id.toString()).concat(epIdStr),
+          ),
+        ];
+      }
 
       if (!entryPoint || entryPoint.eventId.toString() !== qrPass.eventId.toString()) {
         {
@@ -197,7 +221,6 @@ class QRService {
       // If no scan/event dates configured, QR is valid (skip check)
 
       // Step 4: check entry point access
-      const epIdStr = epId.toString();
       const hasEP = qrPass.entryPoints.some((ep) => ep.toString() === epIdStr);
       if (!hasEP) {
         return { valid: false, reason: "not_included", message: "Not in your pass" };
@@ -205,8 +228,12 @@ class QRService {
 
       // Step 5: check already used
       if (!entryPoint.multiEntryAllowed) {
+        // Grouped redemption: if this EP belongs to a redemption group, any
+        // grant in the group (e.g. either Bahumana venue) counts as used —
+        // the whole group is scanned only ONCE.
+        const checkEpIds = redemptionGroupEpIds || [epIdStr];
         const used = qrPass.redemptionHistory?.some(
-          (rh) => rh.epId?.toString() === epIdStr && rh.result === "granted",
+          (rh) => checkEpIds.includes(rh.epId?.toString()) && rh.result === "granted",
         );
         if (used) {
           return {
@@ -246,6 +273,7 @@ class QRService {
         qrPass,
         entryPoint,
         event,
+        redemptionGroupEpIds,
         holderName: qrPass.holderId?.name || payload.n,
         subCategory: qrPass.holderId?.subCategory || null,
         sevaSlot: qrPass.holderId?.sevaSlotId ? {
@@ -269,8 +297,14 @@ class QRService {
     // both be granted — the loser gets { redeemed:false } → already_used.
     const filter = { qrId, status: "active" };
     if (!opts.multiEntryAllowed) {
+      // When a redemption group is present, the pass can be redeemed only
+      // ONCE across the whole group — block if ANY group EP already has a
+      // granted redemption (covers both venues of a combined Bahumana desk).
+      const groupEpIds = opts.redemptionGroupEpIds
+        ? opts.redemptionGroupEpIds.map((id) => new mongoose.Types.ObjectId(String(id)))
+        : [new mongoose.Types.ObjectId(String(epId))];
       filter.redemptionHistory = {
-        $not: { $elemMatch: { epId: new mongoose.Types.ObjectId(String(epId)), result: "granted" } },
+        $not: { $elemMatch: { epId: { $in: groupEpIds }, result: "granted" } },
       };
     }
     const qrPass = await QRPass.findOneAndUpdate(
