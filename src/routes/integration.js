@@ -57,6 +57,16 @@ router.post(
   integrationController.generateVolunteerQRBulk,
 );
 
+// ─── Seva Pass app — dedicated single-holder QR endpoint ───────────────────
+// POST /api/integration/seva-pass/issue
+// Accepts the Seva Pass app's flat format and issues a single QR pass.
+router.post("/seva-pass/issue", requireApiKey, integrationController.sevaPassIssue);
+
+// Preacher management via integration API
+router.post("/preachers", requireApiKey, integrationController.createPreacher);
+router.get("/preachers", requireApiKey, integrationController.listPreachers);
+router.delete("/preachers/:id", requireApiKey, integrationController.deletePreacher);
+
 // ─── Prasadam Coupon integration (community app) ─────────────────────────────
 // Matches events by our own MongoDB Event _id, shared directly with the
 // community app — no eventCode translation needed.
