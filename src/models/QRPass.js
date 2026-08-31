@@ -26,6 +26,11 @@ const qrPassSchema = new mongoose.Schema({
       ref: "EntryPoint",
     },
   ],
+  // Optional list of venue NAMES at which this pass is valid. When empty/null,
+  // the pass is valid at every venue of its event (backward compatible with all
+  // existing passes). When set, scan validation restricts scanning to these
+  // venues only. e.g. ["Kailash Gardens"] or ["Kailash Gardens","Main Temple"].
+  allowedVenues: [String],
   payloadSigned: {
     type: String,
     required: true,
@@ -89,6 +94,10 @@ const qrPassSchema = new mongoose.Schema({
         ref: "User",
       },
       stationLabel: String,
+      // Venue (name) where this redemption physically happened. Optional;
+      // set only when the scanner provides a venue. Used to enforce
+      // "once at each venue" for per-venue entry points.
+      venue: String,
       result: {
         type: String,
         enum: [

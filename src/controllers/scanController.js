@@ -43,6 +43,7 @@ exports.scanQR = async (req, res) => {
       groupCount,
       client_scan_id,
       clientScanId,
+      venue,
     } = req.body;
 
     let incomingQrData = qrData || qr_payload;
@@ -63,6 +64,8 @@ exports.scanQR = async (req, res) => {
     }
     const incomingEpId = epId || ep_id;
     const incomingStationLabel = stationLabel || station_label || "";
+    // Optional venue (name) where the scan physically happened.
+    const incomingVenue = typeof venue === "string" && venue.trim() ? venue.trim() : null;
     // FIX: cap groupCount to prevent malicious/accidental huge increments
     const incomingGroupCount = Math.min(Math.max(1, parseInt(groupCount) || 1), 50);
     const userId = req.user._id || req.user.userId;
@@ -128,7 +131,11 @@ exports.scanQR = async (req, res) => {
     }
 
     // Full validation
-    const validation = await qrService.validateQR(incomingQrData, incomingEpId);
+    const validation = await qrService.validateQR(
+      incomingQrData,
+      incomingEpId,
+      incomingVenue,
+    );
     // FIX: use DB station label as fallback so ScanLog.stationLabel is never blank
     const finalStationLabel =
       incomingStationLabel ||
@@ -148,6 +155,7 @@ exports.scanQR = async (req, res) => {
         epId: incomingEpId,
         scannedBy: userId,
         stationLabel: finalStationLabel,
+        venue: incomingVenue,
         result: validation.reason,
         groupCount: incomingGroupCount,
         deviceInfo: {
@@ -177,7 +185,7 @@ exports.scanQR = async (req, res) => {
     // in one DB round-trip instead of three.
     const redemption = await qrService.redeemQR(
       validatedQrId, incomingEpId, userId, finalStationLabel,
-      deviceInfo, incomingGroupCount,
+      incomingVenue, deviceInfo, incomingGroupCount,
       {
         multiEntryAllowed: validation.entryPoint?.multiEntryAllowed,
         redemptionGroupEpIds: validation.redemptionGroupEpIds || null,
@@ -194,6 +202,7 @@ exports.scanQR = async (req, res) => {
         epId: incomingEpId,
         scannedBy: userId,
         stationLabel: finalStationLabel,
+        venue: incomingVenue,
         result: "already_used",
         groupCount: incomingGroupCount,
         deviceInfo: { ...deviceInfo, groupCount: incomingGroupCount, ipAddress: req.ip },
@@ -216,6 +225,7 @@ exports.scanQR = async (req, res) => {
       epId: incomingEpId,
       scannedBy: userId,
       stationLabel: finalStationLabel,
+      venue: incomingVenue,
       result: "granted",
       groupCount: incomingGroupCount,
       clientScanId: client_scan_id || clientScanId,
@@ -339,6 +349,8 @@ exports.syncOfflineScans = async (req, res) => {
         const stationLabel = scan.stationLabel || scan.station || "";
         const groupCount = Math.min(Math.max(1, parseInt(scan.groupCount) || 1), 50);
         const scannedAt = scan.timestamp ? new Date(scan.timestamp) : new Date();
+        const venue =
+          typeof scan.venue === "string" && scan.venue.trim() ? scan.venue.trim() : null;
 
         if (!qrData || !epId) { failed++; continue; }
 
@@ -350,7 +362,7 @@ exports.syncOfflineScans = async (req, res) => {
         }
 
         // FIX: validate the QR like a live scan so the record is complete & correct
-        const validation = await qrService.validateQR(qrData, epId);
+        const validation = await qrService.validateQR(qrData, epId, venue);
         const validatedQrId = validation.payload?.q || validation.payload?.qrId || "unknown";
         const finalStationLabel = stationLabel || validation.entryPoint?.stationLabel || String(epId);
         const fullHolderId = validation.qrPass?.holderId?._id || validation.qrPass?.holderId || null;
@@ -364,6 +376,7 @@ exports.syncOfflineScans = async (req, res) => {
               epId,
               scannedBy: req.user._id || req.user.userId,
               stationLabel: finalStationLabel,
+              venue,
               result: "granted",
               groupCount,
               clientScanId: clientId || undefined,
@@ -371,7 +384,7 @@ exports.syncOfflineScans = async (req, res) => {
               deviceInfo: { offlineOrigin: true, groupCount },
               offlineSync: { isOffline: true, syncedAt: new Date() },
             }),
-            qrService.redeemQR(validatedQrId, epId, req.user._id || req.user.userId, finalStationLabel, { offlineOrigin: true }, groupCount, {
+            qrService.redeemQR(validatedQrId, epId, req.user._id || req.user.userId, finalStationLabel, venue, { offlineOrigin: true }, groupCount, {
               multiEntryAllowed: validation.entryPoint?.multiEntryAllowed,
               redemptionGroupEpIds: validation.redemptionGroupEpIds || null,
             }),
@@ -384,6 +397,7 @@ exports.syncOfflineScans = async (req, res) => {
             epId,
             scannedBy: req.user._id || req.user.userId,
             stationLabel: finalStationLabel,
+            venue,
             result: validation.reason || "invalid",
             groupCount,
             clientScanId: clientId || undefined,

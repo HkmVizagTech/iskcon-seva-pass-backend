@@ -325,11 +325,11 @@ exports.volunteerLogin = async (req, res) => {
     }
 
     const volunteer = await User.findOne(query)
-      .populate("assignedEvents", "name eventCode dateStart dateEnd")
+      .populate("assignedEvents", "name eventCode dateStart dateEnd venue")
       .populate({
         path: "assignedEntryPoints",
         select: "name stationLabel type _id allowGroupCount eventId isActive",
-        populate: { path: "eventId", select: "name eventCode _id dateStart dateEnd" },
+        populate: { path: "eventId", select: "name eventCode _id dateStart dateEnd venue" },
       });
 
     if (!volunteer) {
@@ -377,6 +377,7 @@ exports.volunteerLogin = async (req, res) => {
         eventMap.set(evId, {
           _id: evId, name: ev?.name || "Event", eventCode: ev?.eventCode || "",
           dateStart: ev?.dateStart, dateEnd: ev?.dateEnd,
+          venue: Array.isArray(ev?.venue) ? ev.venue : [],
         });
       }
     }
@@ -394,6 +395,7 @@ exports.volunteerLogin = async (req, res) => {
           eventCode: ev.eventCode || "",
           dateStart: ev.dateStart,
           dateEnd: ev.dateEnd,
+          venue: Array.isArray(ev.venue) ? ev.venue : [],
         });
       }
     }
@@ -431,6 +433,7 @@ exports.volunteerLogin = async (req, res) => {
         name: volunteer.name,
         assignedEntryPoints: stationsForScanner,
         assignedEvents: eventsForScanner,
+        assignedVenues: (volunteer.assignedVenues || []).map((i) => Number(i)),
       },
     });
   } catch (error) {
