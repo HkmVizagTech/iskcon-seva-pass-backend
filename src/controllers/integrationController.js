@@ -764,12 +764,21 @@ exports.sevaPassIssue = async (req, res) => {
     );
     const { image: qrImage, signedPayload } = await qrService.generateQRCode(payload);
 
+    const allowedVenues = (() => {
+      if (!venue || typeof venue !== "string" || !venue.trim()) return [];
+      const eventNames = (Array.isArray(event.venue) ? event.venue : [])
+        .map((v) => String(v?.name || "").trim()).filter(Boolean);
+      const match = eventNames.find((n) => n.toLowerCase() === String(venue).trim().toLowerCase());
+      return match ? [match] : [];
+    })();
+
     const qrPass = await QRPass.create({
       qrId, holderId: holder._id, eventId: event._id, catId: category._id,
       entryPoints: entryPoints.map((ep) => ep._id),
       payloadSigned: signedPayload,
       validFrom: event.dateStart, validUntil: event.dateEnd,
       deliveryMethod: "third_party", deliveryStatus: "sent", deliveredAt: new Date(),
+      allowedVenues,
     });
 
     // ── Push to community mobile app ────────────────────────────────────────

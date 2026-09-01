@@ -25,6 +25,9 @@ const scanLogSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  // Venue (name) where this scan physically happened. Optional; set only when
+  // the scanner provides a venue. Lets admins report where each pass used.
+  venue: String,
   scannedAt: {
     type: Date,
     default: Date.now,

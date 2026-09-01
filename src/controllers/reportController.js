@@ -66,7 +66,16 @@ exports.getEventSummary = async (req, res) => {
       { $sort: { count: -1 } },
     ]);
 
-    res.json({ totalIssued, totalScanned, byEntryPoint, byHolderType, byVenue });
+    // By Scan Venue — where each scan PHYSICALLY happened (from ScanLog.venue).
+    // Distinct from byVenue (the holder's home venue). Null/missing venues are
+    // grouped under "Unknown" so legacy scans still appear.
+    const byScanVenue = await ScanLog.aggregate([
+      { $match: { epId: { $in: epIds }, result: "granted" } },
+      { $group: { _id: { $ifNull: ["$venue", "Unknown"] }, count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+    ]);
+
+    res.json({ totalIssued, totalScanned, byEntryPoint, byHolderType, byVenue, byScanVenue });
   } catch (error) {
     console.error("getEventSummary error:", error);
     res.status(500).json({ error: "Failed to fetch event summary" });
@@ -509,7 +518,7 @@ exports.getAnalytics = async (req, res) => {
       { $unwind: { path: "$ep", preserveNullAndEmptyArrays: true } },
       {
         $group: {
-          _id: { epId: "$epId", name: "$ep.name", label: "$ep.stationLabel" },
+          _id: { epId: "$epId", name: "$ep.name", label: "$ep.stationLabel", venue: { $ifNull: ["$venue", ""] } },
           granted: { $sum: { $cond: [{ $eq: ["$result", "granted"] }, 1, 0] } },
           duplicate: { $sum: { $cond: [{ $eq: ["$result", "already_used"] }, 1, 0] } },
           denied: { $sum: { $cond: [{ $in: ["$result", ["invalid", "expired", "not_included", "capacity_full"]] }, 1, 0] } },
@@ -520,6 +529,7 @@ exports.getAnalytics = async (req, res) => {
           _id: 0,
           epId: "$_id.epId",
           name: { $ifNull: ["$_id.name", "$_id.label"] },
+          venue: "$_id.venue",
           granted: 1, duplicate: 1, denied: 1,
         },
       },
@@ -703,14 +713,17 @@ exports.exportAnalytics = async (req, res) => {
       ]);
       data.forEach((d) => { csv += `${esc(d._id)},${d.issued}\n`; });
     } else if (angle === "entry") {
-      csv = "Entry Point,Granted,Duplicate,Denied\n";
+      csv = "Entry Point,Venue,Granted,Duplicate,Denied\n";
       const data = await ScanLog.aggregate([
         { $match: { epId: { $in: epIds } } },
         { $lookup: { from: "entrypoints", localField: "epId", foreignField: "_id", as: "ep" } },
         { $unwind: { path: "$ep", preserveNullAndEmptyArrays: true } },
         {
           $group: {
-            _id: { $ifNull: ["$ep.name", "$ep.stationLabel"] },
+            _id: {
+              entry: { $ifNull: ["$ep.name", "$ep.stationLabel"] },
+              venue: { $ifNull: ["$venue", ""] },
+            },
             granted: { $sum: { $cond: [{ $eq: ["$result", "granted"] }, 1, 0] } },
             duplicate: { $sum: { $cond: [{ $eq: ["$result", "already_used"] }, 1, 0] } },
             denied: { $sum: { $cond: [{ $in: ["$result", ["invalid", "expired", "not_included", "capacity_full"]] }, 1, 0] } },
@@ -718,7 +731,7 @@ exports.exportAnalytics = async (req, res) => {
         },
         { $sort: { granted: -1 } },
       ]);
-      data.forEach((d) => { csv += `${esc(d._id)},${d.granted},${d.duplicate},${d.denied}\n`; });
+      data.forEach((d) => { csv += `${esc(d._id.entry)},${esc(d._id.venue)},${d.granted},${d.duplicate},${d.denied}\n`; });
     } else if (angle === "delivery") {
       csv = "Name,Phone,QR ID,Delivery Status,Error\n";
       const QRPass = require("../models/QRPass");

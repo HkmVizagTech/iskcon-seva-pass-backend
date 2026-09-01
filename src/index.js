@@ -38,6 +38,12 @@ try {
 // Make redis available to routes
 app.locals.redis = redis;
 
+// Railway (and any reverse proxy) forwards the real client IP in
+// X-Forwarded-For. Without this, req.ip is the proxy's address, so the public
+// rate limiter in routes/public.js would put every visitor in one shared
+// bucket and lock the whole venue out after 20 lookups.
+app.set("trust proxy", 1);
+
 // Middleware
 app.use(helmet());
 app.use(
@@ -134,6 +140,8 @@ app.use("/api/reports", require("./routes/reports"));
 app.use("/api/volunteers", require("./routes/volunteers"));
 app.use("/api/preachers", require("./routes/preachers"));
 app.use("/api/integration", require("./routes/integration"));
+// Unauthenticated, rate-limited devotee self-service (pass lookup at the venue)
+app.use("/api/public", require("./routes/public"));
 
 // Health check
 app.get("/health", (req, res) => {

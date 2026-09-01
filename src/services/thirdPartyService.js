@@ -101,13 +101,18 @@ class ThirdPartyService {
       // "holder" field carries the pass TYPE name (Sponsor / Donor / Invitee).
       const holderLabel = categoryName || catCode || "";
 
-      // "category" field carries the A/B/C sub-category tier. Their API's
-      // validation requires this field to always have a value (real null,
-      // "", and an omitted key are all rejected with 422 "category field
-      // is required" — confirmed live). Per instruction, we send the
-      // literal string "null" when a holder has no tier set, which their
-      // validation accepts.
-      const categoryLabel = subCategory || "null";
+      // "category" field carries the A/B/C sub-category tier — sponsors
+      // usually have one, donors and invitees usually do not.
+      //
+      // It used to be mandatory on their side: real null, "" and an omitted
+      // key were all rejected with 422 "category field is required", so we
+      // sent the literal string "null" for tier-less holders. That string
+      // then printed as "null" on the donor's pass card in their app.
+      //
+      // They have since made the field optional, so we now OMIT the key
+      // entirely when there is no tier. Omitting rather than sending ""
+      // satisfies both a `nullable` and a `sometimes` validation rule.
+      const categoryLabel = String(subCategory || "").trim();
 
       const body = {
         event_id: thirdPartyEventId,
@@ -115,7 +120,7 @@ class ThirdPartyService {
         donor_name: holder.name || "",
         donor_mobile_number: bare10,
         date_time: this._toDateTimeStr(new Date()),
-        category: categoryLabel,
+        ...(categoryLabel ? { category: categoryLabel } : {}),
         qrcode: qrPass?.qrId || "",
         seva_type: sevaTypeMap[passType] || "darshan",
         holder: holderLabel,
@@ -132,7 +137,9 @@ class ThirdPartyService {
       );
 
       const ok = response.data?.success === true;
-      console.log(`[CommunityApp] seva-sponsor ${ok ? "OK" : "non-success"} for ${bare10} → event_id ${thirdPartyEventId}:`,
+      console.log(`[CommunityApp] seva-sponsor ${ok ? "OK" : "non-success"} for ${bare10} ` +
+        `[${holderLabel || catCode}, category ${categoryLabel ? `"${categoryLabel}"` : "omitted"}] ` +
+        `→ event_id ${thirdPartyEventId}:`,
         JSON.stringify(response.data).slice(0, 200));
       return { attempted: true, success: ok, skipped: false, responseBody: JSON.stringify(response.data).slice(0, 500) };
     } catch (error) {

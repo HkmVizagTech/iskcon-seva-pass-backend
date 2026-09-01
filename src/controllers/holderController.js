@@ -322,6 +322,7 @@ exports.createHolder = async (req, res) => {
       preacher,
       preacherId,  // ObjectId ref to User with role "preacher" (from dropdown)
       venueName,
+      venues,      // optional array of venue NAMES the pass is valid at
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -329,6 +330,30 @@ exports.createHolder = async (req, res) => {
       return res.status(404).json({ error: "Event not found" });
     }
     const primaryVenue = event.venue?.[0];
+
+    // Resolve the list of venue names this pass is allowed to scan at.
+    // - If `venues` is provided (array of venue names/indices), keep only those
+    //   that match the event's actual venue names (case-insensitive). Numeric
+    //   indices into event.venue[] are also accepted for the admin dashboard.
+    // - If `venues` is empty, the pass is valid at EVERY venue (legacy behavior).
+    const eventVenueNames = (Array.isArray(event.venue) ? event.venue : [])
+      .map((v) => String(v?.name || "").trim())
+      .filter(Boolean);
+    let allowedVenues = [];
+    if (Array.isArray(venues) && venues.length > 0) {
+      allowedVenues = venues
+        .map((v) => {
+          if (typeof v === "number" && !isNaN(v)) {
+            return eventVenueNames[Number(v)] || "";
+          }
+          return typeof v === "string" ? String(v).trim() : "";
+        })
+        .filter((name) => name && eventVenueNames.some((n) => n.toLowerCase() === name.toLowerCase()));
+      // Normalise to the event's actual venue name casing
+      allowedVenues = allowedVenues.map((name) =>
+        eventVenueNames.find((n) => n.toLowerCase() === name.toLowerCase()) || name
+      );
+    }
 
     const normPhone = normalisePhone(phone) || phone;
 
@@ -459,6 +484,7 @@ exports.createHolder = async (req, res) => {
       validFrom,
       validUntil,
       deliveryMethod: deliveryMethod || "none",
+      allowedVenues,
     });
 
     let deliveryStatus = "pending";
@@ -981,6 +1007,21 @@ async function processSingleRecord(
       validUntil: event.dateEnd,
       deliveryMethod,
       deliveryStatus: "pending",
+      // If the CSV provides a Venue, restrict the pass to that venue (matching
+      // the event's actual venue names where possible); otherwise valid at all.
+      allowedVenues: (() => {
+        const candidates = Array.from(
+          new Set([venue].filter((v) => typeof v === "string" && v.trim())),
+        );
+        const eventNames = (Array.isArray(event.venue) ? event.venue : [])
+          .map((ev) => String(ev?.name || "").trim()).filter(Boolean);
+        if (candidates.length === 0) return [];
+        const resolved = candidates.flatMap((c) => {
+          const match = eventNames.find((n) => n.toLowerCase() === c.toLowerCase());
+          return match ? [match] : [];
+        });
+        return resolved.length ? resolved : [];
+      })(),
     });
 
     // FIX: WhatsApp delivery failure does NOT return success:false.

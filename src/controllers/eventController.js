@@ -58,10 +58,16 @@ exports.createEvent = async (req, res) => {
     const venuePrasadamIds = entryPoints
       .filter((ep) => ["venue_entry", "prasadam"].includes(ep.type))
       .map((ep) => ep._id);
+    // Patron: main entry + darshan + prasadam (everything except bahumana).
+    const patronEpIds = entryPoints
+      .filter((ep) => ["venue_entry", "darshan", "prasadam"].includes(ep.type))
+      .map((ep) => ep._id);
 
-    // MERGED: single set of 6 default pass types (HolderType absorbed Category).
+    // MERGED: single set of 7 default pass types (HolderType absorbed Category).
     // Invitee is included because the Seva Pass devotee app issues passes
     // under it by default.
+    // Keep this list in sync with scripts/add-patron-holder-type.js, which
+    // backfills the same defaults onto events created before they existed.
     await HolderType.insertMany([
       { eventId: event._id, name: "Sponsor", catCode: "SP", entryPoints: allEpIds, color: "#F97316", icon: "💰", isDefault: true, isActive: true, categories: ["A", "B", "C"] },
       { eventId: event._id, name: "Donor", catCode: "DN", entryPoints: darshanPrasadamIds, color: "#22C55E", icon: "🙏", isDefault: true, isActive: true, categories: ["A", "B", "C"] },
@@ -69,6 +75,7 @@ exports.createEvent = async (req, res) => {
       { eventId: event._id, name: "General Public", catCode: "GN", entryPoints: entryPoints.filter((ep) => ep.type === "darshan").map((ep) => ep._id), color: "#3B82F6", icon: "👤", isDefault: true, isActive: true },
       { eventId: event._id, name: "VIP Guest", catCode: "VP", entryPoints: allEpIds, color: "#EAB308", icon: "⭐", isDefault: true, isActive: true },
       { eventId: event._id, name: "Invitee", catCode: "INV", entryPoints: allEpIds, color: "#EC4899", icon: "🎟️", isDefault: true, isActive: true },
+      { eventId: event._id, name: "Patron", catCode: "PAT", entryPoints: patronEpIds, color: "#6366F1", icon: "👑", isDefault: true, isActive: true },
     ]);
 
     res.status(201).json({

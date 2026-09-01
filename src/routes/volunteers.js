@@ -15,11 +15,11 @@ router.get("/me", protect, async (req, res) => {
 
     const volunteer = await User.findOne({ _id: req.user._id, role: "volunteer" })
       .select("-password")
-      .populate("assignedEvents", "name eventCode dateStart dateEnd")
+      .populate("assignedEvents", "name eventCode dateStart dateEnd venue")
       .populate({
         path: "assignedEntryPoints",
         select: "name stationLabel type _id allowGroupCount eventId isActive",
-        populate: { path: "eventId", select: "name eventCode _id dateStart dateEnd" },
+        populate: { path: "eventId", select: "name eventCode _id dateStart dateEnd venue" },
       });
 
     if (!volunteer) return res.status(404).json({ error: "Volunteer not found" });
@@ -51,6 +51,7 @@ router.get("/me", protect, async (req, res) => {
           eventCode: ev?.eventCode || "",
           dateStart: ev?.dateStart,
           dateEnd: ev?.dateEnd,
+          venue: Array.isArray(ev?.venue) ? ev.venue : [],
         });
       }
     }
@@ -68,6 +69,7 @@ router.get("/me", protect, async (req, res) => {
           eventCode: ev.eventCode || "",
           dateStart: ev.dateStart,
           dateEnd: ev.dateEnd,
+          venue: Array.isArray(ev.venue) ? ev.venue : [],
         });
       }
     }
@@ -114,6 +116,7 @@ router.get("/me", protect, async (req, res) => {
         name: volunteer.name,
         assignedEntryPoints: stationsForScanner,
         assignedEvents: eventsForScanner,
+        assignedVenues: (volunteer.assignedVenues || []).map((i) => Number(i)),
       },
     });
   } catch (error) {
