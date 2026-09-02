@@ -1068,7 +1068,16 @@ async function processSingleRecord(
   const resolvedPreacher = await resolvePreacherFromString(preacherRaw, event._id);
   const preacher = resolvedPreacher?.preacherName || preacherRaw;
   const csvPreacherId = resolvedPreacher?.preacherId || null;
-  const venue = (record.Venue || record.venue || "").toString().trim();
+  // Venue column supports multiple venues, comma-separated (e.g. "Venue 1, Venue 2")
+  // — restricts the pass to scan-valid only at those venues. Leave blank for
+  // "valid at every venue" (legacy/default behaviour).
+  const venueRaw = (record.Venue || record.venue || "").toString().trim();
+  const venueList = venueRaw
+    ? venueRaw.split(",").map((v) => v.trim()).filter(Boolean)
+    : [];
+  // venue: kept as a single string for display fields (seating label, notes,
+  // customFields) that predate multi-venue support — uses the first venue.
+  const venue = venueList[0] || "";
   const slot = (record.Slot || record.slot || "").toString().trim();
 
   // Resolve SevaSlot from the slot code (sponsors only)
@@ -1142,7 +1151,7 @@ async function processSingleRecord(
       preacher: preacher || "",
       // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
       preacherId: csvPreacherId || bulkPreacherId || null,
-      venueName: venue || event.venue?.[0]?.name || "",
+      venueName: (venueList.length > 1 ? venueList.join(" / ") : venue) || event.venue?.[0]?.name || "",
       notes:
         [sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode]
           .filter(Boolean)
@@ -1227,11 +1236,12 @@ async function processSingleRecord(
       validUntil: event.dateEnd,
       deliveryMethod,
       deliveryStatus: "pending",
-      // If the CSV provides a Venue, restrict the pass to that venue (matching
-      // the event's actual venue names where possible); otherwise valid at all.
+      // If the CSV provides Venue (comma-separated for multiple), restrict the
+      // pass to those venues (matching the event's actual venue names where
+      // possible); otherwise valid at every venue.
       allowedVenues: (() => {
         const candidates = Array.from(
-          new Set([venue].filter((v) => typeof v === "string" && v.trim())),
+          new Set(venueList.filter((v) => typeof v === "string" && v.trim())),
         );
         const eventNames = (Array.isArray(event.venue) ? event.venue : [])
           .map((ev) => String(ev?.name || "").trim()).filter(Boolean);
