@@ -39,6 +39,11 @@ const userSchema = new mongoose.Schema({
       "super_admin",
       "event_admin",
       "campaign_manager",
+      // Limited pass-issuing account. WHAT it may issue is governed by
+      // allowedHolderTypeCodes / allowedDeliveryMethods below, not by the role
+      // itself — the role only marks the account as restricted and drives the
+      // dashboard's navigation gating.
+      "issuer",
       "volunteer",
       "preacher",   // can log in and view only their own assigned holders/reports
       "announcer",  // can only see the bahumana announcement view for their assigned event
@@ -53,12 +58,54 @@ const userSchema = new mongoose.Schema({
       ref: "Event",
     },
   ],
-  allowedCategories: [
-    {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Category",
-    },
-  ],
+  // ── Per-account issue restrictions (enforced in utils/issuePermissions.js) ──
+  // An EMPTY array means "no restriction", so every existing account keeps
+  // working unchanged and no data migration is needed.
+  //
+  // Allow-listed by catCode ("INV", "SP", "DN", "VL", "GN") rather than by
+  // HolderType ObjectId, because HolderType rows are per-event — an ObjectId
+  // allow-list would silently stop working as soon as a new event is created.
+  // Replaces the former `allowedCategories`, which was declared with a broken
+  // `ref: "Category"` (no such model) and was never read or written anywhere.
+  allowedHolderTypeCodes: {
+    type: [String],
+    default: [],
+    set: (v) =>
+      (Array.isArray(v) ? v : [])
+        .map((c) => String(c || "").trim().toUpperCase())
+        .filter(Boolean),
+  },
+  // Subset of the assignable delivery methods — see ASSIGNABLE_DELIVERY_METHODS
+  // in utils/issuePermissions.js. Empty = any.
+  allowedDeliveryMethods: {
+    type: [String],
+    default: [],
+  },
+  // Turns `allowedEvents` (above) from a label into a hard limit: the account
+  // can only see and issue for the events listed there.
+  //
+  // Opt-in, default false, because allowedEvents has been stored-but-ignored
+  // for a long time — enforcing it unconditionally would silently re-scope
+  // existing accounts that happen to have an event assigned. New issuer
+  // accounts are created with it on.
+  restrictToAllowedEvents: {
+    type: Boolean,
+    default: false,
+  },
+  // Section access. Default true so existing accounts are unaffected; set false
+  // to lock a restricted issuer out. super_admin always bypasses these.
+  canViewAllHolders: {
+    type: Boolean,
+    default: true,   // false = sees only the passes this account issued
+  },
+  canViewReports: {
+    type: Boolean,
+    default: true,
+  },
+  canViewScanFeed: {
+    type: Boolean,
+    default: true,
+  },
   assignedEvents: [
     {
       type: mongoose.Schema.Types.ObjectId,

@@ -4,6 +4,12 @@ const holderController = require("../controllers/holderController");
 const { protect, authorize } = require("../middleware/auth");
 const upload = require("../middleware/upload");
 
+// "issuer" is a limited pass-issuing account. It reaches the same issue routes
+// as a campaign_manager; WHAT it may actually issue (which holder types, which
+// delivery methods) is enforced per-account in utils/issuePermissions.js, not
+// by this role list.
+const CAN_ISSUE = ["super_admin", "event_admin", "campaign_manager", "issuer"];
+
 // IMPORTANT: Specific routes MUST come before parameterised catch-alls
 // FIX: /download-failed/:filename and /failed-imports/:eventId were after
 // /:holderId, so Express matched them as holder IDs and returned 404.
@@ -25,15 +31,17 @@ router.patch(
 router.post(
   "/qr/:qrId/resend",
   protect,
-  authorize("super_admin", "event_admin", "campaign_manager"),
+  authorize(...CAN_ISSUE),
   holderController.resendQR,
 );
 
-// Bulk operations
+// Bulk operations — an issuer may bulk import, but the same per-account
+// holder-type and delivery-method allow-lists are enforced in the controller
+// before the file is parsed.
 router.post(
   "/bulk/:eventId",
   protect,
-  authorize("super_admin", "event_admin"),
+  authorize(...CAN_ISSUE),
   upload.single("file"),
   holderController.bulkImportHolders,
 );
@@ -64,7 +72,7 @@ router.get(
 router.post(
   "/events/:eventId/holders",
   protect,
-  authorize("super_admin", "event_admin", "campaign_manager"),
+  authorize(...CAN_ISSUE),
   holderController.createHolder,
 );
 router.get("/events/:eventId/holders", protect, holderController.getHolders);

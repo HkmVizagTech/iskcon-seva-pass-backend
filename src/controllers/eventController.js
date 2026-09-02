@@ -7,6 +7,11 @@ const Holder = require("../models/Holder");
 const ScanLog = require("../models/ScanLog");
 const FailedImport = require("../models/FailedImport");
 const User = require("../models/User");
+const {
+  isEventScoped,
+  isEventAllowed,
+  allowedEventIds,
+} = require("../utils/issuePermissions");
 
 exports.createEvent = async (req, res) => {
   try {
@@ -153,6 +158,13 @@ exports.getEvents = async (req, res) => {
       ];
     }
 
+    // Event-scoped accounts (a restricted issuer, typically) only ever see the
+    // events they are assigned to. Applied to the QUERY so the event pickers,
+    // the counts and everything downstream agree.
+    if (isEventScoped(req.user)) {
+      query._id = { $in: allowedEventIds(req.user) };
+    }
+
     const events = await Event.find(query)
       .populate("createdBy", "name email")
       .sort({ dateStart: -1 });
@@ -196,6 +208,15 @@ exports.getEventDetails = async (req, res) => {
   try {
     const event = await Event.findById(req.params.id).populate("createdBy", "name email");
     if (!event) return res.status(404).json({ error: "Event not found" });
+
+    // An event-scoped account must not read an event it wasn't assigned, even
+    // by typing the id straight into the URL.
+    if (!isEventAllowed(req.user, event._id)) {
+      return res.status(403).json({
+        code: "EVENT_NOT_ALLOWED",
+        error: "Your account is not assigned to this event.",
+      });
+    }
 
     const eventObj = event.toObject();
     if (!Array.isArray(eventObj.venue)) {

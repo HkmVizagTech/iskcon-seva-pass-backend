@@ -3,7 +3,59 @@ const jwt = require("jsonwebtoken");
 const { validationResult } = require("express-validator");
 const crypto = require("crypto");
 
+const {
+  normaliseCodes,
+  normaliseMethods,
+} = require("../utils/issuePermissions");
+
 const getReqUserId = (req) => req.user?._id || req.user?.userId;
+
+// The `permissions` block the dashboard's AuthContext reads.
+//
+// FIX: login() nested these under `permissions` but getProfile() returned the
+// raw user document with the same flags at top level, so `user.permissions` was
+// undefined after every page refresh and permission-gated screens fell back to
+// "no access" for legitimate users. Both endpoints now emit this one shape.
+const permissionsBlock = (u) => ({
+  canOverride: !!u.canOverride,
+  canManualEntry: !!u.canManualEntry,
+  canBahumanaView: !!u.canBahumanaView,
+  allowedEvents: u.allowedEvents || [],
+  // Turns allowedEvents into a hard limit rather than a label.
+  restrictToAllowedEvents: u.restrictToAllowedEvents === true,
+  // Per-account issue restrictions — empty array means "no restriction".
+  allowedHolderTypeCodes: u.allowedHolderTypeCodes || [],
+  allowedDeliveryMethods: u.allowedDeliveryMethods || [],
+  // Absent on user documents predating these fields — treat as allowed.
+  canViewAllHolders: u.canViewAllHolders !== false,
+  canViewReports: u.canViewReports !== false,
+  canViewScanFeed: u.canViewScanFeed !== false,
+});
+
+// The staff-user shape returned to the admin dashboard. Kept in one place so
+// create / list / update can't drift and leave the UI unable to show a
+// permission it just saved.
+const publicStaffFields = (u) => ({
+  _id: u._id,
+  name: u.name,
+  email: u.email,
+  phone: u.phone,
+  role: u.role,
+  isActive: u.isActive,
+  canManualEntry: u.canManualEntry,
+  canOverride: u.canOverride,
+  canBahumanaView: u.canBahumanaView,
+  allowedEvents: u.allowedEvents,
+  restrictToAllowedEvents: u.restrictToAllowedEvents === true,
+  allowedHolderTypeCodes: u.allowedHolderTypeCodes || [],
+  allowedDeliveryMethods: u.allowedDeliveryMethods || [],
+  canViewAllHolders: u.canViewAllHolders !== false,
+  canViewReports: u.canViewReports !== false,
+  canViewScanFeed: u.canViewScanFeed !== false,
+});
+
+// Exported so routes/auth.js's PATCH handlers return the same shape.
+exports.publicStaffFields = publicStaffFields;
 
 const generateToken = (user) => {
   return jwt.sign(
@@ -74,7 +126,7 @@ exports.login = async (req, res) => {
       user: {
         id: user._id, name: user.name, email: user.email,
         role: user.role, avatar: user.avatar,
-        permissions: { canOverride: user.canOverride, canManualEntry: user.canManualEntry, canBahumanaView: user.canBahumanaView, allowedEvents: user.allowedEvents },
+        permissions: permissionsBlock(user),
       },
     });
   } catch (error) {
@@ -88,7 +140,16 @@ exports.getProfile = async (req, res) => {
     const user = await User.findById(getReqUserId(req))
       .select("-password")
       .populate("allowedEvents", "name eventCode");
-    res.json({ user });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    // Top-level fields kept for the settings page, plus the same nested
+    // `permissions` block login() returns so a page refresh doesn't lose it.
+    res.json({
+      user: {
+        ...user.toObject(),
+        id: user._id,
+        permissions: permissionsBlock(user),
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch profile" });
   }
@@ -221,24 +282,42 @@ exports.deleteUser = async (req, res) => {
 // ── Admin: create a staff user (event_admin, announcer, etc) ────────────────
 exports.createStaffUser = async (req, res) => {
   try {
-    const { name, email, password, role, allowedEvents, canManualEntry } = req.body;
+    const {
+      name, email, password, role, allowedEvents, canManualEntry,
+      canBahumanaView,
+      // Per-account issue restrictions — see utils/issuePermissions.js
+      allowedHolderTypeCodes, allowedDeliveryMethods, restrictToAllowedEvents,
+      canViewAllHolders, canViewReports, canViewScanFeed,
+    } = req.body;
     if (!name || !email || !password || !role) {
       return res.status(400).json({ error: "name, email, password, role are required" });
     }
     const existing = await User.findOne({ email });
     if (existing) return res.status(409).json({ error: "Email already registered" });
 
+    // An "issuer" starts LOCKED DOWN: when the caller sends no explicit view
+    // flags, they default to false for this role instead of true. A
+    // half-filled form should not quietly produce a fully-privileged account.
+    const isIssuer = String(role) === "issuer";
+    const flag = (v, fallback) => (typeof v === "boolean" ? v : fallback);
+
     const user = await User.create({
       name, email, password,
       role,
       canManualEntry: canManualEntry === true,
+      canBahumanaView: canBahumanaView === true,
       allowedEvents: allowedEvents || [],
+      // On for a new issuer by default, so assigning them an event actually
+      // limits them rather than just labelling them.
+      restrictToAllowedEvents: flag(restrictToAllowedEvents, isIssuer),
+      allowedHolderTypeCodes: normaliseCodes(allowedHolderTypeCodes),
+      allowedDeliveryMethods: normaliseMethods(allowedDeliveryMethods),
+      canViewAllHolders: flag(canViewAllHolders, !isIssuer),
+      canViewReports: flag(canViewReports, !isIssuer),
+      canViewScanFeed: flag(canViewScanFeed, !isIssuer),
       isActive: true,
     });
-    res.status(201).json({
-      success: true,
-      user: { _id: user._id, name: user.name, email: user.email, role: user.role, canManualEntry: user.canManualEntry, allowedEvents: user.allowedEvents },
-    });
+    res.status(201).json({ success: true, user: publicStaffFields(user) });
   } catch (error) {
     console.error("createStaffUser error:", error);
     res.status(500).json({ error: "Failed to create user" });
@@ -252,7 +331,9 @@ exports.listStaffUsers = async (req, res) => {
       .select("-password")
       .populate("allowedEvents", "name eventCode")
       .sort({ createdAt: -1 });
-    res.json({ users });
+    // Normalised through publicStaffFields so the permission toggles always
+    // arrive as real booleans/arrays, even on documents predating the fields.
+    res.json({ users: users.map(publicStaffFields) });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch users" });
   }

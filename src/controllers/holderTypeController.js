@@ -2,6 +2,7 @@ const HolderType = require("../models/HolderType");
 const EntryPoint = require("../models/EntryPoint");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
+const { isEventAllowed } = require("../utils/issuePermissions");
 
 // Full CRUD for the merged HolderType entity (absorbs the old
 // categoryController capabilities: entry points, access-control roles,
@@ -9,6 +10,15 @@ const QRPass = require("../models/QRPass");
 
 exports.getHolderTypes = async (req, res) => {
   try {
+    // This feeds the issue/import pass-type pickers, so it honours the same
+    // event scope — an account limited to its own events shouldn't be able to
+    // read another event's pass-type configuration.
+    if (!isEventAllowed(req.user, req.params.eventId)) {
+      return res.status(403).json({
+        code: "EVENT_NOT_ALLOWED",
+        error: "Your account is not assigned to this event.",
+      });
+    }
     const holderTypes = await HolderType.find({ eventId: req.params.eventId })
       .populate("entryPoints", "name stationLabel type");
     res.json(holderTypes);

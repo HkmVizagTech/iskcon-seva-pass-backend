@@ -7,6 +7,18 @@ const holderController = require("../controllers/holderController");
 const { protect, authorize } = require("../middleware/auth");
 const upload = require("../middleware/upload");
 
+// NOTE: the issue + bulk-import routes near the bottom of this file are
+// DUPLICATES of routes in routes/holders.js. THESE are the ones the admin
+// dashboard actually calls (POST /api/events/:eventId/holders and
+// .../holders/bulk); the copies mounted under /api/holders are unused by the
+// UI. Both sets must stay in sync — a role allowed on only one of them
+// presents as a completely broken feature.
+//
+// "issuer" is a limited pass-issuing account; WHICH events, holder types and
+// delivery methods it may use is enforced per-account in the controllers
+// (utils/issuePermissions.js), not by this role list.
+const CAN_ISSUE = ["super_admin", "event_admin", "campaign_manager", "issuer"];
+
 // Event routes
 router.post(
   "/",
@@ -106,7 +118,7 @@ router.delete(
 router.post(
   "/:eventId/holders",
   protect,
-  authorize("super_admin", "event_admin", "campaign_manager"),
+  authorize(...CAN_ISSUE),
   holderController.createHolder,
 );
 router.get("/:eventId/holders", protect, holderController.getHolders);
@@ -114,7 +126,7 @@ router.get("/:eventId/holders/export", protect, holderController.exportHolders);
 router.post(
   "/:eventId/holders/bulk",
   protect,
-  authorize("super_admin", "event_admin"),
+  authorize(...CAN_ISSUE),
   upload.single("file"),
   holderController.bulkImportHolders,
 );

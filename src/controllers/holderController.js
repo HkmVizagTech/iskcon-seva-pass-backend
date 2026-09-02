@@ -24,6 +24,51 @@ const User = require("../models/User");
 const qrService = require("../services/qrService");
 const whatsappService = require("../services/whatsappService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
+const {
+  checkIssuePermission,
+  isLimitedToOwnHolders,
+  isEventAllowed,
+} = require("../utils/issuePermissions");
+
+// Refuses a read for an event this account is not assigned to. Returns true
+// when it has already answered the request.
+function blockedByEventScope(req, res, eventId) {
+  if (isEventAllowed(req.user, eventId)) return false;
+  res.status(403).json({
+    code: "EVENT_NOT_ALLOWED",
+    error: "Your account is not assigned to this event.",
+  });
+  return true;
+}
+
+// Same guard for a SINGLE holder reached directly by id, covering both limits:
+// the event it belongs to, and "own passes only".
+//
+// Without this, an account restricted to its own passes at one event could
+// still read any devotee's name, phone and email by holder id or QR id — the
+// list was scoped but these detail endpoints were not.
+function blockedByHolderScope(req, res, holder) {
+  const eventId = holder?.eventId?._id || holder?.eventId;
+  if (!isEventAllowed(req.user, eventId)) {
+    res.status(403).json({
+      code: "EVENT_NOT_ALLOWED",
+      error: "Your account is not assigned to this event.",
+    });
+    return true;
+  }
+  if (isLimitedToOwnHolders(req.user)) {
+    const issuedBy = String(holder?.issuedBy?._id || holder?.issuedBy || "");
+    const me = String(req.user._id || req.user.userId || "");
+    if (issuedBy !== me) {
+      res.status(403).json({
+        code: "NOT_YOUR_HOLDER",
+        error: "Your account can only view passes it issued.",
+      });
+      return true;
+    }
+  }
+  return false;
+}
 
 // ─── Helper: look up a preacher's phone for the community app's
 // devotee_mobile_number field (identifies which preacher's devotee this
@@ -54,6 +99,12 @@ exports.getQRDetails = async (req, res) => {
     if (!qrPass) {
       return res.status(404).json({ error: "QR pass not found" });
     }
+
+    // The QR carries the holder's name/phone/email — same scope rules as
+    // reading the holder directly.
+    const scopeHolder = await Holder.findById(qrPass.holderId?._id || qrPass.holderId)
+      .select("eventId issuedBy").lean();
+    if (scopeHolder && blockedByHolderScope(req, res, scopeHolder)) return;
 
     res.json({ qrPass });
   } catch (error) {
@@ -103,6 +154,16 @@ exports.resendQR = async (req, res) => {
     if (!qrPass) return res.status(404).json({ error: "QR pass not found" });
     if (!qrPass.holderId)
       return res.status(400).json({ error: "Holder not found" });
+
+    // A restricted account must not be able to reach a delivery channel via
+    // "resend" that it is barred from at issue time.
+    const resendDenied = await checkIssuePermission(req.user, {
+      catId: qrPass.catId,
+      deliveryMethod: deliveryMethod || "none",
+    });
+    if (resendDenied) {
+      return res.status(resendDenied.status).json(resendDenied.body);
+    }
 
     const holder = qrPass.holderId;
     const evt = qrPass.eventId;
@@ -164,10 +225,18 @@ exports.getHolders = async (req, res) => {
   try {
     const { eventId } = req.params;
     const { search, catId, page = 1, limit = 20 } = req.query;
+    if (blockedByEventScope(req, res, eventId)) return;
 
     const query = { eventId };
 
     if (catId) query.catId = catId;
+
+    // Restricted accounts see only the passes they issued themselves.
+    // Applied to the query (not the response) so the pagination total is
+    // correct too, and so it cannot be bypassed by paging.
+    if (isLimitedToOwnHolders(req.user)) {
+      query.issuedBy = req.user._id || req.user.userId;
+    }
 
     if (search) {
       query.$or = [
@@ -235,6 +304,8 @@ exports.getHolderDetails = async (req, res) => {
     if (!holder) {
       return res.status(404).json({ error: "Holder not found" });
     }
+
+    if (blockedByHolderScope(req, res, holder)) return;
 
     const qrPass = await QRPass.findOne({ holderId: holder._id }).populate(
       "entryPoints",
@@ -369,6 +440,19 @@ exports.createHolder = async (req, res) => {
     // Resolve pass type to check if it's a Sponsor type (catCode SP)
     const categoryForCheck = await HolderType.findById(catId).select("catCode name").lean();
     const isSponsorCategory = (categoryForCheck?.catCode || "").toUpperCase() === "SP";
+
+    // ── Per-account issue restrictions ───────────────────────────────────────
+    // Checked before anything is written. `deliveryMethod || "none"` matches
+    // the effective value used below — without that default, an account barred
+    // from "none" could slip a pass through simply by omitting the field.
+    const denied = await checkIssuePermission(req.user, {
+      eventId,
+      holderType: categoryForCheck,
+      deliveryMethod: deliveryMethod || "none",
+    });
+    if (denied) {
+      return res.status(denied.status).json(denied.body);
+    }
 
     // Resolve SevaSlot from the slot code (sponsors only)
     const sevaSlot = (isSponsorCategory && incomingSlotCode)
@@ -661,7 +745,14 @@ exports.createHolder = async (req, res) => {
 exports.exportHolders = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const holders = await Holder.find({ eventId }).populate("catId", "name");
+    if (blockedByEventScope(req, res, eventId)) return;
+    // Export honours the same "own passes only" limit as the list — otherwise
+    // it would be a one-click way around it.
+    const exportQuery = { eventId };
+    if (isLimitedToOwnHolders(req.user)) {
+      exportQuery.issuedBy = req.user._id || req.user.userId;
+    }
+    const holders = await Holder.find(exportQuery).populate("catId", "name");
 
     // Single batch query
     const holderIds = holders.map((h) => h._id);
@@ -714,6 +805,21 @@ exports.bulkImportHolders = async (req, res) => {
     const category =
       await HolderType.findById(categoryId).populate("entryPoints");
     if (!category) return res.status(404).json({ error: "Pass type not found" });
+
+    // ── Per-account issue restrictions ───────────────────────────────────────
+    // Bulk import is the obvious bypass route for a restricted account — it
+    // reaches the same holder-creation code with its own type and delivery
+    // choice — so it is checked with exactly the same rules as single issue,
+    // before the uploaded file is even parsed.
+    const bulkDenied = await checkIssuePermission(req.user, {
+      eventId,
+      holderType: category,
+      deliveryMethod: deliveryMethod || "none",
+    });
+    if (bulkDenied) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+      return res.status(bulkDenied.status).json(bulkDenied.body);
+    }
 
     let records = [];
     const filePath = req.file.path;
@@ -887,6 +993,7 @@ exports.getCategoryEntryPoints = async (req, res) => {
 exports.getFailedImports = async (req, res) => {
   try {
     const FailedImport = require("../models/FailedImport");
+    if (blockedByEventScope(req, res, req.params.eventId)) return;
     const imports = await FailedImport.find({ eventId: req.params.eventId })
       .sort({ createdAt: -1 })
       .limit(20);

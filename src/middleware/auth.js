@@ -44,4 +44,24 @@ const authorize = (...roles) => {
   };
 };
 
-module.exports = { protect, authorize };
+// Gates a route on a boolean permission flag on the User document
+// (canViewReports, canViewScanFeed, ...).
+//
+// Only an explicit `false` denies, so a flag absent from an older user document
+// behaves as allowed — same reasoning as the schema defaults. super_admin
+// always passes, so an admin can never lock themselves out of their own system.
+const requirePermission = (flag) => {
+  return (req, res, next) => {
+    if (String(req.user?.role || "") === "super_admin") return next();
+    if (req.user?.[flag] === false) {
+      return res.status(403).json({
+        code: "PERMISSION_DENIED",
+        permission: flag,
+        error: "Your account does not have access to this section.",
+      });
+    }
+    next();
+  };
+};
+
+module.exports = { protect, authorize, requirePermission };
