@@ -30,7 +30,20 @@ const holderSchema = new mongoose.Schema({
 
   // Category tier — A / B / C / NONE. For sponsors drives bahumana gift/kit.
   // Applies to any pass type (sponsors, donors, invitees, etc.).
-  subCategory: { type: String, trim: true, uppercase: true },
+  // Part of the uniqueness key (see index below), so "no category" MUST always
+  // store as undefined — never as "" or "NONE". Otherwise two passes that are
+  // both "no category" index as different values and both slip through.
+  subCategory: {
+    type: String,
+    trim: true,
+    uppercase: true,
+    set: (v) => {
+      const s = (v === null || v === undefined ? "" : String(v))
+        .trim()
+        .toUpperCase();
+      return !s || s === "NONE" || s === "N/A" || s === "-" ? undefined : s;
+    },
+  },
 
   source: {
     type: String,
@@ -103,10 +116,24 @@ const holderSchema = new mongoose.Schema({
 });
 
 holderSchema.index({ preacherId: 1 }); // for scoped preacher reports
-// FIX: unique index prevents race-condition duplicate QR passes
-// Two concurrent imports for the same phone+event will now get a clear E11000
-// instead of silently creating duplicate records
-holderSchema.index({ eventId: 1, phone: 1 }, { unique: true });
+
+// ── Uniqueness: one pass per number per (holder type + category) per event ───
+// A single number MAY hold several passes for the same event, as long as each
+// is a different holder type or a different category:
+//     Sponsor category A  +  Sponsor category B   → both allowed
+//     Sponsor category A  +  Donor / Volunteer     → both allowed
+//     Sponsor category A  +  Sponsor category A    → blocked (E11000)
+// Holder types with no category (volunteer, general public) have subCategory
+// undefined, which indexes as null — so they still get exactly one pass each.
+// Seva slot is deliberately NOT in the key: it is timing/seating only.
+// Replaces the old { eventId, phone } unique index, which allowed only one
+// holder record per number per event and made the above impossible.
+holderSchema.index(
+  { eventId: 1, phone: 1, catId: 1, subCategory: 1 },
+  { unique: true, name: "uniq_event_phone_type_category" },
+);
+// Non-unique: still needed for "find every pass on this number" lookups.
+holderSchema.index({ eventId: 1, phone: 1 });
 holderSchema.index({ eventId: 1 });
 
 module.exports = mongoose.model("Holder", holderSchema);

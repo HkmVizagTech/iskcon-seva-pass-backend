@@ -376,44 +376,50 @@ exports.createHolder = async (req, res) => {
       : null;
 
     // ── Duplicate check ──────────────────────────────────────────────────────
-    // Sponsor: one QR per phone per SEVA SLOT (timing). Same phone + same slot
-    //   = block. Same phone + different slot = allow (they attend two sevas).
-    //   Tier does NOT affect duplicate logic — it's just the bahumana.
-    // Non-sponsor: one QR per phone per event.
-    const existingHolders = await Holder.find({ eventId, phone: normPhone })
-      .select("_id name subCategory sevaSlotId").lean();
+    // One active pass per number per (holder type + category) per event:
+    //   same number + Sponsor cat A, twice           → block
+    //   same number + Sponsor A, then Sponsor B / C  → allow
+    //   same number + Sponsor A, then Donor          → allow
+    //   same number + Volunteer, twice               → block (no category)
+    // Matches the uniq_event_phone_type_category index on Holder. Seva slot is
+    // NOT part of the key — it is timing/seating only.
+    const duplicateHolder = await Holder.findOne({
+      eventId,
+      phone: normPhone,
+      catId,
+      // Legacy rows may hold "" where new rows hold undefined — treat both as
+      // "no category" so the app check agrees with the unique index.
+      ...(incomingTier
+        ? { subCategory: incomingTier }
+        : { subCategory: { $in: [null, ""] } }),
+    }).select("_id name subCategory");
 
-    for (const existing of existingHolders) {
-      if (isSponsorCategory) {
-        // Compare by seva slot (timing), not tier
-        const existingSlotId = existing.sevaSlotId ? String(existing.sevaSlotId) : "";
-        const incomingSlotId = sevaSlot ? String(sevaSlot._id) : "";
-        const sameSlot =
-          (incomingSlotId && existingSlotId && incomingSlotId === existingSlotId) ||
-          (!incomingSlotId && !existingSlotId);
-        if (!sameSlot) continue; // different slot — allow new QR
-      }
+    const overrideReasonText = (req.body.overrideReason || "").toString().trim();
 
-      const existingQR = await QRPass.findOne({ holderId: existing._id, status: "active" })
-        .select("qrId").lean();
-      if (!existingQR) continue;
+    if (duplicateHolder) {
+      const existingQR = await QRPass.findOne({
+        holderId: duplicateHolder._id,
+        status: "active",
+      }).select("qrId").lean();
 
-      const reason = (req.body.overrideReason || "").toString().trim();
-      if (!reason) {
-        const code = isSponsorCategory ? "DUPLICATE_SEVA_SLOT" : "DUPLICATE_PHONE";
-        const slotLabel = sevaSlot ? (sevaSlot.name || incomingSlotCode) : "this seva slot";
+      if (existingQR && !overrideReasonText) {
+        const passLabel = [
+          categoryForCheck?.name || "pass",
+          incomingTier ? `category ${incomingTier}` : null,
+        ].filter(Boolean).join(" · ");
         return res.status(409).json({
-          code,
-          error: isSponsorCategory
-            ? `An active pass for "${slotLabel}" already exists for this phone number.`
-            : "An active pass already exists for this phone number at this event.",
-          hint: isSponsorCategory
-            ? "To issue a replacement, provide a reason. To add a different seva slot, change the Seva Slot."
-            : "To issue a replacement, provide a reason (e.g. 'Lost phone').",
+          code: "DUPLICATE_PASS",
+          error: `An active "${passLabel}" pass already exists for this phone number at this event.`,
+          hint:
+            "This number can still be issued a pass under a different holder " +
+            "type or a different category. To REPLACE the existing pass " +
+            "instead, provide a reason (e.g. 'Lost phone') — the old QR will " +
+            "be revoked.",
           existing: {
-            holderId: existing._id,
-            holderName: existing.name,
-            subCategory: existing.subCategory || null,
+            holderId: duplicateHolder._id,
+            holderName: duplicateHolder.name,
+            holderTypeName: categoryForCheck?.name || null,
+            subCategory: duplicateHolder.subCategory || null,
             qrId: existingQR.qrId,
           },
         });
@@ -430,30 +436,73 @@ exports.createHolder = async (req, res) => {
         ? await EntryPoint.find({ _id: { $in: entryPoints }, eventId })
         : category.entryPoints;
 
-    const holder = await Holder.create({
+    const holderFields = {
       eventId,
       catId,
       name,
-      phone: normalisePhone(phone) || phone,
+      phone: normPhone,
       email,
-      whatsappNumber: normalisePhone(phone) || phone,
+      whatsappNumber: normPhone,
       // Denormalized label derived from the pass type (shared codeMap)
       holderType: deriveHolderTypeLabel(category),
       lifetimeDonation: Number(lifetimeDonation || 0),
       issuedBy: req.user?._id || req.user?.userId,
-      // FIX: normalise phone so duplicate detection works across manual + bulk imports
-      overrideReason,
       preacher: preacher || "",
       preacherId: preacherId || null,
       venueName: venueName || primaryVenue?.name || "",
-      // Category tier (A/B/C) — applies to any pass type
+      // Category tier (A/B/C) — applies to any pass type, part of the uniqueness key
       subCategory: incomingTier || undefined,
-      // Seva slot (timing) — sponsors only
-      sevaSlotId: isSponsorCategory ? (sevaSlot?._id || undefined) : undefined,
-      // Reason given when issuing a second pass to the same phone number
-      overrideReason: (req.body.overrideReason || "").toString().trim() || undefined,
+      // Seva slot (timing) — sponsors only, NOT part of the uniqueness key
+      sevaSlotId: isSponsorCategory ? sevaSlot?._id || undefined : undefined,
+      // Reason given when replacing an existing pass on the same number
+      overrideReason: overrideReasonText || undefined,
       instruction: incomingInstruction || undefined,
-    });
+    };
+
+    let holder;
+    if (duplicateHolder) {
+      // Replacement issue (override reason supplied, or the previous pass was
+      // already revoked/expired). One holder record exists per
+      // number+type+category, so we revoke the old QR and re-issue on the SAME
+      // record rather than inserting a second one that the unique index would
+      // reject anyway.
+      await QRPass.updateMany(
+        { holderId: duplicateHolder._id, status: "active" },
+        { $set: { status: "revoked", updatedAt: new Date() } },
+      );
+      // Mongoose drops undefined values from an update, so a field cleared on
+      // the replacement (seva slot removed, instruction blanked) would silently
+      // keep its old value. Split the payload into $set / $unset explicitly.
+      const $set = {};
+      const $unset = {};
+      for (const [k, v] of Object.entries(holderFields)) {
+        if (v === undefined) $unset[k] = "";
+        else $set[k] = v;
+      }
+      holder = await Holder.findByIdAndUpdate(
+        duplicateHolder._id,
+        {
+          ...(Object.keys($set).length ? { $set } : {}),
+          ...(Object.keys($unset).length ? { $unset } : {}),
+        },
+        { new: true, runValidators: true },
+      );
+    } else {
+      try {
+        holder = await Holder.create(holderFields);
+      } catch (createErr) {
+        // Race: a concurrent request created the same number+type+category.
+        if (createErr.code === 11000) {
+          return res.status(409).json({
+            code: "DUPLICATE_PASS",
+            error:
+              "A pass for this phone number, holder type and category was just " +
+              "created by another request. Reload and check before retrying.",
+          });
+        }
+        throw createErr;
+      }
+    }
 
     const qrId = await qrService.generateQRId(
       event.eventCode,
@@ -683,8 +732,13 @@ exports.bulkImportHolders = async (req, res) => {
       total: records.length,
       success: [],
       failed: [],
+      // Rows that already had an active pass for this number + holder type +
+      // category. Tracked separately so `total` reconciles as
+      // success + skipped + failed instead of leaving an unexplained gap.
+      skipped: [],
       successCount: 0,
       failedCount: 0,
+      skippedCount: 0,
     };
 
     for (let i = 0; i < records.length; i++) {
@@ -699,7 +753,10 @@ exports.bulkImportHolders = async (req, res) => {
           preacherId || null,
           { skipStoreQrCode: false },
         );
-        if (result.success) {
+        if (result.skipped) {
+          results.skipped.push(result);
+          results.skippedCount++;
+        } else if (result.success) {
           results.success.push(result);
           results.successCount++;
         } else {
@@ -761,6 +818,7 @@ exports.bulkImportHolders = async (req, res) => {
       stats: {
         total: results.total,
         success: results.successCount,
+        skipped: results.skippedCount,
         failed: results.failedCount,
       },
       summary: {
@@ -768,6 +826,12 @@ exports.bulkImportHolders = async (req, res) => {
           name: r.name,
           phone: r.phone,
           qrId: r.qrId,
+        })),
+        skippedList: results.skipped.map((r) => ({
+          name: r.name,
+          phone: r.phone,
+          qrId: r.qrId,
+          reason: r.reason || "Duplicate pass for this holder type and category",
         })),
         failedList: results.failed.map((r) => ({
           name: r.name,
@@ -916,71 +980,120 @@ async function processSingleRecord(
         ? "91" + phone.replace(/[\+\s\-\(\)]/g, "")
         : phone.replace(/[\+\s\-\(\)]/g, "");
 
-    // Duplicate check:
-    // - Sponsor category (catCode SP): one QR per phone per seva slot (SubCategory)
-    //   Same phone + same SubCategory = skip. Different SubCategory = new QR.
-    // - All other categories: one QR per phone per event (SubCategory ignored)
+    // Duplicate check — one QR per number per (holder type + category) per
+    // event. The whole file imports under ONE holder type (category._id), so
+    // here the per-row discriminator is the Category/Tier column:
+    //   same number, same tier      → skip (already has this pass)
+    //   same number, different tier → new QR
+    //   no tier column at all       → one QR per number for this holder type
+    // Seva slot (SubCategory column) does NOT affect duplicate logic.
     const isSponsor = (category.catCode || "").toUpperCase() === "SP";
 
-    const existingHoldersForPhone = await Holder.find({
+    // Legacy rows may hold "" where new rows hold undefined — match both.
+    const tierFilter = tier
+      ? { subCategory: tier }
+      : { subCategory: { $in: [null, ""] } };
+
+    const duplicateHolder = await Holder.findOne({
       eventId: event._id,
       phone: formattedPhone,
-    }).select("_id sevaSlotId").lean();
+      catId: category._id,
+      ...tierFilter,
+    }).select("_id");
 
-    let skippedQrId = null;
-    for (const eh of existingHoldersForPhone) {
-      // Sponsor: dedup by seva SLOT (timing). Non-sponsor: any existing = skip.
-      let isMatch = true;
-      if (isSponsor) {
-        const ehSlotId = eh.sevaSlotId ? String(eh.sevaSlotId) : "";
-        const inSlotId = sevaSlot ? String(sevaSlot._id) : "";
-        isMatch = (inSlotId && ehSlotId && inSlotId === ehSlotId) || (!inSlotId && !ehSlotId);
+    if (duplicateHolder) {
+      const existingQR = await QRPass.findOne({
+        holderId: duplicateHolder._id,
+        status: "active",
+      }).select("qrId").lean();
+      if (existingQR) {
+        return {
+          success: true,
+          skipped: true,
+          name,
+          phone: formattedPhone,
+          qrId: existingQR.qrId,
+          reason: tier
+            ? `Already has an active "${category.name} · category ${tier}" pass`
+            : `Already has an active "${category.name}" pass`,
+        };
       }
-      if (!isMatch) continue;
-      const existingQR = await QRPass.findOne({ holderId: eh._id, status: "active" }).select("qrId").lean();
-      if (existingQR) { skippedQrId = existingQR.qrId; break; }
     }
-    if (skippedQrId)
-      return { success: true, name, phone: formattedPhone, qrId: skippedQrId, skipped: true };
 
     let holder = null;
 
-    try {
-      holder = await Holder.create({
-          eventId: event._id,
-          catId: category._id,
-          name,
-          phone: formattedPhone,
-          whatsappNumber: formattedPhone,
-          holderType: deriveHolderTypeLabel(category),
-          source: "bulk_import",
-          subCategory: tier || undefined,                                    // category tier (A/B/C/NONE — any pass type)
-          sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,  // seva slot (timing — sponsors only)
-          preacher: preacher || "",
-          // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
-          preacherId: csvPreacherId || bulkPreacherId || null,
-          venueName: venue || event.venue?.[0]?.name || "",
-          notes:
-            [sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode]
-              .filter(Boolean)
-              .join(" | ") || undefined,
-          customFields: { sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode },
-          instruction: rowInstruction || undefined,
-          issuedBy: userId,
-        });
+    const rowHolderFields = {
+      eventId: event._id,
+      catId: category._id,
+      name,
+      phone: formattedPhone,
+      whatsappNumber: formattedPhone,
+      holderType: deriveHolderTypeLabel(category),
+      source: "bulk_import",
+      subCategory: tier || undefined,                                    // category tier (A/B/C — part of the uniqueness key)
+      sevaSlotId: isSponsor ? (sevaSlot?._id || undefined) : undefined,  // seva slot (timing only — not part of the key)
+      preacher: preacher || "",
+      // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
+      preacherId: csvPreacherId || bulkPreacherId || null,
+      venueName: venue || event.venue?.[0]?.name || "",
+      notes:
+        [sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode]
+          .filter(Boolean)
+          .join(" | ") || undefined,
+      customFields: { sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode },
+      instruction: rowInstruction || undefined,
+      issuedBy: userId,
+    };
+
+    if (duplicateHolder) {
+      // Holder record exists for this number+type+tier but has no active pass
+      // (revoked/expired). Re-use the record — a second insert would be
+      // rejected by the unique index. $set/$unset split so fields cleared on
+      // this import don't silently keep their old values.
+      const $set = {};
+      const $unset = {};
+      for (const [k, v] of Object.entries(rowHolderFields)) {
+        if (v === undefined) $unset[k] = "";
+        else $set[k] = v;
+      }
+      holder = await Holder.findByIdAndUpdate(
+        duplicateHolder._id,
+        {
+          ...(Object.keys($set).length ? { $set } : {}),
+          ...(Object.keys($unset).length ? { $unset } : {}),
+        },
+        { new: true, runValidators: true },
+      );
+    } else {
+      try {
+        holder = await Holder.create(rowHolderFields);
       } catch (createErr) {
-        // FIX: unique index race condition — another request already created this holder
+        // Race condition — a concurrent request created this exact
+        // number+type+tier between our check and this insert.
         if (createErr.code === 11000) {
-          holder = await Holder.findOne({ eventId: event._id, phone: formattedPhone });
+          holder = await Holder.findOne({
+            eventId: event._id,
+            phone: formattedPhone,
+            catId: category._id,
+            ...tierFilter,
+          });
           if (!holder) throw createErr;
           const existingQR = await QRPass.findOne({ holderId: holder._id, status: "active" });
           if (existingQR) {
-            return { success: true, skipped: true, name, phone: formattedPhone, qrId: existingQR.qrId };
+            return {
+              success: true,
+              skipped: true,
+              name,
+              phone: formattedPhone,
+              qrId: existingQR.qrId,
+              reason: "Already issued by a concurrent request",
+            };
           }
         } else {
           throw createErr;
         }
       }
+    }
 
     const qrId = await qrService.generateQRId(
       event.eventCode,

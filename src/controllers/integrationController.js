@@ -197,7 +197,15 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         // Scoped to this endpoint, so only VOLUNTEER passes ever rotate.
         // Sponsor/donor/invitee passes are issued elsewhere and untouched.
         let reissued = false;
-        const existingHolder = await Holder.findOne({ eventId: event._id, phone });
+        // Scoped to THIS pass type (and its "no category" slot) so a devotee
+        // who already holds a sponsor or donor pass on the same number still
+        // gets their volunteer pass. Volunteer passes carry no category.
+        const existingHolder = await Holder.findOne({
+          eventId: event._id,
+          phone,
+          catId: category._id,
+          subCategory: { $in: [null, ""] },
+        });
         if (existingHolder) {
           const existingPass = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
           if (existingPass) {
@@ -238,18 +246,16 @@ exports.generateVolunteerQRBulk = async (req, res) => {
             });
           } catch (e) {
             if (e.code === 11000) {
-              holder = await Holder.findOne({ eventId: event._id, phone });
+              holder = await Holder.findOne({
+                eventId: event._id, phone,
+                catId: category._id, subCategory: { $in: [null, ""] },
+              });
               if (!holder) { results.push({ success: false, error: e.message, input: h }); continue; }
             } else { throw e; }
           }
-        } else if (String(holder.catId) !== String(category._id)) {
-          // Holder was created under a different pass type (e.g. the old INV
-          // fallback). Realign it with the pass we are about to issue so
-          // reports grouping by holderType match the QR's catCode.
-          holder.catId = category._id;
-          holder.holderType = deriveHolderTypeLabel(category);
-          await holder.save();
         }
+        // NOTE: the old catId-realignment branch is gone — existingHolder is
+        // now looked up by catId, so it can only ever be this pass type.
 
         const qrId = await qrService.generateQRId(event.eventCode, category.catCode);
         const payload = qrService.createPayload({ ...holder.toObject(), qrId }, event, category, entryPoints);
@@ -678,8 +684,28 @@ exports.sevaPassIssue = async (req, res) => {
       return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
     }
 
-    // ── Check if holder already has an active pass ──────────────────────────
-    const existingHolder = await Holder.findOne({ eventId: event._id, phone });
+    // ── Resolve category: prefer the one sent by the Seva Pass app ─────────
+    // Resolved BEFORE the duplicate check, because "already has a pass" is now
+    // scoped to a pass type, not to the number alone.
+    const category = await resolveCategory(event._id, categoryParam);
+    if (!category) {
+      return res.status(400).json({
+        status: false,
+        message: "No suitable category found for this event. Please configure a General Public or Volunteer category.",
+      });
+    }
+
+    // ── Check if holder already has an active pass OF THIS TYPE ─────────────
+    // Scoped to catId + "no category", matching the
+    // uniq_event_phone_type_category index on Holder. A number that already
+    // holds e.g. a Sponsor category A pass still gets its own pass here — only
+    // a second pass of the SAME type and category returns the existing one.
+    const existingHolder = await Holder.findOne({
+      eventId: event._id,
+      phone,
+      catId: category._id,
+      subCategory: { $in: [null, ""] },
+    });
     if (existingHolder) {
       const existingPass = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
       if (existingPass) {
@@ -697,15 +723,6 @@ exports.sevaPassIssue = async (req, res) => {
           qr_id: existingPass.qrId,
         });
       }
-    }
-
-    // ── Resolve category: prefer the one sent by the Seva Pass app ─────────
-    const category = await resolveCategory(event._id, categoryParam);
-    if (!category) {
-      return res.status(400).json({
-        status: false,
-        message: "No suitable category found for this event. Please configure a General Public or Volunteer category.",
-      });
     }
 
     const entryPoints = category.entryPoints || [];
@@ -741,12 +758,23 @@ exports.sevaPassIssue = async (req, res) => {
       ...(preacher ? { thirdPartyAttribution: preacher } : {}),
     };
 
-    let holder;
+    let holder = existingHolder || null;
     try {
-      holder = await Holder.create(holderData);
+      // existingHolder here means "record exists for this number+type but its
+      // pass is revoked/expired" — re-use it, since a second insert for the
+      // same number+type+category is rejected by the unique index.
+      if (holder) {
+        holder.set(holderData);
+        await holder.save();
+      } else {
+        holder = await Holder.create(holderData);
+      }
     } catch (e) {
       if (e.code === 11000) {
-        holder = await Holder.findOne({ eventId: event._id, phone });
+        holder = await Holder.findOne({
+          eventId: event._id, phone,
+          catId: category._id, subCategory: { $in: [null, ""] },
+        });
         if (!holder) throw e;
         if (resolvedName && holder.name !== resolvedName) {
           holder.name = resolvedName;
