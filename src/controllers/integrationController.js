@@ -12,6 +12,7 @@ const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
+const whatsappService = require("../services/whatsappService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
 // Same resolver the CSV importer uses: short code first, then name.
 const { resolvePreacherFromString } = require("./preacherController");
@@ -29,6 +30,30 @@ function normalisePhone(phone) {
   if (digits.length === 12 && digits.startsWith("91")) return digits;
   if (digits.length === 11 && digits.startsWith("0")) return "91" + digits.slice(1);
   return digits;
+}
+
+// ── Automatic WhatsApp delivery for Seva Pass app issuances ─────────────────
+// Gupshup is already wired up (see services/whatsappService.js — the same
+// service the admin dashboard uses for deliveryMethod=whatsapp). Every pass
+// the Seva Pass app issues should also reach the devotee on WhatsApp without
+// an admin doing anything, exactly as if it had been issued with
+// deliveryMethod=whatsapp from the dashboard.
+//
+// Fire-and-forget on purpose: this endpoint's real job is handing the QR
+// straight back to the app, which already displays it — a slow or failing
+// WhatsApp API call must never delay or fail that response.
+function autoSendWhatsApp(phone, qrImage, holderName, event, passDetails) {
+  whatsappService
+    .sendQRMessage(phone, qrImage, holderName, event.name, passDetails)
+    .then(() => {
+      console.log(`[SevaPass] WhatsApp auto-delivered to ${phone} (qr ${passDetails.qrId})`);
+    })
+    .catch((e) => {
+      console.error(
+        `[SevaPass] WhatsApp auto-delivery failed for ${phone} (qr ${passDetails.qrId}):`,
+        e.message,
+      );
+    });
 }
 
 // Helper: the UTC instant of today's midnight in IST (Asia/Kolkata, UTC+5:30).
@@ -818,6 +843,18 @@ exports.sevaPassIssue = async (req, res) => {
     if (["SP", "DN", "INV"].includes(catCode)) {
       thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
     }
+
+    // Auto-deliver over WhatsApp too — see autoSendWhatsApp() above. Not sent
+    // for the "pass already existed, returning it as-is" branch further up —
+    // only for a genuine new issuance, so re-opening the app doesn't re-send
+    // the same pass on WhatsApp every time.
+    autoSendWhatsApp(phone, qrImage, holder.name, event, {
+      entryPoints: entryPoints.map((ep) => ep.name || ep.stationLabel),
+      qrId,
+      validFrom: event.dateStart ? event.dateStart.toISOString() : "",
+      validUntil: event.dateEnd ? event.dateEnd.toISOString() : "",
+      venue: allowedVenues[0] || venue || (event.venue?.[0]?.name || ""),
+    });
 
     const venueLabel = venue ? ` at ${venue}` : "";
     console.log(`[SevaPass] QR generated for ${phone} (${resolvedName}) at event ${event.eventCode} [${category.catCode}]${venueLabel}`);
