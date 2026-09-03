@@ -156,20 +156,17 @@ class WhatsAppService {
     // is now reported honestly instead of recorded as "sent" (see _sendFlaxxa).
     const gupshupTemplateId = useGupshup && passDetails.qrId
       ? (isSponsor
-          // NOTE: corrected on 2026-09-03 — a9fd6274-a5ec-49f4-bd36-2fb3aee66611
-          // was the wrong ID (message got a "submitted" status from Gupshup
-          // but never actually reached WhatsApp). This ID IS the confirmed
-          // approved sponsor template.
-          ? (process.env.GUPSHUP_TEMPLATE_SPONSOR || "2ef7edc8-bed6-45f3-9688-8b6ff0fa0710")
-          // "qr_issue_skj" — same 4 params as the sponsor template (Name,
-          // Event, Date, Venue). Approved in Gupshup as of 2026-09-03.
-          // NOTE: this ID was corrected on 2026-09-03 — the user supplied a
-          // second, different template ID for the same approved message text
-          // (likely Gupshup's actual template ID vs. an earlier WhatsApp
-          // Business Manager ID). This hardcoded ID IS the approved template,
-          // so General/Donor/Invitee/Volunteer sends now go through Gupshup
-          // with no further deploy.
-          : (process.env.GUPSHUP_TEMPLATE_GENERAL || "3011315279202116"))
+          // Verified directly on Gupshup's own dashboard (not Meta Business
+          // Manager) on 2026-09-03 — this IS the correct Gupshup-native
+          // template ID for the Sponsor pass message.
+          ? (process.env.GUPSHUP_TEMPLATE_SPONSOR || "a9fd6274-a5ec-49f4-bd36-2fb3aee66611")
+          // Verified directly on Gupshup's own dashboard on 2026-09-03 — this
+          // IS the correct Gupshup-native template ID for the General pass
+          // message (everyone except Sponsor: Donor/Invitee/Volunteer/etc).
+          // 3011315279202116 (used briefly earlier today) was a MISTAKE —
+          // that is a Meta Business Manager template ID, not a Gupshup one,
+          // and Gupshup's API does not recognise it as a valid template.
+          : (process.env.GUPSHUP_TEMPLATE_GENERAL || "2ef7edc8-bed6-45f3-9688-8b6ff0fa0710"))
       : null;
 
     if (gupshupTemplateId) {
