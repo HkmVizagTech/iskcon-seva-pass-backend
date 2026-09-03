@@ -37,6 +37,29 @@ function validateShortCode(code) {
  * Tries shortCode first (exact, case-insensitive), then name.
  * Preacher is NOT scoped to an event — they work across all festivals.
  */
+// Every route by which a pass can end up attributed to a preacher:
+//   preacherId  — dashboard dropdown, and the Seva Pass app
+//   issuedBy    — the Seva Pass app records the preacher as the issuer, which
+//                 is how passes they raised themselves in the app are found
+//   preacher    — free text: the CSV import column, or the code/name the app
+//                 sends. Matched against both their name and their short code.
+//
+// Shared by getMyHolders and getMyStats so the list and the counts can never
+// disagree about what belongs to this preacher.
+function buildPreacherHolderQuery(user) {
+  const aliases = [
+    new RegExp(`^${escapeRegExp(user.name)}$`, "i"),
+    ...(user.shortCode ? [new RegExp(`^${escapeRegExp(user.shortCode)}$`, "i")] : []),
+  ];
+  return {
+    $or: [
+      { preacherId: user._id },
+      { issuedBy: user._id },
+      { preacher: { $in: aliases } },
+    ],
+  };
+}
+
 async function resolvePreacherFromString(value) {
   if (!value || !value.trim()) return null;
   const v = value.trim();
@@ -60,6 +83,8 @@ async function resolvePreacherFromString(value) {
 }
 
 module.exports.resolvePreacherFromString = resolvePreacherFromString;
+// Exported so scanController can apply the same attribution rules.
+module.exports.buildPreacherHolderQuery = buildPreacherHolderQuery;
 
 // ─── Admin CRUD ───────────────────────────────────────────────────────────────
 
@@ -266,23 +291,20 @@ exports.preacherLogin = async (req, res) => {
 
 exports.getMyHolders = async (req, res) => {
   try {
-    const { page = 1, limit = 20, search, eventId, category, bahumana } = req.query;
-    const preacherId = req.user._id;
-    const preacherName = req.user.name;
+    const { page = 1, limit = 20, search, eventId, eventCode, category, bahumana } = req.query;
 
-    // No event scoping — preacher sees all their holders across every festival
-    const query = {
-      $or: [
-        { preacherId },
-        { preacher: new RegExp(`^${preacherName}$`, "i") },
-        ...(req.user.shortCode
-          ? [{ preacher: new RegExp(`^${req.user.shortCode}$`, "i") }]
-          : []),
-      ],
-    };
+      // No event scoping — a preacher sees all their holders across every
+      // festival. Attribution rules live in buildPreacherHolderQuery.
+      const query = buildPreacherHolderQuery(req.user);
 
-    // Optional event filter (for preacher's own UI — not enforced)
-    if (eventId) query.eventId = eventId;
+      // Optional event filter — accept both main-system ObjectId (eventId)
+      // and event code (eventCode) for cross-app integration.
+      if (eventCode) {
+        const ev = await mongoose.model("Event").findOne({ eventCode: String(eventCode).toUpperCase() }).select("_id");
+        if (ev) query.eventId = ev._id;
+      } else if (eventId) {
+        query.eventId = eventId;
+      }
 
     // Optional category filter — by catCode (e.g. DN, INV, SP, VIP), exact name,
     // or category _id. Matches categories across all events since preachers
@@ -381,18 +403,7 @@ exports.getMyHolders = async (req, res) => {
 
 exports.getMyStats = async (req, res) => {
   try {
-    const preacherId = req.user._id;
-    const preacherName = req.user.name;
-
-    const holderQuery = {
-      $or: [
-        { preacherId },
-        { preacher: new RegExp(`^${preacherName}$`, "i") },
-        ...(req.user.shortCode
-          ? [{ preacher: new RegExp(`^${req.user.shortCode}$`, "i") }]
-          : []),
-      ],
-    };
+    const holderQuery = buildPreacherHolderQuery(req.user);
 
     const holders = await Holder.find(holderQuery).select("_id eventId").lean();
     const holderIds = holders.map((h) => h._id);
