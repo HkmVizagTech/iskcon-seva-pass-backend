@@ -1818,3 +1818,111 @@ exports.retryCommunitySync = async (req, res) => {
     res.status(500).json({ error: "Retry failed", detail: error.message });
   }
 };
+
+// ── Bulk resend WhatsApp with a new venue — for all active Sponsor QR ────────
+// passes on one event. Used when the venue changes after QRs have already
+// gone out, so every sponsor gets the correct venue in a fresh message.
+// POST /api/holders/events/:eventId/resend-sponsors
+// Body: { newVenue: "New Venue Hall" }
+exports.resendSponsorsWithNewVenue = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const newVenue = (req.body.newVenue || "").toString().trim();
+    if (!newVenue) {
+      return res.status(400).json({ error: "newVenue is required" });
+    }
+
+    const event = await Event.findById(eventId);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    // A restricted account must not be able to reach WhatsApp via this bulk
+    // path if it's barred from Sponsor/whatsapp at issue time.
+    const sponsorType = await HolderType.findOne({ eventId, catCode: "SP" });
+    if (!sponsorType) {
+      return res.status(404).json({ error: "No Sponsor category configured for this event" });
+    }
+    const resendDenied = await checkIssuePermission(req.user, {
+      catId: sponsorType._id,
+      deliveryMethod: "whatsapp",
+    });
+    if (resendDenied) {
+      return res.status(resendDenied.status).json(resendDenied.body);
+    }
+
+    const qrPasses = await QRPass.find({
+      eventId,
+      catId: sponsorType._id,
+      status: "active",
+    })
+      .populate("holderId")
+      .populate("entryPoints");
+
+    const results = { total: qrPasses.length, sent: 0, failed: 0, failedList: [] };
+
+    for (const qrPass of qrPasses) {
+      const holder = qrPass.holderId;
+      if (!holder || !(holder.phone || holder.whatsappNumber)) {
+        results.failed++;
+        results.failedList.push({ qrId: qrPass.qrId, error: "No holder/phone" });
+        continue;
+      }
+
+      try {
+        const validFrom = qrPass.validFrom || event.dateStart;
+        const validUntil = qrPass.validUntil || event.dateEnd;
+
+        const compactPayload = qrService.createPayload(
+          { ...holder.toObject(), qrId: qrPass.qrId },
+          event,
+          null,
+          qrPass.entryPoints,
+        );
+        const { image: qrImage } = await qrService.generateQRCode(compactPayload);
+
+        let sevaSlotDetails = null;
+        if (holder.sevaSlotId) {
+          sevaSlotDetails = await SevaSlot.findById(holder.sevaSlotId)
+            .select("code name time displayLabel").lean();
+        }
+
+        const passDetails = {
+          entryPoints: qrPass.entryPoints.map((ep) => ep.name || ep.stationLabel),
+          qrId: qrPass.qrId,
+          validFrom: validFrom.toISOString(),
+          validUntil: validUntil.toISOString(),
+          // The one override this endpoint exists for — everyone gets the
+          // same new venue, regardless of what was stored originally.
+          venue: newVenue,
+          sevaSlot: sevaSlotDetails,
+          tier: holder.subCategory || "",
+          isSponsor: true,
+        };
+
+        await whatsappService.sendQRMessage(
+          holder.phone || holder.whatsappNumber,
+          qrImage,
+          holder.name,
+          event.name,
+          passDetails,
+        );
+
+        // Keep the holder's own venue record consistent with what was just sent.
+        await Holder.findByIdAndUpdate(holder._id, { venueName: newVenue });
+
+        results.sent++;
+      } catch (e) {
+        results.failed++;
+        results.failedList.push({ qrId: qrPass.qrId, name: holder.name, error: e.message });
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: `Resent ${results.sent} of ${results.total} sponsor QR codes with venue "${newVenue}"`,
+      ...results,
+    });
+  } catch (error) {
+    console.error("resendSponsorsWithNewVenue error:", error);
+    res.status(500).json({ error: "Bulk resend failed", detail: error.message });
+  }
+};

@@ -34,6 +34,12 @@ router.post(
   authorize(...CAN_ISSUE),
   holderController.resendQR,
 );
+router.post(
+  "/events/:eventId/resend-sponsors",
+  protect,
+  authorize(...CAN_ISSUE),
+  holderController.resendSponsorsWithNewVenue,
+);
 
 // Bulk operations — an issuer may bulk import, but the same per-account
 // holder-type and delivery-method allow-lists are enforced in the controller
