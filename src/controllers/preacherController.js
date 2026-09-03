@@ -291,7 +291,7 @@ exports.preacherLogin = async (req, res) => {
 
 exports.getMyHolders = async (req, res) => {
   try {
-    const { page = 1, limit = 20, search, eventId, eventCode, category, bahumana } = req.query;
+    const { page = 1, limit = 20, search, eventId, eventCode, category, subCategory, bahumana } = req.query;
 
       // No event scoping — a preacher sees all their holders across every
       // festival. Attribution rules live in buildPreacherHolderQuery.
@@ -326,6 +326,12 @@ exports.getMyHolders = async (req, res) => {
       if (catIds.length > 0) query.catId = { $in: catIds };
       else query.catId = { $in: [] }; // no matches — return nothing
     }
+
+      // Optional sub-category tier filter — A / B / C (e.g. sponsor tiers).
+      if (subCategory) {
+        const s = String(subCategory).trim().toUpperCase();
+        query.subCategory = s;
+      }
 
     // Optional bahumana filter — yes = at least one granted scan at a
     // bahumana station; no = none yet. Applied on top of the base query
