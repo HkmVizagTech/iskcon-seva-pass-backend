@@ -156,7 +156,11 @@ class WhatsAppService {
     // is now reported honestly instead of recorded as "sent" (see _sendFlaxxa).
     const gupshupTemplateId = useGupshup && passDetails.qrId
       ? (isSponsor
-          ? (process.env.GUPSHUP_TEMPLATE_SPONSOR || "a9fd6274-a5ec-49f4-bd36-2fb3aee66611")
+          // NOTE: corrected on 2026-09-03 — a9fd6274-a5ec-49f4-bd36-2fb3aee66611
+          // was the wrong ID (message got a "submitted" status from Gupshup
+          // but never actually reached WhatsApp). This ID IS the confirmed
+          // approved sponsor template.
+          ? (process.env.GUPSHUP_TEMPLATE_SPONSOR || "2ef7edc8-bed6-45f3-9688-8b6ff0fa0710")
           // "qr_issue_skj" — same 4 params as the sponsor template (Name,
           // Event, Date, Venue). Approved in Gupshup as of 2026-09-03.
           // NOTE: this ID was corrected on 2026-09-03 — the user supplied a
