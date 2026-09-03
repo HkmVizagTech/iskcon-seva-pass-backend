@@ -58,7 +58,16 @@ class WhatsAppService {
     }));
 
     if (status !== "success" && status !== "sent") {
-      console.warn("[WhatsApp] Flaxxa non-success:", status, JSON.stringify(response.data).slice(0, 200));
+      // BUG FIX: this used to only console.warn and then still resolve with
+      // success:true. Every caller relies on this promise REJECTING to know
+      // delivery failed (holderController wraps it in try/catch and sets
+      // deliveryStatus="failed" only in the catch) — so a Flaxxa error like
+      // "Invalid template" was silently recorded as "sent" and the pass was
+      // never actually delivered. Throwing here is what makes that catch
+      // block — and the deliveryStatus/deliveryError shown in the dashboard —
+      // reflect reality.
+      const errMsg = response.data?.error || response.data?.message || `Flaxxa status "${status}"`;
+      throw new Error(`Flaxxa: ${errMsg}`);
     }
 
     return { success: true, messageId: msgId, phone, provider: "flaxxa", flaxxaStatus: status };
@@ -105,7 +114,10 @@ class WhatsAppService {
     }));
 
     if (status !== "submitted" && status !== "success") {
-      console.warn("[WhatsApp] Gupshup non-success:", status, JSON.stringify(response.data).slice(0, 300));
+      // Same bug as Flaxxa below: must throw, not just warn, or the caller
+      // records "sent" for a message Gupshup never actually queued.
+      const errMsg = response.data?.message || response.data?.status || `Gupshup status "${status}"`;
+      throw new Error(`Gupshup: ${errMsg}`);
     }
 
     return { success: true, messageId: msgId, phone, provider: "gupshup" };
@@ -133,13 +145,32 @@ class WhatsAppService {
         : null,
     }));
 
-    if (isSponsor && useGupshup && passDetails.qrId) {
-      // ── GUPSHUP: sponsor template (4 body params + image header) ────────
-      // "Hare Krishna {{1}}! ... Seva Pass for {{2}} ... Date: {{3}} ... Venue: {{4}}"
-      const templateId = process.env.GUPSHUP_TEMPLATE_SPONSOR
-        || "a9fd6274-a5ec-49f4-bd36-2fb3aee66611";
+    // GUPSHUP_TEMPLATE_GENERAL is the approved template for the non-sponsor
+    // (common) pass message — same shape as GUPSHUP_TEMPLATE_SPONSOR but for
+    // Donor/Invitee/Volunteer/General passes, which is the vast majority of
+    // what gets issued. Previously ONLY sponsor passes ever went to Gupshup —
+    // everything else always fell through to Flaxxa, whose "iskcon_common_pass"
+    // template Flaxxa now rejects outright ("Invalid template"), so almost
+    // every non-sponsor WhatsApp send was failing. Until GUPSHUP_TEMPLATE_GENERAL
+    // is set, general passes still fall back to Flaxxa below — but that failure
+    // is now reported honestly instead of recorded as "sent" (see _sendFlaxxa).
+    const gupshupTemplateId = useGupshup && passDetails.qrId
+      ? (isSponsor
+          ? (process.env.GUPSHUP_TEMPLATE_SPONSOR || "a9fd6274-a5ec-49f4-bd36-2fb3aee66611")
+          // "qr_issue_skj" — same 4 params as the sponsor template (Name,
+          // Event, Date, Venue). Pending Gupshup approval as of 2026-09-03;
+          // once it shows Active in the Gupshup dashboard, sends start
+          // working with no further deploy. Until then Gupshup will reject
+          // it and this now correctly falls through to Flaxxa (which will
+          // also fail, but honestly — see _sendFlaxxa).
+          : (process.env.GUPSHUP_TEMPLATE_GENERAL || "2ef7edc8-bed6-45f3-9688-8b6ff0fa0710"))
+      : null;
 
-      return this._sendGupshup(phone, passDetails.qrId, templateId, [
+    if (gupshupTemplateId) {
+      // Both templates currently take the same 4 body params. If the approved
+      // general template needs more (entry point / help contact), extend this
+      // params array and GUPSHUP_TEMPLATE_GENERAL's template definition together.
+      return this._sendGupshup(phone, passDetails.qrId, gupshupTemplateId, [
         holderName,  // {{1}} Name
         eventName,   // {{2}} Event
         dateStr,     // {{3}} Date
@@ -147,9 +178,14 @@ class WhatsAppService {
       ]);
     }
 
-    // ── Flaxxa path (general template or sponsor fallback) ────────────────
+    // ── Flaxxa path (fallback when Gupshup isn't configured for this kind
+    //    of pass yet) ────────────────────────────────────────────────────
     if (!this.token) {
-      throw new Error("WHATSAPP_API_KEY required for Flaxxa (non-Gupshup path)");
+      throw new Error(
+        useGupshup
+          ? "GUPSHUP_TEMPLATE_GENERAL is not set, and no Flaxxa WHATSAPP_API_KEY is configured as fallback — general passes cannot be sent via WhatsApp right now."
+          : "WHATSAPP_API_KEY required for Flaxxa (non-Gupshup path)",
+      );
     }
 
     const base64Data  = qrImageBase64.replace(/^data:image\/\w+;base64,/, "");

@@ -28,6 +28,51 @@ class ThirdPartyService {
   constructor() {
     this.baseUrl = (process.env.THIRD_PARTY_API_URL || "https://harekrishnavizag.co.in").replace(/\/$/, "");
     this.enabled = process.env.THIRD_PARTY_SYNC_ENABLED === "true";
+
+    // ── Outbound throttle ────────────────────────────────────────────────
+    // A bulk import fires one background push per row with no gap between
+    // them (the 500ms sleep in the import loop only paces WhatsApp sends —
+    // these community-app pushes are fire-and-forget and were going out
+    // essentially back-to-back). Their Laravel endpoint throttles per IP,
+    // so a large import reliably hit 429 "Too Many Attempts" partway
+    // through, and those rows never synced (nor retried). Every request
+    // below now goes through _axiosPostThrottled, which serializes all
+    // outbound calls with a minimum gap and retries once on 429.
+    this._queue = Promise.resolve();
+    this._lastCallAt = 0;
+    this._minGapMs = Number(process.env.THIRD_PARTY_MIN_GAP_MS || 400);
+  }
+
+  // Serializes every outbound POST through one queue (never more than one
+  // in flight, spaced at least _minGapMs apart) and retries once on a 429,
+  // honoring Retry-After when they send one. Drop-in replacement for a bare
+  // axios.post — same return value, same thrown-error behaviour.
+  _axiosPostThrottled(url, data, config) {
+    const run = this._queue.then(async () => {
+      const wait = this._minGapMs - (Date.now() - this._lastCallAt);
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      this._lastCallAt = Date.now();
+      try {
+        return await axios.post(url, data, config);
+      } catch (error) {
+        if (error.response?.status === 429) {
+          const retryAfterSec = Number(error.response.headers?.["retry-after"]);
+          const backoffMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? retryAfterSec * 1000
+            : 3000;
+          console.warn(`[CommunityApp] 429 rate-limited — retrying once in ${backoffMs}ms`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          this._lastCallAt = Date.now();
+          return await axios.post(url, data, config);
+        }
+        throw error;
+      }
+    });
+    // Detach from the chain with .catch() so one failed/rate-limited push
+    // doesn't leave `_queue` permanently rejected and stall every push
+    // after it — the caller below still sees the real rejection from `run`.
+    this._queue = run.catch(() => {});
+    return run;
   }
 
   isConfigured() {
@@ -62,7 +107,7 @@ class ThirdPartyService {
       const base64Only = String(qrImageBase64 || "").replace(/^data:image\/\w+;base64,/, "");
       form.append("qr_code", base64Only);
 
-      const response = await axios.post(
+      const response = await this._axiosPostThrottled(
         `${this.baseUrl}/api/v1/user/festivals/register-volunteer`,
         form,
         { headers: { ...form.getHeaders(), ...COMMON_HEADERS }, timeout: 15000 },
@@ -129,7 +174,7 @@ class ThirdPartyService {
         instruction: instruction || sevaSlotName || categoryName || event?.name || "",
       };
 
-      const response = await axios.post(
+      const response = await this._axiosPostThrottled(
         `${this.baseUrl}/api/v1/user/festivals/seva-sponsor`,
         body,
         { headers: { "Content-Type": "application/json", ...COMMON_HEADERS }, timeout: 15000 },
@@ -160,7 +205,7 @@ class ThirdPartyService {
         qrcode: qrPass?.qrId || "",
       }];
 
-      const response = await axios.post(
+      const response = await this._axiosPostThrottled(
         `${this.baseUrl}/api/v1/user/festivals/store-qr-code`,
         body,
         { headers: { "Content-Type": "application/json", ...COMMON_HEADERS }, timeout: 15000 },
@@ -188,7 +233,7 @@ class ThirdPartyService {
         qrcode: e.qrId || "",
       }));
 
-      const response = await axios.post(
+      const response = await this._axiosPostThrottled(
         `${this.baseUrl}/api/v1/user/festivals/store-qr-code`,
         body,
         { headers: { "Content-Type": "application/json", ...COMMON_HEADERS }, timeout: 30000 },

@@ -31,6 +31,21 @@ const {
   canIssueAdditionalPass,
 } = require("../utils/issuePermissions");
 
+// The community app's "store-qr-code" endpoint is their VOLUNTEER
+// registration API. It was ALSO being called for every Sponsor/Donor/Invitee
+// pass (on top of the correct seva-sponsor push) as a workaround for
+// multi-QR holders, on the theory that seva-sponsor dedupes on devotee+donor
+// and silently drops a second QR for the same phone. In production this
+// call fails 100% of the time for these categories — "This user is not
+// registered for any volunteer" — because sponsors/donors/invitees are
+// never registered as volunteers on their side. It never once succeeded,
+// it doubles our request volume against their rate-limited API (directly
+// contributing to the 429 "Too Many Attempts" storm during bulk import),
+// and it clutters every sponsor's communityAppSync record with a permanent
+// failure. Disabled by default; flip THIRD_PARTY_SKIP_SPONSOR_STORE_QR=false
+// if their team ever pre-registers sponsors as volunteers on their end.
+const SKIP_SPONSOR_STORE_QR = process.env.THIRD_PARTY_SKIP_SPONSOR_STORE_QR !== "false";
+
 // Refuses a read for an event this account is not assigned to. Returns true
 // when it has already answered the request.
 function blockedByEventScope(req, res, eventId) {
@@ -708,10 +723,17 @@ exports.createHolder = async (req, res) => {
           );
           // Store Flaxxa message_id for webhook delivery status matching
           if (waResult?.messageId) qrPass.deliveryMessageId = waResult.messageId;
+          qrPass.deliveryStatus = "sent";
+          qrPass.deliveredAt = new Date();
+          deliveryStatus = "sent";
+        } else {
+          // Non-WhatsApp delivery (email, print, screen, mobile): mark as
+          // delivered only after the actual channel confirms. Until then,
+          // "delivered" indicates the pass is ready for manual distribution.
+          qrPass.deliveryStatus = "delivered";
+          qrPass.deliveredAt = new Date();
+          deliveryStatus = "delivered";
         }
-        qrPass.deliveryStatus = "sent";
-        qrPass.deliveredAt = new Date();
-        deliveryStatus = "sent";
       } catch (error) {
         console.error("WhatsApp send error:", error.message, error.response?.data);
         qrPass.deliveryStatus = "failed";
@@ -737,11 +759,12 @@ exports.createHolder = async (req, res) => {
             sevaSlotName: sevaSlot?.name || "",
             instruction: holder?.instruction || "",
           });
-          // seva-sponsor dedupes on the devotee+donor pair only — a second QR
-          // for the same phone is silently dropped on their side. Always also
-          // register the raw qrcode string via store-qr-code so every pass of
-          // a multi-QR holder shows up in their app.
-          qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+          // See SKIP_SPONSOR_STORE_QR above — this always fails for these
+          // categories ("not registered for any volunteer"), so it's skipped
+          // by default rather than burning a request against their rate limit.
+          if (!SKIP_SPONSOR_STORE_QR) {
+            qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
+          }
         } else if (catCodeUpper === "VL") {
           result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
         } else {
@@ -919,7 +942,7 @@ exports.bulkImportHolders = async (req, res) => {
           preacherId || null,
           // Only an admin's import may issue a second pass to a number that
           // already has one; for other roles duplicate rows are skipped.
-          { skipStoreQrCode: false, allowAdditional: canIssueAdditionalPass(req.user) },
+          { skipStoreQrCode: SKIP_SPONSOR_STORE_QR, allowAdditional: canIssueAdditionalPass(req.user) },
         );
         if (result.skipped) {
           results.skipped.push(result);
@@ -1087,6 +1110,10 @@ async function processSingleRecord(
   deliveryMethod,
   userId,
   bulkPreacherId = null,
+  // skipStoreQrCode: only affects the EXTRA store-qr-code push made for
+  // Sponsor/Donor/Invitee rows (see SKIP_SPONSOR_STORE_QR at top of file).
+  // The store-qr-code push for genuine Volunteer (VL) rows is unaffected —
+  // it always runs, since that one is the correct, expected sync.
   { skipStoreQrCode = false, allowAdditional = false } = {},
 ) {
   const name = (record.Name || record.name || "").toString().trim();
@@ -1408,13 +1435,15 @@ async function processSingleRecord(
             sevaSlotName: sevaSlot?.name || "",
             instruction: holder?.instruction || "",
           });
+          // NOTE: `skipStoreQrCode` here means SKIP_SPONSOR_STORE_QR (see top
+          // of file) — it must NOT be reused for the VL branch below: that
+          // store-qr-code call is the genuine, correct sync for actual
+          // volunteers and always runs regardless of this flag.
           if (!skipStoreQrCode) {
             qrStoreResult = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
           }
         } else if (catCodeUpper === "VL") {
-          if (!skipStoreQrCode) {
-            result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
-          }
+          result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
         } else {
           result = await thirdPartyService.pushHolder({
             holder, qrPass, qrImageBase64: qrImage, event,
