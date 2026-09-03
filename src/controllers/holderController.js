@@ -165,7 +165,8 @@ exports.resendQR = async (req, res) => {
     const qrPass = await QRPass.findOne({ qrId: req.params.qrId })
       .populate("holderId")
       .populate("eventId")
-      .populate("entryPoints");
+      .populate("entryPoints")
+      .populate("catId");
 
     if (!qrPass) return res.status(404).json({ error: "QR pass not found" });
     if (!qrPass.holderId)
@@ -200,12 +201,28 @@ exports.resendQR = async (req, res) => {
 
     const { image: qrImage } = await qrService.generateQRCode(compactPayload);
 
+    // FIX: this resend previously never told sendQRMessage whether the pass
+    // was a Sponsor (isSponsor / sevaSlot / tier all missing below), so it
+    // silently fell through to the generic template every time — a resent
+    // Sponsor QR lost its seva slot + tier wording. Rebuilt the same way
+    // createHolder/bulk import do it, from the now-populated catId + the
+    // holder's own sevaSlotId/subCategory.
+    let sevaSlotDetails = null;
+    if (holder.sevaSlotId) {
+      sevaSlotDetails = await SevaSlot.findById(holder.sevaSlotId)
+        .select("code name time displayLabel").lean();
+    }
+    const isSponsorCategory = (qrPass.catId?.catCode || "").toUpperCase() === "SP";
+
     const passDetails = {
       entryPoints: entryPoints.map((ep) => ep.name || ep.stationLabel),
       qrId: qrPass.qrId,
       validFrom: qrPass.validFrom.toISOString(),
       validUntil: qrPass.validUntil.toISOString(),
       venue: evt.venue?.[0]?.name || "",
+      sevaSlot: sevaSlotDetails,
+      tier: holder.subCategory || "",
+      isSponsor: isSponsorCategory,
     };
 
     if (deliveryMethod === "whatsapp" || deliveryMethod === "both") {
@@ -231,6 +248,136 @@ exports.resendQR = async (req, res) => {
   } catch (error) {
     console.error("Resend QR error:", error);
     res.status(500).json({ error: "Failed to resend QR: " + error.message });
+  }
+};
+
+/**
+ * Bulk "Resend All" for an event — re-sends WhatsApp only for ACTIVE passes
+ * whose deliveryStatus is still "pending" or "failed", so anyone who already
+ * has their pass (deliveryStatus "sent"/"delivered") is never messaged twice.
+ * Restricted to passes originally meant for WhatsApp (deliveryMethod
+ * whatsapp/both/mobile_whatsapp) — a print-only or screen-only holder was
+ * never supposed to get a WhatsApp message in the first place.
+ *
+ * Responds immediately with the target count and runs the actual sends in
+ * the background: an event can have hundreds of pending passes, each send
+ * takes real time (image generation + a live WhatsApp API call), and this
+ * mirrors the pacing already used during bulk import (500ms between sends)
+ * to avoid hammering Gupshup/Flaxxa. Holding the HTTP request open for that
+ * whole run would just risk a browser/Railway timeout with no way to tell
+ * the admin what actually went out. Progress is visible the same way it
+ * already is everywhere else: each pass's deliveryStatus flips to "sent" or
+ * "failed" as it's processed, and the Holders list already renders that.
+ */
+exports.resendAllWhatsapp = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    if (blockedByEventScope(req, res, eventId)) return;
+
+    const event = await Event.findById(eventId);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    const query = {
+      eventId,
+      status: "active",
+      deliveryStatus: { $in: ["pending", "failed"] },
+      deliveryMethod: { $in: ["whatsapp", "both", "mobile_whatsapp"] },
+    };
+    // Same "own holders only" limit already enforced on the holders list —
+    // otherwise a restricted account could mass-resend passes it could
+    // never have issued or viewed individually.
+    if (isLimitedToOwnHolders(req.user)) {
+      const ownHolderIds = await Holder.find({
+        eventId,
+        issuedBy: req.user._id,
+      }).distinct("_id");
+      query.holderId = { $in: ownHolderIds };
+    }
+
+    const targets = await QRPass.find(query)
+      .populate("holderId")
+      .populate("entryPoints")
+      .populate("catId");
+
+    const validTargets = targets.filter((p) => p.holderId);
+
+    if (validTargets.length === 0) {
+      return res.json({
+        started: false,
+        targetCount: 0,
+        message: "Nothing to resend — every active WhatsApp pass for this event is already sent or delivered.",
+      });
+    }
+
+    res.json({
+      started: true,
+      targetCount: validTargets.length,
+      message: `Resending WhatsApp to ${validTargets.length} pass(es). This runs in the background — refresh in a bit to see updated statuses.`,
+    });
+
+    // ── Background send loop (response already sent above) ─────────────────
+    (async () => {
+      let sent = 0, failed = 0;
+      for (const qrPass of validTargets) {
+        try {
+          const holder = qrPass.holderId;
+          const entryPoints = qrPass.entryPoints || [];
+
+          let sevaSlotDetails = null;
+          if (holder.sevaSlotId) {
+            sevaSlotDetails = await SevaSlot.findById(holder.sevaSlotId)
+              .select("code name time displayLabel").lean();
+          }
+          const isSponsorCategory = (qrPass.catId?.catCode || "").toUpperCase() === "SP";
+
+          const compactPayload = qrService.createPayload(
+            { ...holder.toObject(), qrId: qrPass.qrId },
+            event,
+            null,
+            entryPoints,
+          );
+          const { image: qrImage } = await qrService.generateQRCode(compactPayload);
+
+          const passDetails = {
+            entryPoints: entryPoints.map((ep) => ep.name || ep.stationLabel),
+            qrId: qrPass.qrId,
+            validFrom: qrPass.validFrom ? qrPass.validFrom.toISOString() : "",
+            validUntil: qrPass.validUntil ? qrPass.validUntil.toISOString() : "",
+            venue: event.venue?.[0]?.name || "",
+            sevaSlot: sevaSlotDetails,
+            tier: holder.subCategory || "",
+            isSponsor: isSponsorCategory,
+          };
+
+          await whatsappService.sendQRMessage(
+            holder.phone || holder.whatsappNumber,
+            qrImage,
+            holder.name,
+            event.name,
+            passDetails,
+          );
+
+          qrPass.deliveryStatus = "sent";
+          qrPass.deliveredAt = new Date();
+          await qrPass.save();
+          sent++;
+          console.log(`[ResendAll] WhatsApp sent for ${holder.name} (${holder.phone}) — qrId ${qrPass.qrId}`);
+        } catch (err) {
+          failed++;
+          try {
+            qrPass.deliveryStatus = "failed";
+            await qrPass.save();
+          } catch (_) {}
+          console.error(`[ResendAll] WhatsApp failed for qrId ${qrPass.qrId}:`, err.message);
+        }
+        // Same pacing as bulk import — avoids hammering Gupshup/Flaxxa.
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      console.log(`[ResendAll] Done — event ${event.eventCode}: ${sent} sent, ${failed} failed, out of ${validTargets.length}.`);
+    })();
+  } catch (error) {
+    console.error("Resend-all WhatsApp error:", error);
+    res.status(500).json({ error: "Failed to start resend: " + error.message });
   }
 };
 

@@ -19,6 +19,9 @@ logs/
 .idea/
 .DS_Store
 
+# Office temp/lock files
+~$*
+
 # Build
 dist/
 build/

@@ -81,6 +81,15 @@ router.get(
   protect,
   holderController.exportHolders,
 );
+// Duplicate of routes/events.js's /:eventId/holders/resend-whatsapp — see
+// the note at the top of routes/events.js on why these event-scoped holder
+// routes are mirrored in both files.
+router.post(
+  "/events/:eventId/holders/resend-whatsapp",
+  protect,
+  authorize("super_admin", "event_admin", "campaign_manager"),
+  holderController.resendAllWhatsapp,
+);
 
 // Parameterised catch-all routes LAST
 router.get("/:holderId", protect, holderController.getHolderDetails);

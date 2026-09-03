@@ -158,11 +158,9 @@ class WhatsAppService {
       ? (isSponsor
           ? (process.env.GUPSHUP_TEMPLATE_SPONSOR || "a9fd6274-a5ec-49f4-bd36-2fb3aee66611")
           // "qr_issue_skj" — same 4 params as the sponsor template (Name,
-          // Event, Date, Venue). Pending Gupshup approval as of 2026-09-03;
-          // once it shows Active in the Gupshup dashboard, sends start
-          // working with no further deploy. Until then Gupshup will reject
-          // it and this now correctly falls through to Flaxxa (which will
-          // also fail, but honestly — see _sendFlaxxa).
+          // Event, Date, Venue). Approved in Gupshup as of 2026-09-03 — this
+          // hardcoded ID IS the approved template, so General/Donor/Invitee/
+          // Volunteer sends now go through Gupshup with no further deploy.
           : (process.env.GUPSHUP_TEMPLATE_GENERAL || "2ef7edc8-bed6-45f3-9688-8b6ff0fa0710"))
       : null;
 

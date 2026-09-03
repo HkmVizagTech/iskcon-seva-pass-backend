@@ -131,6 +131,17 @@ router.post(
   holderController.bulkImportHolders,
 );
 
+// Bulk "Resend All" — resends WhatsApp only for this event's still-pending/
+// failed active passes (never re-sends anything already sent/delivered).
+// Restricted to admin-level roles since it's a mass action, not a single
+// issue — matches the role list used for retry-community-sync.
+router.post(
+  "/:eventId/holders/resend-whatsapp",
+  protect,
+  authorize("super_admin", "event_admin", "campaign_manager"),
+  holderController.resendAllWhatsapp,
+);
+
 module.exports = router;
 
 // ── Diagnostic: check community app sync configuration ──────────────────────
