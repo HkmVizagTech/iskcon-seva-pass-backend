@@ -9,9 +9,11 @@
 //
 // Entry points are matched by TYPE, not by name, so it works regardless of
 // what each event calls its gates:
-//     venue_entry  (main entry)  +  darshan  +  prasadam
+//     venue_entry  (main entry)  +  jhulan  +  prasadam
+// The legacy "darshan" spelling is matched too, so events created before the
+// jhulan rename still get their gates linked.
 // Every matching entry point is linked, so multi-venue events get all of
-// their darshan/prasadam desks rather than just the first.
+// their jhulan/prasadam desks rather than just the first.
 //
 // Idempotent — safe to re-run:
 //   - an event that already has a PAT type is skipped and reported
@@ -48,7 +50,9 @@ const PATRON = {
   isDefault: true,
   isActive: true,
 };
-const PATRON_EP_TYPES = ["venue_entry", "darshan", "prasadam"];
+// JHULAN_TYPES covers both "jhulan" and the legacy "darshan".
+const { JHULAN_TYPES } = require("../src/utils/entryPointTypes");
+const PATRON_EP_TYPES = ["venue_entry", ...JHULAN_TYPES, "prasadam"];
 
 async function main() {
   console.log(

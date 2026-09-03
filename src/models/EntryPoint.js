@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { ENTRY_POINT_TYPES } = require("../utils/entryPointTypes");
 
 const entryPointSchema = new mongoose.Schema({
   eventId: {
@@ -15,16 +16,13 @@ const entryPointSchema = new mongoose.Schema({
     required: true,
   },
   description: String,
+  // The darshan gate is now "jhulan". "darshan" stays in the enum as a legacy
+  // alias so entry points on PAST events (which the rename migration leaves
+  // alone) still validate when saved. See utils/entryPointTypes.js — match
+  // with JHULAN_TYPES rather than a bare === "jhulan".
   type: {
     type: String,
-    enum: [
-      "venue_entry",
-      "darshan",
-      "prasadam",
-      "bahumana",
-      "vip_seat",
-      "custom",
-    ],
+    enum: ENTRY_POINT_TYPES,
     default: "custom",
   },
   linkedEpId: {

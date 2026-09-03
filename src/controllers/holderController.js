@@ -28,6 +28,7 @@ const {
   checkIssuePermission,
   isLimitedToOwnHolders,
   isEventAllowed,
+  canIssueAdditionalPass,
 } = require("../utils/issuePermissions");
 
 // Refuses a read for an event this account is not assigned to. Returns true
@@ -460,51 +461,97 @@ exports.createHolder = async (req, res) => {
       : null;
 
     // ── Duplicate check ──────────────────────────────────────────────────────
-    // One active pass per number per (holder type + category) per event:
-    //   same number + Sponsor cat A, twice           → block
-    //   same number + Sponsor A, then Sponsor B / C  → allow
-    //   same number + Sponsor A, then Donor          → allow
-    //   same number + Volunteer, twice               → block (no category)
-    // Matches the uniq_event_phone_type_category index on Holder. Seva slot is
-    // NOT part of the key — it is timing/seating only.
-    const duplicateHolder = await Holder.findOne({
-      eventId,
-      phone: normPhone,
-      catId,
+    // A second pass for the same number + holder type + category is LEGITIMATE
+    // (the donor who sponsors twice at tier A), so this is not a hard block —
+    // it is a prompt. The admin picks one of two things, and doing nothing is
+    // what stops a double-clicked submit or a re-run import:
+    //
+    //   issueAdditional: true  → a NEW pass alongside the existing one
+    //                            (holder record with passSeq = max + 1)
+    //   overrideReason: "..."  → REPLACE: revoke the old QR, reissue on the
+    //                            same holder record
+    //   neither                → 409 describing both options
+    //
+    // The tier/category filter below matches the uniq_event_phone_type_category_seq
+    // index on Holder. Seva slot is NOT part of the key — timing/seating only.
+    const tierFilter = incomingTier
+      ? { subCategory: incomingTier }
       // Legacy rows may hold "" where new rows hold undefined — treat both as
       // "no category" so the app check agrees with the unique index.
-      ...(incomingTier
-        ? { subCategory: incomingTier }
-        : { subCategory: { $in: [null, ""] } }),
-    }).select("_id name subCategory");
+      : { subCategory: { $in: [null, ""] } };
+
+    const duplicateQuery = { eventId, phone: normPhone, catId, ...tierFilter };
+
+    // Highest passSeq already used for this number/type/category, so an
+    // additional pass lands on the next free slot.
+    const siblings = await Holder.find(duplicateQuery)
+      .select("_id name subCategory passSeq")
+      .sort({ passSeq: -1 })
+      .lean();
+
+    const duplicateHolder = siblings[0]
+      ? await Holder.findById(siblings[0]._id).select("_id name subCategory passSeq")
+      : null;
+    const maxPassSeq = siblings.reduce((m, h) => Math.max(m, h.passSeq || 1), 0);
 
     const overrideReasonText = (req.body.overrideReason || "").toString().trim();
+    // Explicit intent to add a pass rather than replace one. Takes precedence
+    // over overrideReason, which a client may send alongside it as a note.
+    const wantsAdditional =
+      req.body.issueAdditional === true || req.body.issueAdditional === "true";
 
-    if (duplicateHolder) {
-      const existingQR = await QRPass.findOne({
-        holderId: duplicateHolder._id,
+    // Issuing a SECOND pass for the same number + type + category is an admin
+    // decision — see ROLES_MAY_ISSUE_ADDITIONAL. Refuse rather than silently
+    // downgrading to a replacement, which would revoke a live pass the caller
+    // never meant to touch.
+    const mayIssueAdditional = canIssueAdditionalPass(req.user);
+    if (wantsAdditional && !mayIssueAdditional) {
+      return res.status(403).json({
+        code: "ADDITIONAL_PASS_NOT_ALLOWED",
+        error:
+          "Only an administrator can issue a second pass for the same number, " +
+          "holder type and category.",
+      });
+    }
+    const issueAdditional = wantsAdditional && mayIssueAdditional;
+
+    if (duplicateHolder && !issueAdditional) {
+      const activePasses = await QRPass.find({
+        holderId: { $in: siblings.map((h) => h._id) },
         status: "active",
-      }).select("qrId").lean();
+      }).select("qrId holderId").lean();
 
-      if (existingQR && !overrideReasonText) {
+      if (activePasses.length > 0 && !overrideReasonText) {
         const passLabel = [
           categoryForCheck?.name || "pass",
           incomingTier ? `category ${incomingTier}` : null,
         ].filter(Boolean).join(" · ");
         return res.status(409).json({
           code: "DUPLICATE_PASS",
-          error: `An active "${passLabel}" pass already exists for this phone number at this event.`,
-          hint:
-            "This number can still be issued a pass under a different holder " +
-            "type or a different category. To REPLACE the existing pass " +
-            "instead, provide a reason (e.g. 'Lost phone') — the old QR will " +
-            "be revoked.",
+          error:
+            `This phone number already holds ${activePasses.length} active ` +
+            `"${passLabel}" pass${activePasses.length > 1 ? "es" : ""} at this event.`,
+          // Advertise only what THIS role may do, so the dashboard never
+          // shows a button that would come back 403.
+          canIssueAdditional: mayIssueAdditional,
+          canReplace: true,
+          hint: mayIssueAdditional
+            ? "If they have genuinely donated again, issue an ADDITIONAL pass — " +
+              "both stay valid. If this is a lost phone or a correction, REPLACE " +
+              "instead and the old QR is revoked. A different holder type or " +
+              "category needs neither."
+            : "To REPLACE the existing pass (lost phone, correction), provide a " +
+              "reason and the old QR is revoked. A different holder type or " +
+              "category needs neither. Only an administrator can issue a " +
+              "second pass for this same type and category.",
           existing: {
             holderId: duplicateHolder._id,
             holderName: duplicateHolder.name,
             holderTypeName: categoryForCheck?.name || null,
             subCategory: duplicateHolder.subCategory || null,
-            qrId: existingQR.qrId,
+            qrId: activePasses[0].qrId,
+            activeQrIds: activePasses.map((p) => p.qrId),
+            passCount: activePasses.length,
           },
         });
       }
@@ -538,18 +585,25 @@ exports.createHolder = async (req, res) => {
       subCategory: incomingTier || undefined,
       // Seva slot (timing) — sponsors only, NOT part of the uniqueness key
       sevaSlotId: isSponsorCategory ? sevaSlot?._id || undefined : undefined,
-      // Reason given when replacing an existing pass on the same number
+      // Free-text note: why this pass was replaced, or why an additional one
+      // was issued ("second donation"). Optional either way.
       overrideReason: overrideReasonText || undefined,
       instruction: incomingInstruction || undefined,
     };
 
     let holder;
-    if (duplicateHolder) {
-      // Replacement issue (override reason supplied, or the previous pass was
-      // already revoked/expired). One holder record exists per
-      // number+type+category, so we revoke the old QR and re-issue on the SAME
-      // record rather than inserting a second one that the unique index would
-      // reject anyway.
+    if (duplicateHolder && issueAdditional) {
+      // ADDITIONAL pass: a genuine second donation at the same tier. A new
+      // holder record on the next free passSeq, so both passes stay live and
+      // each has its own scan history. The existing pass is left alone.
+      holder = await Holder.create({
+        ...holderFields,
+        passSeq: maxPassSeq + 1,
+      });
+    } else if (duplicateHolder) {
+      // REPLACEMENT (override reason supplied, or the previous pass was already
+      // revoked/expired): revoke the old QR and reissue on the SAME record,
+      // keeping its passSeq, rather than inserting a second one.
       await QRPass.updateMany(
         { holderId: duplicateHolder._id, status: "active" },
         { $set: { status: "revoked", updatedAt: new Date() } },
@@ -838,13 +892,19 @@ exports.bulkImportHolders = async (req, res) => {
       total: records.length,
       success: [],
       failed: [],
-      // Rows that already had an active pass for this number + holder type +
-      // category. Tracked separately so `total` reconciles as
-      // success + skipped + failed instead of leaving an unexplained gap.
+      // Rows skipped without issuing. Now only reachable in edge cases (a row
+      // a concurrent request already handled) — deliberate duplicates are
+      // issued, not skipped — but kept so `total` always reconciles as
+      // success + skipped + failed.
       skipped: [],
+      // Rows that issued a pass to a number which ALREADY held a live pass of
+      // this type and tier. Legitimate for a second donation; a large count
+      // right after an import is the signature of an accidental re-upload.
+      additional: [],
       successCount: 0,
       failedCount: 0,
       skippedCount: 0,
+      additionalCount: 0,
     };
 
     for (let i = 0; i < records.length; i++) {
@@ -857,7 +917,9 @@ exports.bulkImportHolders = async (req, res) => {
           deliveryMethod,
           req.user?._id || req.user?.userId,
           preacherId || null,
-          { skipStoreQrCode: false },
+          // Only an admin's import may issue a second pass to a number that
+          // already has one; for other roles duplicate rows are skipped.
+          { skipStoreQrCode: false, allowAdditional: canIssueAdditionalPass(req.user) },
         );
         if (result.skipped) {
           results.skipped.push(result);
@@ -865,6 +927,12 @@ exports.bulkImportHolders = async (req, res) => {
         } else if (result.success) {
           results.success.push(result);
           results.successCount++;
+          // Counted in addition to (not instead of) success — these rows DID
+          // issue a pass.
+          if (result.additional) {
+            results.additional.push(result);
+            results.additionalCount++;
+          }
         } else {
           results.failed.push(result);
           results.failedCount++;
@@ -926,6 +994,8 @@ exports.bulkImportHolders = async (req, res) => {
         success: results.successCount,
         skipped: results.skippedCount,
         failed: results.failedCount,
+        // Subset of `success`, not a separate bucket.
+        additional: results.additionalCount,
       },
       summary: {
         successList: results.success.map((r) => ({
@@ -938,6 +1008,11 @@ exports.bulkImportHolders = async (req, res) => {
           phone: r.phone,
           qrId: r.qrId,
           reason: r.reason || "Duplicate pass for this holder type and category",
+        })),
+        additionalList: results.additional.map((r) => ({
+          name: r.name,
+          phone: r.phone,
+          qrId: r.qrId,
         })),
         failedList: results.failed.map((r) => ({
           name: r.name,
@@ -1012,7 +1087,7 @@ async function processSingleRecord(
   deliveryMethod,
   userId,
   bulkPreacherId = null,
-  { skipStoreQrCode = false } = {},
+  { skipStoreQrCode = false, allowAdditional = false } = {},
 ) {
   const name = (record.Name || record.name || "").toString().trim();
   const phone = (
@@ -1096,13 +1171,17 @@ async function processSingleRecord(
         ? "91" + phone.replace(/[\+\s\-\(\)]/g, "")
         : phone.replace(/[\+\s\-\(\)]/g, "");
 
-    // Duplicate check — one QR per number per (holder type + category) per
-    // event. The whole file imports under ONE holder type (category._id), so
-    // here the per-row discriminator is the Category/Tier column:
-    //   same number, same tier      → skip (already has this pass)
-    //   same number, different tier → new QR
-    //   no tier column at all       → one QR per number for this holder type
-    // Seva slot (SubCategory column) does NOT affect duplicate logic.
+    // EVERY ROW GETS A PASS. A spreadsheet may legitimately list the same
+    // donor twice for the same tier (two separate donations), so rows are no
+    // longer skipped as duplicates.
+    //
+    // The cost of that choice: re-uploading the same file issues everyone a
+    // SECOND pass. Nothing here can tell that apart from a deliberate repeat,
+    // so instead each row reports whether it added to an existing pass, and
+    // the import summary surfaces the total — an accidental re-upload shows up
+    // immediately as a large "additional" count.
+    //
+    // Seva slot (SubCategory column) does not affect any of this.
     const isSponsor = (category.catCode || "").toUpperCase() === "SP";
 
     // Legacy rows may hold "" where new rows hold undefined — match both.
@@ -1110,28 +1189,48 @@ async function processSingleRecord(
       ? { subCategory: tier }
       : { subCategory: { $in: [null, ""] } };
 
-    const duplicateHolder = await Holder.findOne({
+    const duplicateQuery = {
       eventId: event._id,
       phone: formattedPhone,
       catId: category._id,
       ...tierFilter,
-    }).select("_id");
+    };
 
-    if (duplicateHolder) {
-      const existingQR = await QRPass.findOne({
-        holderId: duplicateHolder._id,
+    // Existing passes for this number/type/tier, so the new row lands on the
+    // next free passSeq rather than colliding with the unique index.
+    const siblings = await Holder.find(duplicateQuery)
+      .select("_id passSeq")
+      .sort({ passSeq: -1 })
+      .lean();
+    const maxPassSeq = siblings.reduce((m, h) => Math.max(m, h.passSeq || 1), 0);
+
+    // A record with no live pass is reused rather than piling up another row.
+    let reusableHolderId = null;
+    let isAdditional = false;
+    if (siblings.length > 0) {
+      const activePasses = await QRPass.find({
+        holderId: { $in: siblings.map((h) => h._id) },
         status: "active",
-      }).select("qrId").lean();
-      if (existingQR) {
+      }).select("holderId qrId").lean();
+      const activeIds = new Set(activePasses.map((p) => String(p.holderId)));
+      const dead = siblings.find((h) => !activeIds.has(String(h._id)));
+      if (dead) reusableHolderId = dead._id;
+      isAdditional = activePasses.length > 0;
+
+      // Issuing a duplicate is admin-only (ROLES_MAY_ISSUE_ADDITIONAL). For
+      // anyone else the row is skipped rather than silently creating a second
+      // live pass — otherwise a repeated CSV row would be a way around the
+      // rule enforced on the single-issue screen.
+      if (isAdditional && !allowAdditional) {
         return {
           success: true,
           skipped: true,
           name,
           phone: formattedPhone,
-          qrId: existingQR.qrId,
-          reason: tier
-            ? `Already has an active "${category.name} · category ${tier}" pass`
-            : `Already has an active "${category.name}" pass`,
+          qrId: activePasses[0].qrId,
+          reason:
+            "Already has an active pass for this holder type and category — " +
+            "only an administrator can issue a second one",
         };
       }
     }
@@ -1161,11 +1260,10 @@ async function processSingleRecord(
       issuedBy: userId,
     };
 
-    if (duplicateHolder) {
-      // Holder record exists for this number+type+tier but has no active pass
-      // (revoked/expired). Re-use the record — a second insert would be
-      // rejected by the unique index. $set/$unset split so fields cleared on
-      // this import don't silently keep their old values.
+    if (reusableHolderId) {
+      // A record exists for this number+type+tier whose pass is revoked or
+      // expired. Reuse it instead of accumulating another row. $set/$unset
+      // split so fields cleared on this import don't keep their old values.
       const $set = {};
       const $unset = {};
       for (const [k, v] of Object.entries(rowHolderFields)) {
@@ -1173,7 +1271,7 @@ async function processSingleRecord(
         else $set[k] = v;
       }
       holder = await Holder.findByIdAndUpdate(
-        duplicateHolder._id,
+        reusableHolderId,
         {
           ...(Object.keys($set).length ? { $set } : {}),
           ...(Object.keys($unset).length ? { $unset } : {}),
@@ -1181,30 +1279,21 @@ async function processSingleRecord(
         { new: true, runValidators: true },
       );
     } else {
+      // New record. passSeq 1 for the first pass on this number+type+tier,
+      // max+1 for each further one, which is what lets a spreadsheet list the
+      // same donor twice without tripping the unique index.
       try {
-        holder = await Holder.create(rowHolderFields);
+        holder = await Holder.create({
+          ...rowHolderFields,
+          passSeq: maxPassSeq + 1,
+        });
       } catch (createErr) {
-        // Race condition — a concurrent request created this exact
-        // number+type+tier between our check and this insert.
+        // Race: a concurrent request took this passSeq between our read and
+        // this insert. Retry once on the next slot rather than failing the row.
         if (createErr.code === 11000) {
-          holder = await Holder.findOne({
-            eventId: event._id,
-            phone: formattedPhone,
-            catId: category._id,
-            ...tierFilter,
-          });
-          if (!holder) throw createErr;
-          const existingQR = await QRPass.findOne({ holderId: holder._id, status: "active" });
-          if (existingQR) {
-            return {
-              success: true,
-              skipped: true,
-              name,
-              phone: formattedPhone,
-              qrId: existingQR.qrId,
-              reason: "Already issued by a concurrent request",
-            };
-          }
+          const fresh = await Holder.find(duplicateQuery).select("passSeq").lean();
+          const retrySeq = fresh.reduce((m, h) => Math.max(m, h.passSeq || 1), 0) + 1;
+          holder = await Holder.create({ ...rowHolderFields, passSeq: retrySeq });
         } else {
           throw createErr;
         }
@@ -1290,6 +1379,9 @@ async function processSingleRecord(
         return {
           success: true,
           deliveryFailed: true,
+          // true when this number already held a live pass of this type and
+          // tier — surfaced so an accidental re-upload is obvious.
+          additional: isAdditional,
           error: "WhatsApp delivery failed: " + e.message,
           name,
           phone: formattedPhone,
@@ -1356,6 +1448,8 @@ async function processSingleRecord(
 
     return {
       success: true,
+      // true when this number already held a live pass of this type and tier.
+      additional: isAdditional,
       name,
       phone: formattedPhone,
       qrId,

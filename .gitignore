@@ -22,3 +22,10 @@ logs/
 # Build
 dist/
 build/
+
+# Preacher bulk-add input — holds names, phone numbers and passwords
+scripts/preachers*.csv
+!scripts/preachers.example.csv
+
+# Duplicate-holder resolution backups — contain holder personal data
+scripts/duplicate-holders-backup-*.json

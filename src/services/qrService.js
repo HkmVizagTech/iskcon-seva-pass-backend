@@ -264,7 +264,7 @@ class QRService {
             };
           }
         } else {
-          // Per-venue entrance (standalone EP, e.g. Darshan/Prasadam that is
+          // Per-venue entrance (standalone EP, e.g. Jhulan/Prasadam that is
           // shared across venues). The pass can be used ONCE AT EACH VENUE, so
           // block only when the same EP was already granted at this venue.
           // Passes scanned before venues were recorded have rh.venue === null
@@ -349,7 +349,7 @@ class QRService {
           $not: { $elemMatch: { epId: { $in: groupEpIds }, result: "granted" } },
         };
       } else {
-        // Per-venue entrance (shared EP, e.g. Darshan/Prasadam): allow once per
+        // Per-venue entrance (shared EP, e.g. Jhulan/Prasadam): allow once per
         // venue. When a venue is provided, block only if this exact EP was
         // already granted at the SAME venue. Without a venue, block if used here
         // at all (conservative, matches legacy behavior).

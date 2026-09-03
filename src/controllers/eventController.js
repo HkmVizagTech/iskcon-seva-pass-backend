@@ -12,6 +12,7 @@ const {
   isEventAllowed,
   allowedEventIds,
 } = require("../utils/issuePermissions");
+const { JHULAN, isJhulan } = require("../utils/entryPointTypes");
 
 exports.createEvent = async (req, res) => {
   try {
@@ -47,7 +48,7 @@ exports.createEvent = async (req, res) => {
 
     const defaultEntryPoints = [
       { name: "Venue Entry", stationLabel: "Main Gate", type: "venue_entry" },
-      { name: "Darshan", stationLabel: "Darshan Queue", type: "darshan" },
+      { name: "Jhulan", stationLabel: "Jhulan Queue", type: JHULAN },
       { name: "Special Prasadam", stationLabel: "Prasadam Counter", type: "prasadam" },
       { name: "Bahumana", stationLabel: "Bahumana Desk", type: "bahumana" },
     ];
@@ -57,15 +58,17 @@ exports.createEvent = async (req, res) => {
     );
 
     const allEpIds = entryPoints.map((ep) => ep._id);
-    const darshanPrasadamIds = entryPoints
-      .filter((ep) => ["darshan", "prasadam"].includes(ep.type))
+    // isJhulan() matches both "jhulan" and the legacy "darshan", so these
+    // selections behave identically on events created before the rename.
+    const jhulanPrasadamIds = entryPoints
+      .filter((ep) => isJhulan(ep.type) || ep.type === "prasadam")
       .map((ep) => ep._id);
     const venuePrasadamIds = entryPoints
       .filter((ep) => ["venue_entry", "prasadam"].includes(ep.type))
       .map((ep) => ep._id);
-    // Patron: main entry + darshan + prasadam (everything except bahumana).
+    // Patron: main entry + jhulan + prasadam (everything except bahumana).
     const patronEpIds = entryPoints
-      .filter((ep) => ["venue_entry", "darshan", "prasadam"].includes(ep.type))
+      .filter((ep) => ep.type === "venue_entry" || isJhulan(ep.type) || ep.type === "prasadam")
       .map((ep) => ep._id);
 
     // MERGED: single set of 7 default pass types (HolderType absorbed Category).
@@ -75,9 +78,9 @@ exports.createEvent = async (req, res) => {
     // backfills the same defaults onto events created before they existed.
     await HolderType.insertMany([
       { eventId: event._id, name: "Sponsor", catCode: "SP", entryPoints: allEpIds, color: "#F97316", icon: "💰", isDefault: true, isActive: true, categories: ["A", "B", "C"] },
-      { eventId: event._id, name: "Donor", catCode: "DN", entryPoints: darshanPrasadamIds, color: "#22C55E", icon: "🙏", isDefault: true, isActive: true, categories: ["A", "B", "C"] },
+      { eventId: event._id, name: "Donor", catCode: "DN", entryPoints: jhulanPrasadamIds, color: "#22C55E", icon: "🙏", isDefault: true, isActive: true, categories: ["A", "B", "C"] },
       { eventId: event._id, name: "Volunteer", catCode: "VL", entryPoints: venuePrasadamIds, color: "#8B5CF6", icon: "🤝", isDefault: true, isActive: true },
-      { eventId: event._id, name: "General Public", catCode: "GN", entryPoints: entryPoints.filter((ep) => ep.type === "darshan").map((ep) => ep._id), color: "#3B82F6", icon: "👤", isDefault: true, isActive: true },
+      { eventId: event._id, name: "General Public", catCode: "GN", entryPoints: entryPoints.filter((ep) => isJhulan(ep.type)).map((ep) => ep._id), color: "#3B82F6", icon: "👤", isDefault: true, isActive: true },
       { eventId: event._id, name: "VIP Guest", catCode: "VP", entryPoints: allEpIds, color: "#EAB308", icon: "⭐", isDefault: true, isActive: true },
       { eventId: event._id, name: "Invitee", catCode: "INV", entryPoints: allEpIds, color: "#EC4899", icon: "🎟️", isDefault: true, isActive: true },
       { eventId: event._id, name: "Patron", catCode: "PAT", entryPoints: patronEpIds, color: "#6366F1", icon: "👑", isDefault: true, isActive: true },

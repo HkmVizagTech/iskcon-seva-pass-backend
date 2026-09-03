@@ -109,6 +109,15 @@ const holderSchema = new mongoose.Schema({
   // QR) or Instruction1/Instruction2/... columns (bulk import). Optional.
   instruction: String,
   customFields: mongoose.Schema.Types.Mixed,
+  // Distinguishes a DELIBERATE second pass for the same number + holder type +
+  // category from an accidental duplicate. 1 for the first (and for anything
+  // issued without explicit intent), 2+ for each additional pass the admin
+  // consciously issues. Part of the uniqueness key — see the index below.
+  passSeq: {
+    type: Number,
+    default: 1,
+    min: 1,
+  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -117,20 +126,30 @@ const holderSchema = new mongoose.Schema({
 
 holderSchema.index({ preacherId: 1 }); // for scoped preacher reports
 
-// ── Uniqueness: one pass per number per (holder type + category) per event ───
-// A single number MAY hold several passes for the same event, as long as each
-// is a different holder type or a different category:
-//     Sponsor category A  +  Sponsor category B   → both allowed
-//     Sponsor category A  +  Donor / Volunteer     → both allowed
-//     Sponsor category A  +  Sponsor category A    → blocked (E11000)
+// ── Uniqueness ───────────────────────────────────────────────────────────────
+// A number may hold as many passes as it legitimately needs — a different
+// holder type, a different category, or a SECOND pass of the same type and
+// category (the donor who sponsors twice at tier A).
+//
+// What must still be prevented is the ACCIDENTAL duplicate: a double-clicked
+// submit, a re-run import, two concurrent requests. Those are indistinguishable
+// from a deliberate second pass in the data, so `passSeq` is the discriminator:
+//
+//     Sponsor A (seq 1)  +  Sponsor B (seq 1)        → allowed, different category
+//     Sponsor A (seq 1)  +  Donor (seq 1)            → allowed, different type
+//     Sponsor A (seq 1)  +  Sponsor A (seq 2)        → allowed, DELIBERATE extra
+//     Sponsor A (seq 1)  +  Sponsor A (seq 1)        → blocked (E11000)
+//
+// Anything issued without explicit intent gets seq 1 and therefore collides,
+// so a race or a stray double-submit is still caught by the database. Issuing
+// an additional pass on purpose sets seq = max + 1 and inserts cleanly.
+//
 // Holder types with no category (volunteer, general public) have subCategory
-// undefined, which indexes as null — so they still get exactly one pass each.
+// undefined, which indexes as null — the same rules apply.
 // Seva slot is deliberately NOT in the key: it is timing/seating only.
-// Replaces the old { eventId, phone } unique index, which allowed only one
-// holder record per number per event and made the above impossible.
 holderSchema.index(
-  { eventId: 1, phone: 1, catId: 1, subCategory: 1 },
-  { unique: true, name: "uniq_event_phone_type_category" },
+  { eventId: 1, phone: 1, catId: 1, subCategory: 1, passSeq: 1 },
+  { unique: true, name: "uniq_event_phone_type_category_seq" },
 );
 // Non-unique: still needed for "find every pass on this number" lookups.
 holderSchema.index({ eventId: 1, phone: 1 });

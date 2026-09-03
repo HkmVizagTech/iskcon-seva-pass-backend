@@ -321,11 +321,31 @@ exports.getRecentScans = async (req, res) => {
 
 exports.getHolderScanHistory = async (req, res) => {
   try {
+    // The Seva Pass app calls this with a preacher's token so a devotee can
+    // see where their holders were scanned. A preacher must only reach the
+    // holders attributed to them — without this check the holderId in the URL
+    // is enough to read anyone's scan history.
+    if (String(req.user?.role || "") === "preacher") {
+      const Holder = require("../models/Holder");
+      const { buildPreacherHolderQuery } = require("./preacherController");
+      const mine = await Holder.findOne({
+        _id: req.params.holderId,
+        ...buildPreacherHolderQuery(req.user),
+      }).select("_id").lean();
+      if (!mine) {
+        return res.status(403).json({
+          code: "NOT_YOUR_HOLDER",
+          error: "This pass is not attributed to you.",
+        });
+      }
+    }
+
     const scans = await ScanLog.find({ holderId: req.params.holderId })
       .populate("epId", "name")
       .sort({ scannedAt: -1 });
     res.json({ history: scans });
   } catch (error) {
+    console.error("Get holder scan history error:", error);
     res.status(500).json({ error: "Failed to fetch scan history" });
   }
 };

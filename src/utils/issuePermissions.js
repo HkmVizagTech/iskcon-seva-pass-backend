@@ -144,6 +144,19 @@ async function checkIssuePermission(user, { eventId, catId, holderType, delivery
   return null;
 }
 
+// ── Who may issue a SECOND pass for the same number + type + category ────────
+// Deliberate duplicates are an admin judgement call: they are indistinguishable
+// in the data from an accidental double-issue, and getting it wrong means two
+// live QRs for one entitlement. Restricted desk accounts (issuer), campaign
+// managers and preachers get the duplicate prompt but only the Replace option.
+//
+// To widen this, add the role here — it is enforced in one place.
+const ROLES_MAY_ISSUE_ADDITIONAL = ["super_admin", "event_admin"];
+
+function canIssueAdditionalPass(user) {
+  return ROLES_MAY_ISSUE_ADDITIONAL.includes(String(user?.role || ""));
+}
+
 /**
  * True when this user may only see the passes they issued themselves.
  * super_admin always sees everything.
@@ -154,6 +167,8 @@ function isLimitedToOwnHolders(user) {
 }
 
 module.exports = {
+  ROLES_MAY_ISSUE_ADDITIONAL,
+  canIssueAdditionalPass,
   ASSIGNABLE_DELIVERY_METHODS,
   ASSIGNABLE_DELIVERY_VALUES,
   checkIssuePermission,

@@ -13,20 +13,8 @@ const QRPass = require("../models/QRPass");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
-
-// Look up a preacher's phone for the community app's devotee_mobile_number
-// field. Returns undefined if not resolvable (falls back to the sponsor's
-// own number downstream in thirdPartyService).
-async function resolvePreacherPhone(preacherId) {
-  if (!preacherId) return undefined;
-  try {
-    const UserModel = require("../models/User");
-    const preacherUser = await UserModel.findById(preacherId).select("phone").lean();
-    return preacherUser?.phone || undefined;
-  } catch (_) {
-    return undefined;
-  }
-}
+// Same resolver the CSV importer uses: short code first, then name.
+const { resolvePreacherFromString } = require("./preacherController");
 
 // Helper: escape regex special chars for safe name matching
 function escapeRegExp(text) {
@@ -261,7 +249,7 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         const payload = qrService.createPayload({ ...holder.toObject(), qrId }, event, category, entryPoints);
         const { signedPayload } = await qrService.generateQRCode(payload);
 
-        const qrPass = await QRPass.create({
+        await QRPass.create({
           qrId, holderId: holder._id, eventId: event._id, catId: category._id,
           entryPoints: entryPoints.map((ep) => ep._id),
           payloadSigned: signedPayload,
@@ -269,48 +257,16 @@ exports.generateVolunteerQRBulk = async (req, res) => {
           deliveryMethod: "third_party", deliveryStatus: "sent", deliveredAt: new Date(),
         });
 
-        // ── Push to community mobile app ──────────────────────────────────
-        // Awaited (not fire-and-forget) so the result is persisted on the
-        // QRPass for visibility. Only fires seva-sponsor if the caller
-        // explicitly overrode `category` to a sponsor/donor/invitee type —
-        // a volunteer pass (VL) must NOT be pushed as a seva-sponsor, it
-        // goes out via store-qr-code instead.
-        (async () => {
-          try {
-            const catCode = (category.catCode || "").toUpperCase();
-            let result;
-            if (["SP", "DN", "INV"].includes(catCode)) {
-              const preacherPhone = await resolvePreacherPhone(holder?.preacherId);
-              result = await thirdPartyService.pushSevaSponsor({
-                holder, event, qrPass, catCode,
-                categoryName: category.name || "",
-                subCategory: holder?.subCategory || "",
-                preacherPhone,
-                instruction: holder?.instruction || "",
-              });
-            } else {
-              result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
-            }
-            await QRPass.findByIdAndUpdate(qrPass._id, {
-              communityAppSync: {
-                attempted: !!result.attempted,
-                success: !!result.success,
-                skipped: !!result.skipped,
-                reason: result.reason || null,
-                responseBody: result.responseBody || null,
-                attemptedAt: new Date(),
-              },
-            });
-          } catch (e) {
-            console.error("[Integration] community app push failed:", e.message);
-            await QRPass.findByIdAndUpdate(qrPass._id, {
-              communityAppSync: {
-                attempted: true, success: false, skipped: false,
-                reason: e.message, responseBody: null, attemptedAt: new Date(),
-              },
-            }).catch(() => {});
-          }
-        })();
+        // Push to community mobile app (non-fatal, fire-and-forget)
+        const qrPassObj = { qrId };
+        thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: null, event }).catch(() => {});
+        // Only fires if the caller explicitly overrode `category` to a
+        // sponsor/donor/invitee type. A volunteer pass (VL) must NOT be
+        // pushed as a seva-sponsor — it goes out via store-qr-code below.
+        const catCode = (category.catCode || "").toUpperCase();
+        if (["SP", "DN", "INV"].includes(catCode)) {
+          thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
+        }
 
         results.push({
           success: true, reused: false, reissued,
@@ -320,6 +276,16 @@ exports.generateVolunteerQRBulk = async (req, res) => {
       } catch (e) {
         results.push({ success: false, error: e.message, input: h });
       }
+    }
+
+    // Batch push all QR strings to community app in one call
+    const qrEntries = results
+      .filter((r) => r.success && r.qr_id && r.phone)
+      .map((r) => ({ phone: r.phone, qrId: r.qr_id }));
+    if (qrEntries.length > 0) {
+      thirdPartyService.pushStoreQrCodeBulk(qrEntries, event).catch((e) => {
+        console.error("[Integration] bulk store-qr-code push failed:", e.message);
+      });
     }
 
     const succeeded = results.filter((r) => r.success).length;
@@ -748,14 +714,46 @@ exports.sevaPassIssue = async (req, res) => {
       ? holderName.trim()
       : (user_email ? user_email.split("@")[0] : `Devotee ${phone.slice(-4)}`);
 
+    // The app sends `preacher` as the DEVOTEE SHORT CODE (e.g. "NTHD"), and
+    // usually no id. Resolve it to the actual preacher User so the pass is
+    // linked by reference and not only by a matching string — string matching
+    // breaks the moment someone is renamed.
+    let resolvedPreacherId = preacherId || null;
+    let resolvedPreacherLabel = preacher ? String(preacher).trim() : "";
+    if (!resolvedPreacherId && resolvedPreacherLabel) {
+      try {
+        const hit = await resolvePreacherFromString(resolvedPreacherLabel);
+        if (hit?.preacherId) {
+          resolvedPreacherId = hit.preacherId;
+          // Keep the code the app sent in `preacher` — it is what the CSV
+          // column holds too, so both sources look the same in reports.
+        } else {
+          console.warn(
+            `[SevaPass] preacher code "${resolvedPreacherLabel}" did not match ` +
+            `any preacher — storing it as free text only`,
+          );
+        }
+      } catch (e) {
+        console.warn("[SevaPass] preacher resolution failed:", e.message);
+      }
+    }
+
     const holderData = {
       eventId: event._id, catId: category._id, phone,
       email: user_email || undefined,
       name: resolvedName,
       holderType: holderTypeLabel, holderTypeId,
       source: "third_party",
-      issuedBy: preacherId || null,
-      ...(preacher ? { thirdPartyAttribution: preacher } : {}),
+      issuedBy: resolvedPreacherId || null,
+      // FIX: this used to write `thirdPartyAttribution`, which is NOT a field
+      // on the Holder schema — Mongoose strict mode silently dropped it, so
+      // every preacher attribution the Seva Pass app sent was thrown away and
+      // the pass never showed up in that preacher's own list.
+      //
+      // Written to the two fields that exist and that
+      // preacherController.getMyHolders actually queries.
+      ...(resolvedPreacherId ? { preacherId: resolvedPreacherId } : {}),
+      ...(resolvedPreacherLabel ? { preacher: resolvedPreacherLabel } : {}),
     };
 
     let holder = existingHolder || null;
@@ -778,8 +776,12 @@ exports.sevaPassIssue = async (req, res) => {
         if (!holder) throw e;
         if (resolvedName && holder.name !== resolvedName) {
           holder.name = resolvedName;
-          if (preacher) holder.thirdPartyAttribution = preacher;
-          if (preacherId) holder.issuedBy = preacherId;
+          // Same fix as above — real fields, not the phantom one.
+          if (resolvedPreacherLabel) holder.preacher = resolvedPreacherLabel;
+          if (resolvedPreacherId) {
+            holder.preacherId = resolvedPreacherId;
+            holder.issuedBy = resolvedPreacherId;
+          }
           await holder.save();
         }
       } else { throw e; }
@@ -800,7 +802,7 @@ exports.sevaPassIssue = async (req, res) => {
       return match ? [match] : [];
     })();
 
-    const qrPass = await QRPass.create({
+    await QRPass.create({
       qrId, holderId: holder._id, eventId: event._id, catId: category._id,
       entryPoints: entryPoints.map((ep) => ep._id),
       payloadSigned: signedPayload,
@@ -809,56 +811,13 @@ exports.sevaPassIssue = async (req, res) => {
       allowedVenues,
     });
 
-    // ── Push to community mobile app ────────────────────────────────────────
-    // This endpoint IS the community app asking us for a QR, so pushing
-    // register-volunteer back would be redundant — they already know about
-    // this holder. Only SP/DN/INV categories need the seva-sponsor push
-    // (VL/General categories have nothing further to report back).
-    // Awaited (not fire-and-forget) so the result can be persisted on the
-    // QRPass for visibility — matches the pattern used by createHolder/
-    // bulk import/retryCommunitySync elsewhere in the codebase.
-    (async () => {
-      try {
-        const catCode = (category.catCode || "").toUpperCase();
-        let result;
-        if (["SP", "DN", "INV"].includes(catCode)) {
-          const preacherPhone = await resolvePreacherPhone(preacherId);
-          result = await thirdPartyService.pushSevaSponsor({
-            holder, event, qrPass, catCode,
-            categoryName: category.name || "",
-            subCategory: holder?.subCategory || "",
-            preacherPhone,
-            instruction: holder?.instruction || "",
-          });
-        } else if (catCode === "VL") {
-          result = await thirdPartyService.pushStoreQrCode({ holder, event, qrPass });
-        } else {
-          result = await thirdPartyService.pushHolder({ holder, qrPass, qrImageBase64: qrImage, event });
-        }
-        await QRPass.findByIdAndUpdate(qrPass._id, {
-          communityAppSync: {
-            attempted: !!result.attempted,
-            success: !!result.success,
-            skipped: !!result.skipped,
-            reason: result.reason || null,
-            responseBody: result.responseBody || null,
-            attemptedAt: new Date(),
-          },
-        });
-      } catch (e) {
-        console.error("[SevaPass] community app push failed:", e.message);
-        await QRPass.findByIdAndUpdate(qrPass._id, {
-          communityAppSync: {
-            attempted: true,
-            success: false,
-            skipped: false,
-            reason: e.message,
-            responseBody: null,
-            attemptedAt: new Date(),
-          },
-        }).catch(() => {});
-      }
-    })();
+    // Push to community mobile app (non-fatal, fire-and-forget)
+    const qrPassObj = { qrId };
+    thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: qrImage, event }).catch(() => {});
+    const catCode = (category.catCode || "").toUpperCase();
+    if (["SP", "DN", "INV"].includes(catCode)) {
+      thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
+    }
 
     const venueLabel = venue ? ` at ${venue}` : "";
     console.log(`[SevaPass] QR generated for ${phone} (${resolvedName}) at event ${event.eventCode} [${category.catCode}]${venueLabel}`);

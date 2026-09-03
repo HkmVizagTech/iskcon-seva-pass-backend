@@ -3,12 +3,17 @@
 //         → only ONE holder record per number per event, so a number could
 //           never hold both a "Sponsor category A" pass and a "Sponsor
 //           category B" / Donor / Volunteer pass.
-// NEW:  unique { eventId, phone, catId, subCategory }  (uniq_event_phone_type_category)
-//         → one pass per number per (holder type + category) per event.
-//           Sponsor A twice          → blocked
-//           Sponsor A then Sponsor B → allowed
-//           Sponsor A then Donor     → allowed
-//           Volunteer twice          → blocked (volunteers carry no category)
+// NEW:  unique { eventId, phone, catId, subCategory, passSeq }
+//                                    (uniq_event_phone_type_category_seq)
+//         → a number may hold any pass it legitimately needs, including a
+//           SECOND pass of the same type and category (a donor who sponsors
+//           twice at tier A), while an ACCIDENTAL duplicate is still blocked.
+//           Sponsor A then Sponsor B          → allowed (different category)
+//           Sponsor A then Donor              → allowed (different type)
+//           Sponsor A (seq 1) then A (seq 2)  → allowed, deliberate extra
+//           Sponsor A (seq 1) twice           → blocked (double-submit, race)
+//         passSeq is 1 unless the admin explicitly asks for an additional
+//         pass, so anything issued without intent collides as before.
 //
 // What this script does (idempotent — safe to re-run):
 //   Step 1: Normalise subCategory — unset "" / "NONE" / "N/A" / "-" so that
@@ -41,8 +46,8 @@ const DRY_RUN = process.argv.includes("--dry-run");
 const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://localhost:27017/iskcon_seva_pass";
 
-const NEW_INDEX_NAME = "uniq_event_phone_type_category";
-const NEW_INDEX_KEY = { eventId: 1, phone: 1, catId: 1, subCategory: 1 };
+const NEW_INDEX_NAME = "uniq_event_phone_type_category_seq";
+const NEW_INDEX_KEY = { eventId: 1, phone: 1, catId: 1, subCategory: 1, passSeq: 1 };
 const BLANK_CATEGORIES = ["", " ", "NONE", "N/A", "-", "none", "n/a"];
 
 async function main() {
@@ -51,6 +56,20 @@ async function main() {
   const db = mongoose.connection.db;
   const holders = db.collection("holders");
   console.log("✅ Connected\n");
+
+  // ── Step 0: backfill passSeq ──────────────────────────────────────────────
+  // Documents written before passSeq existed have no such field, which the
+  // index reads as null. That is consistent, but an explicit 1 keeps the data
+  // readable and matches what the app writes from now on.
+  const missingSeq = await holders.countDocuments({ passSeq: { $exists: false } });
+  console.log(`Step 0 — holders missing passSeq (backfilled to 1): ${missingSeq}`);
+  if (missingSeq > 0 && !DRY_RUN) {
+    const r = await holders.updateMany(
+      { passSeq: { $exists: false } },
+      { $set: { passSeq: 1 } },
+    );
+    console.log(`         set on ${r.modifiedCount} document(s)`);
+  }
 
   // ── Step 1: normalise blank subCategory values ────────────────────────────
   const blankFilter = { subCategory: { $in: BLANK_CATEGORIES } };
@@ -92,6 +111,9 @@ async function main() {
             phone: "$phone",
             catId: "$catId",
             subCategory: "$subCategory",
+            // Included so two DELIBERATE passes (seq 1 and seq 2) are not
+            // reported as a violation — only a genuine same-seq clash is.
+            passSeq: { $ifNull: ["$passSeq", 1] },
           },
           count: { $sum: 1 },
           ids: { $push: "$_id" },
@@ -107,6 +129,7 @@ async function main() {
       console.log(
         `         phone=${c._id.phone} event=${c._id.eventId} ` +
           `type=${c._id.catId} category=${c._id.subCategory ?? "(none)"} ` +
+          `seq=${c._id.passSeq} ` +
           `→ ${c.count} holders: ${c.ids.join(", ")}`,
       );
     }
@@ -118,16 +141,20 @@ async function main() {
 
   // ── Step 3 + 4: swap the indexes ──────────────────────────────────────────
   const existing = await holders.indexes();
-  const oldUnique = existing.find(
+  // Both earlier shapes are superseded: the original 2-field index, and the
+  // 4-field one from before passSeq existed (if a prior run created it).
+  const supersededUnique = existing.filter(
     (ix) =>
       ix.unique &&
-      Object.keys(ix.key).length === 2 &&
+      ix.name !== NEW_INDEX_NAME &&
       ix.key.eventId === 1 &&
-      ix.key.phone === 1,
+      ix.key.phone === 1 &&
+      (Object.keys(ix.key).length === 2 || Object.keys(ix.key).length === 4),
   );
+  const oldUnique = supersededUnique[0];
   const alreadyNew = existing.find((ix) => ix.name === NEW_INDEX_NAME);
 
-  console.log(`\nStep 3 — old unique { eventId, phone } index: ${oldUnique ? oldUnique.name : "not present"}`);
+  console.log(`\nStep 3 — superseded unique index(es): ${supersededUnique.length ? supersededUnique.map((i) => i.name).join(", ") : "none present"}`);
   console.log(`Step 4 — new ${NEW_INDEX_NAME} index: ${alreadyNew ? "already present" : "will be created"}`);
 
   if (DRY_RUN) {
@@ -143,9 +170,9 @@ async function main() {
 
   // Drop the old one only AFTER the new one exists, so there is never a window
   // with no uniqueness protection at all.
-  if (oldUnique) {
-    await holders.dropIndex(oldUnique.name);
-    console.log(`         dropped ${oldUnique.name}`);
+  for (const ix of supersededUnique) {
+    await holders.dropIndex(ix.name);
+    console.log(`         dropped ${ix.name}`);
   }
 
   // Non-unique replacement for "every pass on this number" lookups.
