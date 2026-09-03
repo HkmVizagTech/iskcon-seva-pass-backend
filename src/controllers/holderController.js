@@ -1926,3 +1926,140 @@ exports.resendSponsorsWithNewVenue = async (req, res) => {
     res.status(500).json({ error: "Bulk resend failed", detail: error.message });
   }
 };
+
+// ── Bulk resend WhatsApp with per-sponsor new venue, via uploaded file ───────
+// POST /api/holders/events/:eventId/resend-sponsors-bulk
+// multipart/form-data: file (CSV/XLSX with "Phone Number" + "Venue" columns)
+//
+// Each row's Venue is sent ONLY to that row's phone number, using their
+// existing active Sponsor QR pass on this event — for when different
+// sponsors are moving to different venues, not a single blanket change.
+exports.resendSponsorsBulkFile = async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "No file uploaded" });
+  }
+  const filePath = req.file.path;
+  try {
+    const { eventId } = req.params;
+
+    const event = await Event.findById(eventId);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    const sponsorType = await HolderType.findOne({ eventId, catCode: "SP" });
+    if (!sponsorType) {
+      return res.status(404).json({ error: "No Sponsor category configured for this event" });
+    }
+
+    const resendDenied = await checkIssuePermission(req.user, {
+      catId: sponsorType._id,
+      deliveryMethod: "whatsapp",
+    });
+    if (resendDenied) {
+      return res.status(resendDenied.status).json(resendDenied.body);
+    }
+
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+    let records = [];
+    if (fileExt === ".csv") {
+      records = await parseCSV(filePath);
+    } else if ([".xlsx", ".xls"].includes(fileExt)) {
+      records = parseExcel(filePath);
+    } else {
+      return res.status(400).json({ error: "Unsupported file type. Use CSV or Excel." });
+    }
+
+    const results = {
+      total: records.length,
+      sent: 0,
+      failed: 0,
+      failedList: [],       // { phone, venue, error }
+      notFoundList: [],     // { phone, venue } — no matching active Sponsor QR on this event
+    };
+
+    for (const record of records) {
+      const rawPhone = (
+        record["Phone Number"] || record["phone number"] || record.Phone || record.phone || ""
+      ).toString().trim();
+      const rowVenue = (record.Venue || record.venue || "").toString().trim();
+      const normPhone = normalisePhone(rawPhone) || rawPhone;
+
+      if (!normPhone || !rowVenue) {
+        results.failed++;
+        results.failedList.push({ phone: rawPhone, venue: rowVenue, error: "Missing phone or venue" });
+        continue;
+      }
+
+      const holder = await Holder.findOne({
+        eventId,
+        catId: sponsorType._id,
+        phone: normPhone,
+      });
+      const qrPass = holder
+        ? await QRPass.findOne({ holderId: holder._id, eventId, status: "active" })
+            .populate("entryPoints")
+        : null;
+
+      if (!holder || !qrPass) {
+        results.notFoundList.push({ phone: rawPhone, venue: rowVenue });
+        continue;
+      }
+
+      try {
+        const validFrom = qrPass.validFrom || event.dateStart;
+        const validUntil = qrPass.validUntil || event.dateEnd;
+
+        const compactPayload = qrService.createPayload(
+          { ...holder.toObject(), qrId: qrPass.qrId },
+          event,
+          null,
+          qrPass.entryPoints,
+        );
+        const { image: qrImage } = await qrService.generateQRCode(compactPayload);
+
+        let sevaSlotDetails = null;
+        if (holder.sevaSlotId) {
+          sevaSlotDetails = await SevaSlot.findById(holder.sevaSlotId)
+            .select("code name time displayLabel").lean();
+        }
+
+        const passDetails = {
+          entryPoints: qrPass.entryPoints.map((ep) => ep.name || ep.stationLabel),
+          qrId: qrPass.qrId,
+          validFrom: validFrom.toISOString(),
+          validUntil: validUntil.toISOString(),
+          venue: rowVenue, // this row's own venue — not a shared value
+          sevaSlot: sevaSlotDetails,
+          tier: holder.subCategory || "",
+          isSponsor: true,
+        };
+
+        await whatsappService.sendQRMessage(
+          holder.phone || holder.whatsappNumber,
+          qrImage,
+          holder.name,
+          event.name,
+          passDetails,
+        );
+
+        await Holder.findByIdAndUpdate(holder._id, { venueName: rowVenue });
+
+        results.sent++;
+      } catch (e) {
+        results.failed++;
+        results.failedList.push({ phone: rawPhone, venue: rowVenue, name: holder.name, error: e.message });
+      }
+    }
+
+    try { fs.unlinkSync(filePath); } catch (_) {}
+
+    return res.json({
+      success: true,
+      message: `Resent ${results.sent} of ${results.total} rows — ${results.notFoundList.length} phone(s) had no matching active Sponsor QR on this event`,
+      ...results,
+    });
+  } catch (error) {
+    try { fs.unlinkSync(filePath); } catch (_) {}
+    console.error("resendSponsorsBulkFile error:", error);
+    res.status(500).json({ error: "Bulk resend failed", detail: error.message });
+  }
+};
