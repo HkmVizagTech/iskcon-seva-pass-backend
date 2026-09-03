@@ -174,6 +174,15 @@ class ThirdPartyService {
         instruction: instruction || sevaSlotName || categoryName || event?.name || "",
       };
 
+      // NOTE: this used to retry once with seva_type omitted on a 422
+      // "seva type invalid" response. As of 2026-09-03 that retry started
+      // firing for EVERY pass (not just the original Invitee cases) and the
+      // omitted-field retry also failed ("The seva type field is required"),
+      // meaning the community app's accepted seva_type values changed on
+      // their end and neither guess is currently valid. Reverted to a
+      // single clean attempt so failures surface their real, undistorted
+      // error instead of masking it behind a doomed second request that
+      // just burns their rate limit.
       const response = await this._axiosPostThrottled(
         `${this.baseUrl}/api/v1/user/festivals/seva-sponsor`,
         body,
@@ -182,7 +191,8 @@ class ThirdPartyService {
 
       const ok = response.data?.success === true;
       console.log(`[CommunityApp] seva-sponsor ${ok ? "OK" : "non-success"} for ${bare10} ` +
-        `[${holderLabel || catCode}, category ${categoryLabel ? `"${categoryLabel}"` : "omitted"}] ` +
+        `[${holderLabel || catCode}, category ${categoryLabel ? `"${categoryLabel}"` : "omitted"}, ` +
+        `seva_type "${body.seva_type}"] ` +
         `→ event_id ${thirdPartyEventId}:`,
         JSON.stringify(response.data).slice(0, 200));
       return { attempted: true, success: ok, skipped: false, responseBody: JSON.stringify(response.data).slice(0, 500) };
