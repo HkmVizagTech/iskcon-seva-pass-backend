@@ -59,6 +59,11 @@ const holderSchema = new mongoose.Schema({
     default: null,
   },
   venueName: String,
+  // Which specific day (within a multi-day event) this holder's own
+  // seva/program falls on — set via the bulk sheet's "Date" column.
+  // Overrides the event's overall dateStart for THIS holder's QR pass and
+  // WhatsApp date display. Null means "use the event's dateStart" (default).
+  sevaDate: Date,
   email: {
     type: String,
     lowercase: true,

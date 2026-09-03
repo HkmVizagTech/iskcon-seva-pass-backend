@@ -11,6 +11,44 @@ function normalisePhone(phone) {
   if (digits.length === 11 && digits.startsWith("0")) return "91" + digits.slice(1);
   return digits;
 }
+
+// ─── Helper: parse a per-row "Date" cell from a bulk sheet ───────────────────
+// xlsx's sheet_to_json (used without {raw:false}) can hand back a date cell
+// as any of: a JS Date object, an Excel serial number, or a plain string
+// (e.g. "2026-09-04" or "04-09-2026") depending on how the cell was
+// formatted/typed. Returns a JS Date at local midnight, or null if the
+// cell was blank/unparseable (falls back to event.dateStart upstream).
+function parseSheetDate(raw) {
+  if (raw === undefined || raw === null || raw === "") return null;
+
+  // Already a real Date (xlsx does this for cells formatted as dates)
+  if (raw instanceof Date && !isNaN(raw.getTime())) return raw;
+
+  // Excel serial date number (days since 1899-12-30)
+  if (typeof raw === "number" && isFinite(raw)) {
+    const utcDays = raw - 25569; // 25569 = days between 1899-12-30 and 1970-01-01
+    const utcMs = utcDays * 86400 * 1000;
+    const d = new Date(utcMs);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  const str = String(raw).trim();
+  if (!str) return null;
+
+  // DD-MM-YYYY or DD/MM/YYYY (common manual-entry format)
+  const dmy = str.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+  if (dmy) {
+    const [, d, m, y] = dmy;
+    const parsed = new Date(Number(y), Number(m) - 1, Number(d));
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+
+  // Fall back to native parsing (handles "2026-09-04", "Sep 4 2026", ISO, etc.)
+  const native = new Date(str);
+  if (!isNaN(native.getTime())) return native;
+
+  return null;
+}
 // FIX: All requires moved to TOP
 // FIX: All requires moved to TOP of file — previously they were at the bottom,
 // causing ReferenceError when any exported function was called before the
@@ -557,6 +595,7 @@ exports.createHolder = async (req, res) => {
       preacherId,  // ObjectId ref to User with role "preacher" (from dropdown)
       venueName,
       venues,      // optional array of venue NAMES the pass is valid at
+      sevaDate,    // optional — which day of a multi-day event this holder's seva is on
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -743,6 +782,7 @@ exports.createHolder = async (req, res) => {
       preacher: preacher || "",
       preacherId: preacherId || null,
       venueName: venueName || primaryVenue?.name || "",
+      sevaDate: parseSheetDate(sevaDate) || undefined,
       // Category tier (A/B/C) — applies to any pass type, part of the uniqueness key
       subCategory: incomingTier || undefined,
       // Seva slot (timing) — sponsors only, NOT part of the uniqueness key
@@ -810,7 +850,9 @@ exports.createHolder = async (req, res) => {
     );
     // validFrom/validUntil stored in QRPass for display purposes only.
     // Scan validation reads live event dates from DB — not these stored values.
-    const validFrom = event.dateStart;
+    // If the holder has a sevaDate (from the sheet/form's Date field, for
+    // multi-day events), it takes priority over the event's overall dateStart.
+    const validFrom = holder.sevaDate || event.dateStart;
     const validUntil = event.dateEnd;
 
     const payload = qrService.createPayload(
@@ -1327,6 +1369,11 @@ async function processSingleRecord(
   // venue: kept as a single string for display fields (seating label, notes,
   // customFields) that predate multi-venue support — uses the first venue.
   const venue = venueList[0] || "";
+  // Date column: which day within a multi-day event this sponsor's seva
+  // actually falls on (e.g. Janmashtami spans several days) — overrides the
+  // event's overall dateStart for THIS holder's QR pass and WhatsApp message.
+  // Leave blank to keep using the event's dateStart (unchanged default).
+  const rowDate = parseSheetDate(record.Date || record.date);
   const slot = (record.Slot || record.slot || "").toString().trim();
 
   // Resolve SevaSlot from the slot code (sponsors only)
@@ -1425,6 +1472,7 @@ async function processSingleRecord(
       // CSV shortCode/name resolves to preacherId; UI dropdown overrides if set
       preacherId: csvPreacherId || bulkPreacherId || null,
       venueName: (venueList.length > 1 ? venueList.join(" / ") : venue) || event.venue?.[0]?.name || "",
+      sevaDate: rowDate || undefined,
       notes:
         [sponsorSeva, sponsorCategory, preacher, venue, tier, slotCode]
           .filter(Boolean)
@@ -1495,7 +1543,7 @@ async function processSingleRecord(
       catId: category._id,
       entryPoints: entryPoints.map((ep) => ep._id),
       payloadSigned: signedPayload,
-      validFrom: event.dateStart,
+      validFrom: rowDate || event.dateStart,
       validUntil: event.dateEnd,
       deliveryMethod,
       deliveryStatus: "pending",
@@ -1531,7 +1579,7 @@ async function processSingleRecord(
           {
             entryPoints: entryPoints.map((ep) => ep.name),
             qrId,
-            validFrom: event.dateStart.toISOString(),
+            validFrom: (rowDate || event.dateStart).toISOString(),
             validUntil: event.dateEnd.toISOString(),
             venue: venue || event.venue?.[0]?.name || "",
             isSponsor: isSponsor,           // use sponsor_qr_message template
@@ -1981,6 +2029,7 @@ exports.resendSponsorsBulkFile = async (req, res) => {
         record["Phone Number"] || record["phone number"] || record.Phone || record.phone || ""
       ).toString().trim();
       const rowVenue = (record.Venue || record.venue || "").toString().trim();
+      const rowDate = parseSheetDate(record.Date || record.date); // optional
       const normPhone = normalisePhone(rawPhone) || rawPhone;
 
       if (!normPhone || !rowVenue) {
@@ -2005,7 +2054,10 @@ exports.resendSponsorsBulkFile = async (req, res) => {
       }
 
       try {
-        const validFrom = qrPass.validFrom || event.dateStart;
+        // Date column is optional here — if the row provides one, it
+        // overrides; otherwise keep whatever the pass already had (falling
+        // back further to the holder's own sevaDate, then the event start).
+        const validFrom = rowDate || qrPass.validFrom || holder.sevaDate || event.dateStart;
         const validUntil = qrPass.validUntil || event.dateEnd;
 
         const compactPayload = qrService.createPayload(
@@ -2041,7 +2093,12 @@ exports.resendSponsorsBulkFile = async (req, res) => {
           passDetails,
         );
 
-        await Holder.findByIdAndUpdate(holder._id, { venueName: rowVenue });
+        const holderUpdate = { venueName: rowVenue };
+        if (rowDate) holderUpdate.sevaDate = rowDate;
+        await Holder.findByIdAndUpdate(holder._id, holderUpdate);
+        if (rowDate) {
+          await QRPass.findByIdAndUpdate(qrPass._id, { validFrom: rowDate });
+        }
 
         results.sent++;
       } catch (e) {
