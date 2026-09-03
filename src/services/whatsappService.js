@@ -158,10 +158,14 @@ class WhatsAppService {
       ? (isSponsor
           ? (process.env.GUPSHUP_TEMPLATE_SPONSOR || "a9fd6274-a5ec-49f4-bd36-2fb3aee66611")
           // "qr_issue_skj" — same 4 params as the sponsor template (Name,
-          // Event, Date, Venue). Approved in Gupshup as of 2026-09-03 — this
-          // hardcoded ID IS the approved template, so General/Donor/Invitee/
-          // Volunteer sends now go through Gupshup with no further deploy.
-          : (process.env.GUPSHUP_TEMPLATE_GENERAL || "2ef7edc8-bed6-45f3-9688-8b6ff0fa0710"))
+          // Event, Date, Venue). Approved in Gupshup as of 2026-09-03.
+          // NOTE: this ID was corrected on 2026-09-03 — the user supplied a
+          // second, different template ID for the same approved message text
+          // (likely Gupshup's actual template ID vs. an earlier WhatsApp
+          // Business Manager ID). This hardcoded ID IS the approved template,
+          // so General/Donor/Invitee/Volunteer sends now go through Gupshup
+          // with no further deploy.
+          : (process.env.GUPSHUP_TEMPLATE_GENERAL || "3011315279202116"))
       : null;
 
     if (gupshupTemplateId) {
