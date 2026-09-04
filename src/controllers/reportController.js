@@ -162,20 +162,93 @@ exports.getScanLog = async (req, res) => {
     // FIX: cursor-based pagination instead of skip/limit
     // skip(N) on large collections scans N documents — gets exponentially slower per page
     // before= accepts the scannedAt ISO string of the last item from the previous page
-    const { before, limit = 50, result: resultFilter, slotId, session } = req.query;
+    const {
+      before, limit = 50, result: resultFilter, slotId, session,
+      venue,          // ScanLog.venue — where the scan physically happened
+      allowedVenue,   // QRPass.allowedVenues — which venue(s) the pass itself is restricted to
+      catId,          // Holder.catId — category (Sponsor/Donor/etc)
+      tier,           // Holder.subCategory — bahumana tier A/B/C
+      epId,           // EntryPoint._id — specific station/entry point
+      search,         // free-text: holder name or phone number
+    } = req.query;
 
     const eventEntryPoints = await EntryPoint.find({ eventId }).select("_id");
-    const epIds = eventEntryPoints.map((ep) => ep._id);
+    let epIds = eventEntryPoints.map((ep) => ep._id);
+
+    // Entry point / station filter — narrow to just this one station
+    // instead of every entry point on the event.
+    if (epId) {
+      epIds = epIds.filter((id) => id.toString() === epId);
+    }
 
     const query = { epId: { $in: epIds } };
     if (resultFilter) query.result = resultFilter;
     if (before) query.scannedAt = { $lt: new Date(before) };
 
+    // Scan venue filter — where the scan physically happened (ScanLog.venue,
+    // set by the scanner when the volunteer picks a venue at that station).
+    if (venue) {
+      query.venue = venue;
+    }
+
     // Slot filter (legacy): find all holder IDs with this seva slot
+    let holderFilterIds = null; // null = no holder-based restriction yet
     if (slotId) {
       const Holder = require("../models/Holder");
       const holderIds = await Holder.find({ sevaSlotId: slotId }).select("_id").lean();
-      query.holderId = { $in: holderIds.map(h => h._id) };
+      holderFilterIds = new Set(holderIds.map((h) => h._id.toString()));
+    }
+
+    // Category / tier filter — both narrow by Holder fields, so resolve
+    // matching holder IDs and intersect with any existing holder restriction.
+    if (catId || tier) {
+      const Holder = require("../models/Holder");
+      const holderQuery = { eventId };
+      if (catId) holderQuery.catId = catId;
+      if (tier) holderQuery.subCategory = tier.toUpperCase();
+      const matched = await Holder.find(holderQuery).select("_id").lean();
+      const matchedIds = new Set(matched.map((h) => h._id.toString()));
+      holderFilterIds = holderFilterIds
+        ? new Set([...holderFilterIds].filter((id) => matchedIds.has(id)))
+        : matchedIds;
+    }
+
+    // Free-text holder search — name or phone (partial match, case-insensitive)
+    if (search && search.trim()) {
+      const Holder = require("../models/Holder");
+      const term = search.trim();
+      const matched = await Holder.find({
+        eventId,
+        $or: [
+          { name: { $regex: term, $options: "i" } },
+          { phone: { $regex: term.replace(/\D/g, ""), $options: "i" } },
+        ],
+      }).select("_id").lean();
+      const matchedIds = new Set(matched.map((h) => h._id.toString()));
+      holderFilterIds = holderFilterIds
+        ? new Set([...holderFilterIds].filter((id) => matchedIds.has(id)))
+        : matchedIds;
+    }
+
+    if (holderFilterIds !== null) {
+      query.holderId = { $in: [...holderFilterIds] };
+    }
+
+    // Allowed-venue filter — which venue(s) the PASS is restricted to
+    // (QRPass.allowedVenues), not where the scan happened. Resolve matching
+    // QR passes' holder IDs and intersect the same way.
+    if (allowedVenue) {
+      const QRPassModel = require("../models/QRPass");
+      const matchedPasses = await QRPassModel.find({
+        eventId,
+        allowedVenues: allowedVenue,
+      }).select("holderId").lean();
+      const matchedIds = new Set(matchedPasses.map((p) => p.holderId?.toString()).filter(Boolean));
+      const existing = query.holderId?.$in ? new Set(query.holderId.$in.map(String)) : null;
+      const finalIds = existing
+        ? [...existing].filter((id) => matchedIds.has(id))
+        : [...matchedIds];
+      query.holderId = { $in: finalIds };
     }
 
     // Session filter: morning = before 14:00 IST, evening = from 14:00 IST
@@ -912,5 +985,26 @@ exports.exportBahumanaAnnouncement = async (req, res) => {
   } catch (error) {
     console.error("exportBahumanaAnnouncement error:", error);
     res.status(500).json({ error: "Export failed" });
+  }
+};
+
+// GET /api/reports/events/:eventId/scan-venues
+// Distinct venue names that actually appear in this event's scan logs —
+// for populating the Live Scan Feed's "Scan Venue" filter dropdown.
+exports.getScanVenues = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const eventEntryPoints = await EntryPoint.find({ eventId }).select("_id");
+    const epIds = eventEntryPoints.map((ep) => ep._id);
+
+    const venues = await ScanLog.distinct("venue", {
+      epId: { $in: epIds },
+      venue: { $nin: [null, ""] },
+    });
+
+    res.json({ venues: venues.sort() });
+  } catch (error) {
+    console.error("getScanVenues error:", error);
+    res.status(500).json({ error: "Failed to fetch scan venues" });
   }
 };

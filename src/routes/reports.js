@@ -25,6 +25,7 @@ router.get(
   reportController.getEventSummary,
 );
 router.get("/events/:eventId/scan-log", protect, canReport, reportController.getScanLog);
+router.get("/events/:eventId/scan-venues", protect, canReport, reportController.getScanVenues);
 router.get("/events/:eventId/no-shows", protect, canReport, reportController.getNoShows);
 router.get(
   "/events/:eventId/capacity",
