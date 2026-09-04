@@ -1709,6 +1709,9 @@ function sleep(ms) {
 // ── Manual Entry: mark a holder as attended without physical QR scan ─────────
 // POST /api/qr/:qrId/manual-entry
 // Requires canManualEntry permission. Creates a ScanLog with source:manual.
+// Also resends the QR over WhatsApp — a manual "Let In" at the gate usually
+// means the person couldn't find/show their original QR, so they need it
+// back on their phone right away, same as if they'd asked for a resend.
 exports.manualEntry = async (req, res) => {
   try {
     const { qrId } = req.params;
@@ -1728,9 +1731,11 @@ exports.manualEntry = async (req, res) => {
     const EntryPoint = require("../models/EntryPoint");
 
     const qrPass = await QRPass.findOne({ qrId: qrId.toUpperCase() })
-      .populate({ path: "holderId", select: "name phone subCategory catId sevaSlotId eventId",
+      .populate({ path: "holderId", select: "name phone whatsappNumber subCategory catId sevaSlotId eventId sevaDate",
         populate: [{ path: "catId", select: "name catCode color" },
-                   { path: "sevaSlotId", select: "code name time" }] });
+                   { path: "sevaSlotId", select: "code name time displayLabel" }] })
+      .populate("eventId")
+      .populate("entryPoints");
 
     if (!qrPass) return res.status(404).json({ error: "QR pass not found" });
     if (qrPass.status !== "active") return res.status(400).json({ error: "QR pass is not active" });
@@ -1762,11 +1767,61 @@ exports.manualEntry = async (req, res) => {
       await EntryPoint.findByIdAndUpdate(resolvedEpId, { $inc: { currentCount: 1 } });
     }
 
+    // ── Resend the QR over WhatsApp (best-effort — never blocks the entry) ──
+    let whatsappSent = false;
+    let whatsappError = null;
+    const holder = qrPass.holderId;
+    const event = qrPass.eventId;
+    const phone = holder?.phone || holder?.whatsappNumber;
+
+    if (holder && event && phone) {
+      try {
+        const validFrom = holder.sevaDate || qrPass.validFrom || event.dateStart;
+        const validUntil = qrPass.validUntil || event.dateEnd;
+
+        const compactPayload = qrService.createPayload(
+          { ...holder.toObject(), qrId: qrPass.qrId },
+          event,
+          null,
+          qrPass.entryPoints,
+        );
+        const { image: qrImage } = await qrService.generateQRCode(compactPayload);
+
+        const isSponsorCategory = (holder.catId?.catCode || "").toUpperCase() === "SP";
+        const passDetails = {
+          entryPoints: (qrPass.entryPoints || []).map((ep) => ep.name || ep.stationLabel),
+          qrId: qrPass.qrId,
+          validFrom: validFrom.toISOString(),
+          validUntil: validUntil.toISOString(),
+          venue: holder.venueName || event.venue?.[0]?.name || "",
+          sevaSlot: holder.sevaSlotId || null,
+          tier: holder.subCategory || "",
+          isSponsor: isSponsorCategory,
+        };
+
+        await whatsappService.sendQRMessage(phone, qrImage, holder.name, event.name, passDetails);
+        whatsappSent = true;
+
+        qrPass.deliveryMethod = qrPass.deliveryMethod === "none" || !qrPass.deliveryMethod
+          ? "whatsapp"
+          : qrPass.deliveryMethod;
+        qrPass.deliveredAt = new Date();
+        qrPass.deliveryStatus = "sent";
+        await qrPass.save();
+      } catch (e) {
+        whatsappError = e.message;
+        console.error("manualEntry WhatsApp resend failed:", e.message);
+      }
+    }
+
     return res.json({
       success: true,
-      message: `${qrPass.holderId?.name || "Holder"} marked as attended`,
-      holderName: qrPass.holderId?.name,
+      message: `${holder?.name || "Holder"} marked as attended`
+        + (whatsappSent ? " and QR resent on WhatsApp" : ""),
+      holderName: holder?.name,
       qrId: qrPass.qrId,
+      whatsappSent,
+      whatsappError,
     });
   } catch (error) {
     console.error("manualEntry error:", error);
