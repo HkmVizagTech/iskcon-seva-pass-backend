@@ -841,14 +841,23 @@ exports.getBahumanaAnnouncement = async (req, res) => {
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // UTC+5:30
     const SPLIT_HOUR_IST = 14; // 2:00 PM IST
 
-    const eps = await EntryPoint.find({ eventId: eventObjectId }).select("_id");
+    const eps = await EntryPoint.find({ eventId: eventObjectId }).select("_id name stationLabel");
     const epIds = eps.map((e) => e._id);
+    const epLookup = {};
+    eps.forEach((e) => { epLookup[e._id.toString()] = e.name || e.stationLabel; });
 
-    // Get first granted scan per holder with its time
+    // Get first granted scan per holder — with its time, entry point, and venue
     const scanAgg = await ScanLog.aggregate([
       { $match: { epId: { $in: epIds }, result: "granted", holderId: { $ne: null } } },
       { $sort: { scannedAt: 1 } },
-      { $group: { _id: "$holderId", firstScan: { $first: "$scannedAt" } } },
+      {
+        $group: {
+          _id: "$holderId",
+          firstScan: { $first: "$scannedAt" },
+          firstEpId: { $first: "$epId" },
+          firstVenue: { $first: "$venue" },
+        },
+      },
     ]);
 
     // Compute sessions for all scans (for badge counts)
@@ -869,37 +878,98 @@ exports.getBahumanaAnnouncement = async (req, res) => {
     });
 
     const attendedIds = filteredScans.map((s) => s._id).filter(Boolean);
+    const scanInfoByHolder = {};
+    filteredScans.forEach((s) => {
+      scanInfoByHolder[s._id.toString()] = {
+        scannedAt: s.firstScan,
+        station: epLookup[s.firstEpId?.toString()] || null,
+        venue: s.firstVenue || null,
+      };
+    });
 
-    const holders = await Holder.find({
-      _id: { $in: attendedIds },
-      eventId: eventObjectId,
-    })
+    // All holders on this event (needed for totals + not-yet-attended, since
+    // that set isn't limited to who's attended in this session).
+    const allHolders = await Holder.find({ eventId: eventObjectId })
       .populate("catId", "name catCode color")
       .populate("sevaSlotId", "code name time sortOrder")
       .select("name phone subCategory catId sevaSlotId venueName")
-      .sort({ subCategory: 1, name: 1 })
       .lean();
 
+    const attendedHolders = allHolders
+      .filter((h) => attendedIds.some((id) => id.toString() === h._id.toString()))
+      .map((h) => ({ ...h, scanInfo: scanInfoByHolder[h._id.toString()] || null }))
+      .sort((a, b) => (a.subCategory || "").localeCompare(b.subCategory || "") || a.name.localeCompare(b.name));
+
     const tierOrder = ["A", "B", "C"];
-    const sponsors = holders.filter(
+    const sponsorsAttended = attendedHolders.filter(
       (h) => (h.catId?.catCode || "").toUpperCase() === "SP"
     );
-    const others = holders.filter(
+    const othersAttended = attendedHolders.filter(
       (h) => (h.catId?.catCode || "").toUpperCase() !== "SP"
     );
     const grouped = tierOrder
-      .map((tier) => ({ tier, holders: sponsors.filter((h) => h.subCategory === tier) }))
+      .map((tier) => ({ tier, holders: sponsorsAttended.filter((h) => h.subCategory === tier) }))
       .filter((g) => g.holders.length > 0);
-    const untiered = sponsors.filter((h) => !h.subCategory);
+    const untiered = sponsorsAttended.filter((h) => !h.subCategory);
     if (untiered.length > 0) grouped.push({ tier: "—", holders: untiered });
+
+    // Group non-sponsor attendees by their own category name (Donor, Invitee, etc)
+    const othersByCategory = {};
+    othersAttended.forEach((h) => {
+      const catName = h.catId?.name || "Other";
+      if (!othersByCategory[catName]) othersByCategory[catName] = [];
+      othersByCategory[catName].push(h);
+    });
+    const groupedOthers = Object.entries(othersByCategory).map(([category, holders]) => ({ category, holders }));
+
+    // Not-yet-attended sponsors — full pass, no scan at all (session filter
+    // doesn't apply here, since they haven't attended in ANY session yet).
+    const attendedIdSet = new Set(scanAgg.map((s) => s._id.toString()));
+    const notYetAttended = allHolders
+      .filter((h) => (h.catId?.catCode || "").toUpperCase() === "SP" && !attendedIdSet.has(h._id.toString()))
+      .sort((a, b) => (a.subCategory || "").localeCompare(b.subCategory || "") || a.name.localeCompare(b.name));
+
+    // Venue / station breakdown — where sponsors actually entered
+    const stationCounts = {};
+    sponsorsAttended.forEach((h) => {
+      const key = h.scanInfo?.station || "Unknown";
+      stationCounts[key] = (stationCounts[key] || 0) + 1;
+    });
+    const venueCounts = {};
+    sponsorsAttended.forEach((h) => {
+      const key = h.scanInfo?.venue || "Unspecified";
+      venueCounts[key] = (venueCounts[key] || 0) + 1;
+    });
+
+    // Summary stats — total sponsors issued vs attended, per-tier breakdown
+    const allSponsors = allHolders.filter((h) => (h.catId?.catCode || "").toUpperCase() === "SP");
+    const tierSummary = tierOrder.map((tier) => {
+      const issued = allSponsors.filter((h) => h.subCategory === tier).length;
+      const attended = sponsorsAttended.filter((h) => h.subCategory === tier).length;
+      return { tier, issued, attended };
+    }).filter((t) => t.issued > 0);
 
     res.json({
       eventId,
       session,
       totalAttended: attendedIds.length,
-      sponsorsAttended: sponsors.length,
+      sponsorsAttended: sponsorsAttended.length,
       grouped,
-      others,
+      others: othersAttended, // kept for backward compatibility
+      groupedOthers,
+      notYetAttended,
+      summary: {
+        totalSponsorsIssued: allSponsors.length,
+        totalSponsorsAttended: sponsorsAttended.length,
+        attendanceRate: allSponsors.length
+          ? Math.round((sponsorsAttended.length / allSponsors.length) * 100)
+          : 0,
+        tierSummary,
+      },
+      breakdown: {
+        byStation: Object.entries(stationCounts).map(([station, count]) => ({ station, count })),
+        byVenue: Object.entries(venueCounts).map(([venue, count]) => ({ venue, count })),
+      },
       sessions: {
         morning: { count: morningCount, label: "Morning (before 2:00 PM)" },
         evening: { count: eveningCount, label: "Evening (from 2:00 PM)" },
@@ -910,7 +980,7 @@ exports.getBahumanaAnnouncement = async (req, res) => {
     console.error("getBahumanaAnnouncement error:", error);
     res.status(500).json({ error: "Failed to fetch announcement data" });
   }
-};;
+};
 
 // ── Bahumana Announcement CSV export ────────────────────────────────────────
 // GET /api/reports/events/:eventId/bahumana-announcement/export?session=all|morning|evening
@@ -923,13 +993,22 @@ exports.exportBahumanaAnnouncement = async (req, res) => {
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
     const SPLIT_HOUR_IST = 14;
 
-    const eps = await EntryPoint.find({ eventId: eventObjectId }).select("_id");
+    const eps = await EntryPoint.find({ eventId: eventObjectId }).select("_id name stationLabel");
     const epIds = eps.map((e) => e._id);
+    const epLookup = {};
+    eps.forEach((e) => { epLookup[e._id.toString()] = e.name || e.stationLabel; });
 
     const scanAgg = await ScanLog.aggregate([
       { $match: { epId: { $in: epIds }, result: "granted", holderId: { $ne: null } } },
       { $sort: { scannedAt: 1 } },
-      { $group: { _id: "$holderId", firstScan: { $first: "$scannedAt" } } },
+      {
+        $group: {
+          _id: "$holderId",
+          firstScan: { $first: "$scannedAt" },
+          firstEpId: { $first: "$epId" },
+          firstVenue: { $first: "$venue" },
+        },
+      },
     ]);
 
     const filteredScans = scanAgg.filter((s) => {
@@ -938,31 +1017,44 @@ exports.exportBahumanaAnnouncement = async (req, res) => {
       return session === "morning" ? hourIST < SPLIT_HOUR_IST : hourIST >= SPLIT_HOUR_IST;
     });
 
-    const attendedIds = filteredScans.map((s) => s._id).filter(Boolean);
-    const scanTimeMap = {};
-    filteredScans.forEach((s) => { scanTimeMap[String(s._id)] = s.firstScan; });
+    const scanInfoByHolder = {};
+    filteredScans.forEach((s) => {
+      scanInfoByHolder[String(s._id)] = {
+        scannedAt: s.firstScan,
+        station: epLookup[s.firstEpId?.toString()] || "",
+        venue: s.firstVenue || "",
+      };
+    });
 
-    const holders = await Holder.find({
-      _id: { $in: attendedIds },
-      eventId: eventObjectId,
-    })
+    // Export scope by session:
+    //   all      → every holder on the event (attended in any session + not yet attended)
+    //   morning  → holders who attended in the morning (not-yet-attended has no session, so excluded here)
+    //   evening  → holders who attended in the evening
+    const attendedIdsThisSession = new Set(filteredScans.map((s) => String(s._id)));
+    const attendedIdsAnySession = new Set(scanAgg.map((s) => String(s._id)));
+
+    const allHolders = await Holder.find({ eventId: eventObjectId })
       .populate("catId", "name catCode")
       .populate("sevaSlotId", "code name time")
       .select("name phone subCategory catId sevaSlotId venueName")
       .sort({ subCategory: 1, name: 1 })
       .lean();
 
+    const rows = session === "all"
+      ? allHolders // everyone — attended (any session) + not yet attended
+      : allHolders.filter((h) => attendedIdsThisSession.has(String(h._id))); // just this session's attendees
+
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 
-    let csv = "S.No,Name,Phone,Category,Bahumana Tier,Seva Slot,Venue,Scan Session,Scan Time (IST)\n";
-    holders.forEach((h, i) => {
-      const scanTime = scanTimeMap[String(h._id)];
-      const scanIST = scanTime
-        ? new Date(new Date(scanTime).getTime() + IST_OFFSET_MS)
-            .toUTCString().replace(" GMT", "")
+    let csv = "S.No,Name,Phone,Category,Bahumana Tier,Seva Slot,Venue (Assigned),Attended?,Scan Station,Scan Venue,Scan Session,Scan Time (IST)\n";
+    rows.forEach((h, i) => {
+      const scanInfo = scanInfoByHolder[String(h._id)];
+      const attended = attendedIdsAnySession.has(String(h._id));
+      const scanIST = scanInfo?.scannedAt
+        ? new Date(new Date(scanInfo.scannedAt).getTime() + IST_OFFSET_MS).toUTCString().replace(" GMT", "")
         : "";
-      const sessionLabel = scanTime
-        ? (new Date(new Date(scanTime).getTime() + IST_OFFSET_MS).getUTCHours() < SPLIT_HOUR_IST
+      const sessionLabel = scanInfo?.scannedAt
+        ? (new Date(new Date(scanInfo.scannedAt).getTime() + IST_OFFSET_MS).getUTCHours() < SPLIT_HOUR_IST
             ? "Morning" : "Evening")
         : "";
       csv += [
@@ -973,6 +1065,9 @@ exports.exportBahumanaAnnouncement = async (req, res) => {
         esc(h.subCategory || ""),
         esc(h.sevaSlotId ? `${h.sevaSlotId.name}${h.sevaSlotId.time ? " · " + h.sevaSlotId.time : ""}` : ""),
         esc(h.venueName || ""),
+        esc(attended ? "Yes" : "No"),
+        esc(scanInfo?.station || ""),
+        esc(scanInfo?.venue || ""),
         esc(sessionLabel),
         esc(scanIST),
       ].join(",") + "\n";
