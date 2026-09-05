@@ -17,6 +17,12 @@ const canReport = requirePermission("canViewReports");
 router.get("/dashboard", protect, canReport, reportController.getDashboardStats);
 router.get("/analytics", protect, canReport, reportController.getAnalytics);
 router.get("/events/:eventId/bahumana-announcement", protect, authorize("super_admin","event_admin","campaign_manager","announcer"), reportController.getBahumanaAnnouncement);
+// FIX: the frontend's "CSV" button on the Bahumana Announcement view has
+// always called this exact path, but no route for it was ever registered —
+// every click just 404'd (reported to the user as "Export failed"). The
+// controller function (exportBahumanaAnnouncement) already existed and
+// worked fine; it just had nothing routing to it.
+router.get("/events/:eventId/bahumana-announcement/export", protect, authorize("super_admin","event_admin","campaign_manager","announcer"), reportController.exportBahumanaAnnouncement);
 router.get("/analytics/export", protect, canReport, reportController.exportAnalytics);
 router.get(
   "/events/:eventId/summary",

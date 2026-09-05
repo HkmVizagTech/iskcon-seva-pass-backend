@@ -835,18 +835,21 @@ exports.exportAnalytics = async (req, res) => {
 exports.getBahumanaAnnouncement = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { session = "all" } = req.query; // all | morning | evening
+    const { session = "all", venue = "all" } = req.query; // venue: "all" | a configured venue name | "unspecified"
     const eventObjectId = new mongoose.Types.ObjectId(eventId);
 
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // UTC+5:30
     const SPLIT_HOUR_IST = 14; // 2:00 PM IST
 
+    const event = await Event.findById(eventObjectId).select("venue").lean();
     const eps = await EntryPoint.find({ eventId: eventObjectId }).select("_id name stationLabel");
     const epIds = eps.map((e) => e._id);
     const epLookup = {};
     eps.forEach((e) => { epLookup[e._id.toString()] = e.name || e.stationLabel; });
 
-    // Get first granted scan per holder — with its time, entry point, and venue
+// Get first granted scan per holder — with its time, entry point, and
+    // the venue the scanner recorded (the ACTUAL venue attended, distinct
+    // from Holder.venueName which is only what they were registered/issued for).
     const scanAgg = await ScanLog.aggregate([
       { $match: { epId: { $in: epIds }, result: "granted", holderId: { $ne: null } } },
       { $sort: { scannedAt: 1 } },
@@ -855,7 +858,7 @@ exports.getBahumanaAnnouncement = async (req, res) => {
           _id: "$holderId",
           firstScan: { $first: "$scannedAt" },
           firstEpId: { $first: "$epId" },
-          firstVenue: { $first: "$venue" },
+          venue: { $first: "$venue" },
         },
       },
     ]);
@@ -869,22 +872,57 @@ exports.getBahumanaAnnouncement = async (req, res) => {
       else eveningCount++;
     });
 
-    // Filter by session
+    // Venue counts for badges — keyed by the event's configured venue names
+    // (case-insensitive match against what the scanner actually recorded),
+    // plus an "unspecified" bucket for scans that didn't record one.
+    const configuredVenues = (Array.isArray(event?.venue) ? event.venue : [])
+      .map((v) => v?.name).filter(Boolean);
+    const venueCountMap = {};
+    let unspecifiedCount = 0;
+    scanAgg.forEach((s) => {
+      const v = typeof s.venue === "string" ? s.venue.trim() : "";
+      if (!v) { unspecifiedCount++; return; }
+      const match = configuredVenues.find((n) => n.toLowerCase() === v.toLowerCase()) || v;
+      venueCountMap[match] = (venueCountMap[match] || 0) + 1;
+    });
+    // Include every configured venue even with 0 attendees so far, so the
+    // filter always shows the full set of venues for this event.
+    configuredVenues.forEach((v) => { if (!(v in venueCountMap)) venueCountMap[v] = 0; });
+
+    const venueOptions = [
+      { key: "all", label: "All Venues", count: scanAgg.length },
+      ...Object.entries(venueCountMap)
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => ({ key: name, label: name, count })),
+      ...(unspecifiedCount > 0 ? [{ key: "unspecified", label: "Unspecified", count: unspecifiedCount }] : []),
+    ];
+
+    // Filter by session, then by venue
     const filteredScans = scanAgg.filter((s) => {
-      if (session === "all") return true;
-      const istMs = new Date(s.firstScan).getTime() + IST_OFFSET_MS;
-      const hourIST = new Date(istMs).getUTCHours();
-      return session === "morning" ? hourIST < SPLIT_HOUR_IST : hourIST >= SPLIT_HOUR_IST;
+      if (session !== "all") {
+        const istMs = new Date(s.firstScan).getTime() + IST_OFFSET_MS;
+        const hourIST = new Date(istMs).getUTCHours();
+        const sessionOk = session === "morning" ? hourIST < SPLIT_HOUR_IST : hourIST >= SPLIT_HOUR_IST;
+        if (!sessionOk) return false;
+      }
+      if (venue !== "all") {
+        const v = typeof s.venue === "string" ? s.venue.trim() : "";
+        if (venue === "unspecified") return !v;
+        return v.toLowerCase() === venue.toLowerCase();
+      }
+      return true;
     });
 
     const attendedIds = filteredScans.map((s) => s._id).filter(Boolean);
     const scanInfoByHolder = {};
+    const scanVenueMap = {};
     filteredScans.forEach((s) => {
       scanInfoByHolder[s._id.toString()] = {
         scannedAt: s.firstScan,
         station: epLookup[s.firstEpId?.toString()] || null,
-        venue: s.firstVenue || null,
+        venue: s.venue || null,
       };
+      scanVenueMap[String(s._id)] = typeof s.venue === "string" && s.venue.trim() ? s.venue.trim() : null;
     });
 
     // All holders on this event (needed for totals + not-yet-attended, since
@@ -897,7 +935,11 @@ exports.getBahumanaAnnouncement = async (req, res) => {
 
     const attendedHolders = allHolders
       .filter((h) => attendedIds.some((id) => id.toString() === h._id.toString()))
-      .map((h) => ({ ...h, scanInfo: scanInfoByHolder[h._id.toString()] || null }))
+      .map((h) => ({
+        ...h,
+        scanInfo: scanInfoByHolder[h._id.toString()] || null,
+        scanVenue: scanVenueMap[String(h._id)] || null,
+      }))
       .sort((a, b) => (a.subCategory || "").localeCompare(b.subCategory || "") || a.name.localeCompare(b.name));
 
     const tierOrder = ["A", "B", "C"];
@@ -952,6 +994,7 @@ exports.getBahumanaAnnouncement = async (req, res) => {
     res.json({
       eventId,
       session,
+      venue,
       totalAttended: attendedIds.length,
       sponsorsAttended: sponsorsAttended.length,
       grouped,
@@ -975,6 +1018,7 @@ exports.getBahumanaAnnouncement = async (req, res) => {
         evening: { count: eveningCount, label: "Evening (from 2:00 PM)" },
         all:     { count: scanAgg.length, label: "All Sessions" },
       },
+      venueOptions,
     });
   } catch (error) {
     console.error("getBahumanaAnnouncement error:", error);
@@ -987,7 +1031,7 @@ exports.getBahumanaAnnouncement = async (req, res) => {
 exports.exportBahumanaAnnouncement = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { session = "all" } = req.query;
+    const { session = "all", venue = "all" } = req.query;
     const eventObjectId = new mongoose.Types.ObjectId(eventId);
 
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -1006,24 +1050,34 @@ exports.exportBahumanaAnnouncement = async (req, res) => {
           _id: "$holderId",
           firstScan: { $first: "$scannedAt" },
           firstEpId: { $first: "$epId" },
-          firstVenue: { $first: "$venue" },
+          venue: { $first: "$venue" },
         },
       },
     ]);
 
     const filteredScans = scanAgg.filter((s) => {
-      if (session === "all") return true;
-      const hourIST = new Date(new Date(s.firstScan).getTime() + IST_OFFSET_MS).getUTCHours();
-      return session === "morning" ? hourIST < SPLIT_HOUR_IST : hourIST >= SPLIT_HOUR_IST;
+      if (session !== "all") {
+        const hourIST = new Date(new Date(s.firstScan).getTime() + IST_OFFSET_MS).getUTCHours();
+        const sessionOk = session === "morning" ? hourIST < SPLIT_HOUR_IST : hourIST >= SPLIT_HOUR_IST;
+        if (!sessionOk) return false;
+      }
+      if (venue !== "all") {
+        const v = typeof s.venue === "string" ? s.venue.trim() : "";
+        if (venue === "unspecified") return !v;
+        return v.toLowerCase() === venue.toLowerCase();
+      }
+      return true;
     });
 
     const scanInfoByHolder = {};
+    const scanVenueMap = {};
     filteredScans.forEach((s) => {
       scanInfoByHolder[String(s._id)] = {
         scannedAt: s.firstScan,
         station: epLookup[s.firstEpId?.toString()] || "",
-        venue: s.firstVenue || "",
+        venue: s.venue || "",
       };
+      scanVenueMap[String(s._id)] = typeof s.venue === "string" && s.venue.trim() ? s.venue.trim() : "";
     });
 
     // Export scope by session:
@@ -1046,7 +1100,7 @@ exports.exportBahumanaAnnouncement = async (req, res) => {
 
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 
-    let csv = "S.No,Name,Phone,Category,Bahumana Tier,Seva Slot,Venue (Assigned),Attended?,Scan Station,Scan Venue,Scan Session,Scan Time (IST)\n";
+    let csv = "S.No,Name,Phone,Category,Bahumana Tier,Seva Slot,Registered Venue,Attended?,Scan Station,Scanned Venue,Scan Session,Scan Time (IST)\n";
     rows.forEach((h, i) => {
       const scanInfo = scanInfoByHolder[String(h._id)];
       const attended = attendedIdsAnySession.has(String(h._id));
@@ -1067,15 +1121,16 @@ exports.exportBahumanaAnnouncement = async (req, res) => {
         esc(h.venueName || ""),
         esc(attended ? "Yes" : "No"),
         esc(scanInfo?.station || ""),
-        esc(scanInfo?.venue || ""),
+        esc(scanVenueMap[String(h._id)] || ""),
         esc(sessionLabel),
         esc(scanIST),
       ].join(",") + "\n";
     });
 
-    const label = session === "morning" ? "morning" : session === "evening" ? "evening" : "all";
+    const sessionLabel = session === "morning" ? "morning" : session === "evening" ? "evening" : "all";
+    const venueLabel = venue === "all" ? "" : `_${venue.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
     res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename="bahumana_${label}.csv"`);
+    res.setHeader("Content-Disposition", `attachment; filename="bahumana_${sessionLabel}${venueLabel}.csv"`);
     res.send(csv);
   } catch (error) {
     console.error("exportBahumanaAnnouncement error:", error);
