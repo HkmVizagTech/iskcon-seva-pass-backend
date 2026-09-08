@@ -58,6 +58,7 @@ const HolderType = require("../models/HolderType");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
 const EntryPoint = require("../models/EntryPoint");
+const ScanLog = require("../models/ScanLog");
 const User = require("../models/User");
 const qrService = require("../services/qrService");
 const whatsappService = require("../services/whatsappService");
@@ -512,7 +513,51 @@ exports.getHolderDetails = async (req, res) => {
       "entryPoints",
     );
 
-    res.json({ holder, qrPass });
+    // ── Scan history with real-venue attribution ──────────────────────────
+    // Venue is determined by the scanning volunteer's account prefix
+    // (GMB = Vaikuntham, GRP/GDCC = Gadiraju), NOT the `venue` field
+    // which volunteers sometimes set incorrectly on the scanner.
+    const scanLogs = await ScanLog.find({ holderId: holder._id })
+      .populate("epId", "name stationLabel type")
+      .populate("scannedBy", "name")
+      .sort({ scannedAt: 1 })
+      .lean();
+
+    const resolveVenue = (scannerName) => {
+      const n = (scannerName || "").toUpperCase();
+      if (n.startsWith("GMB"))  return "Hare Krishna Vaikuntham";
+      if (n.startsWith("GRP"))  return "Gadiraju Convention Centre";
+      if (n.startsWith("GDCC")) return "Gadiraju Convention Centre";
+      return null;
+    };
+
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const scansWithVenue = scanLogs.map((l) => {
+      const scannerName = l.scannedBy?.name || "";
+      const realVenue   = resolveVenue(scannerName) || l.venue || "Unknown";
+      const scannedAtIST = new Date(new Date(l.scannedAt).getTime() + IST_OFFSET_MS);
+      return {
+        _id:           l._id,
+        scannedAt:     l.scannedAt,
+        scannedAtIST:  scannedAtIST.toISOString(),
+        result:        l.result,
+        station:       l.epId?.name || l.epId?.stationLabel || l.stationLabel || "",
+        stationType:   l.epId?.type || "",
+        scannedBy:     scannerName,
+        realVenue,
+        recordedVenue: l.venue || "",
+        venueMismatch: !!l.venue && !!resolveVenue(scannerName) && l.venue !== resolveVenue(scannerName),
+      };
+    });
+
+    // Unique venues visited — granted scans only, real venue only
+    const venuesVisited = [...new Set(
+      scansWithVenue
+        .filter((s) => s.result === "granted" && resolveVenue(s.scannedBy))
+        .map((s) => s.realVenue)
+    )];
+
+    res.json({ holder, qrPass, scans: scansWithVenue, venuesVisited });
   } catch (error) {
     console.error("Get holder details error:", error);
     res.status(500).json({ error: "Failed to fetch holder details" });
