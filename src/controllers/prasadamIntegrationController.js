@@ -14,6 +14,7 @@ const Event = require("../models/Event");
 const HolderType = require("../models/HolderType");
 const Holder = require("../models/Holder");
 const QRPass = require("../models/QRPass");
+const EntryPoint = require("../models/EntryPoint");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
@@ -33,7 +34,11 @@ function isValidObjectId(id) {
 
 // Resolve (or create-on-first-use) the Prasadam pass type for an event.
 // Looks for catCode "PR" or a name containing "prasad". If none exists,
-// creates one automatically so the integration works without manual setup.
+// creates one automatically so the integration works without manual setup —
+// this is the fallback path for events created before "Prasadam Coupon"
+// became one of eventController.createEvent's 8 default pass types (see
+// scripts/add-prasadam-holder-type.js for the one-time backfill onto events
+// that already existed when this was added).
 async function resolvePrasadamCategory(event) {
   let category = await HolderType.findOne({
     eventId: event._id,
@@ -42,18 +47,31 @@ async function resolvePrasadamCategory(event) {
 
   if (category) return category;
 
-  // Auto-create a minimal Prasadam type + a default entry point reference.
-  // No entryPoints attached — the QR will carry no gate restriction unless
-  // the temple later assigns one via the dashboard.
+  // FIX: this used to create the category with entryPoints: [] — meaning a
+  // coupon QR carried NO gate restriction at all (valid everywhere) instead
+  // of being scoped to the prasadam counter. Every new event already gets a
+  // "Special Prasadam" entry point (type "prasadam") from createEvent, so
+  // find and link it here; only create one from scratch for an older event
+  // that predates that default.
+  let prasadamEP = await EntryPoint.findOne({ eventId: event._id, type: "prasadam" });
+  if (!prasadamEP) {
+    prasadamEP = await EntryPoint.create({
+      eventId: event._id,
+      name: "Special Prasadam",
+      stationLabel: "Prasadam Counter",
+      type: "prasadam",
+    });
+  }
+
   category = await HolderType.create({
     eventId: event._id,
     name: "Prasadam Coupon",
     catCode: "PR",
     color: "#16A34A",
     icon: "🍛",
-    entryPoints: [],
+    entryPoints: [prasadamEP._id],
   });
-  return category;
+  return category.populate("entryPoints");
 }
 
 // Core single-holder issuance logic — reused by both single and bulk endpoints.
@@ -81,6 +99,10 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
         phone: normPhone,
         qr_id: existingPass.qrId,
         qr_code: qrImage,
+        // The exact string originally signed for this pass — reused as-is
+        // (rather than re-deriving) so it's guaranteed to match what's on
+        // record, in case createPayload's output ever varies run to run.
+        qr_token: existingPass.payloadSigned,
       };
     }
   }
@@ -126,6 +148,10 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
     phone: normPhone,
     qr_id: qrId,
     qr_code: qrImage,
+    // Raw signed string encoded into qr_code — for a caller (e.g. the
+    // Vaikuntham app) that wants to render its own QR image client-side
+    // rather than display our pre-rendered PNG.
+    qr_token: signedPayload,
   };
 }
 
@@ -161,6 +187,10 @@ exports.issueSingle = async (req, res) => {
       status: true,
       message: result.reused ? "Prasadam coupon already exists — returning existing pass" : "Prasadam coupon QR generated successfully",
       qr_code: result.qr_code,
+      // Raw string the QR image encodes — use this if you're rendering the
+      // QR code yourselves (e.g. a PHP QR library) rather than displaying
+      // qr_code (a ready-made base64 PNG) directly.
+      qr_token: result.qr_token,
       qr_id: result.qr_id,
       name: result.name,
       phone: result.phone,
