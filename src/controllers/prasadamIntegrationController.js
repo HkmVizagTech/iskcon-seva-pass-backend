@@ -1,11 +1,11 @@
 // ─── Prasadam Coupon Integration ────────────────────────────────────────────
-// Separate from generateVolunteerQR (which matches by eventCode for a
-// different third-party). This one matches by our own MongoDB Event _id
-// directly, since the community app shares the same event _id with us.
+// Called by the Vaikuntham app when a devotee taps "I will attend" and opts
+// in for prasadam. Returns a coupon QR scoped to the prasadam counter.
 //
 // Endpoints:
-//   POST /api/integration/prasadam/qr          — single holder
-//   POST /api/integration/prasadam/qr/bulk     — multiple holders
+//   POST /api/integration/prasadam/qr          — single holder (the live one)
+//   POST /api/integration/prasadam/qr/bulk     — multiple holders (unused for
+//                                                now; kept for later)
 //
 // Auth: same requireApiKey middleware as the rest of /api/integration/*
 
@@ -28,8 +28,29 @@ function normalisePhone(phone) {
   return digits;
 }
 
-function isValidObjectId(id) {
-  return typeof id === "string" && /^[0-9a-fA-F]{24}$/.test(id);
+// Resolve the event from whatever identifier the caller sends.
+//
+// FIX: this used to demand a 24-character Mongo ObjectId and reject anything
+// else with a 400. The Vaikuntham app actually sends the SHORT EVENT CODE
+// ("SKJ26") — the same code this system uses, which is exactly why no
+// translation table is needed between the two systems. A strict _id check
+// meant every real call from the app failed before it ever reached the QR
+// logic.
+//
+// Same $or matching as integrationController.sevaPassIssue and
+// generateVolunteerQRBulk, so every integration endpoint resolves an event
+// identically: the event code is the normal case, and a caller holding the
+// Mongo _id or a thirdPartyEventId still works.
+async function resolveEvent(eventId) {
+  if (!eventId) return null;
+  const raw = String(eventId).trim();
+  return Event.findOne({
+    $or: [
+      { eventCode: raw.toUpperCase() },
+      { thirdPartyEventId: raw },
+      { _id: /^[0-9a-fA-F]{24}$/.test(raw) ? raw : null },
+    ],
+  });
 }
 
 // Resolve (or create-on-first-use) the Prasadam pass type for an event.
@@ -97,12 +118,13 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
         reused: true,
         name: existingHolder.name,
         phone: normPhone,
+        // qr_id is the thing to convert into a QR/display — same as every
+        // other integration flow (sevaPassIssue, generateVolunteerQRBulk).
+        // The scanner already accepts a QR that encodes just this bare id
+        // (see qrService.validateQR's qrId-only fallback), no signed token
+        // needed on the caller's side.
         qr_id: existingPass.qrId,
         qr_code: qrImage,
-        // The exact string originally signed for this pass — reused as-is
-        // (rather than re-deriving) so it's guaranteed to match what's on
-        // record, in case createPayload's output ever varies run to run.
-        qr_token: existingPass.payloadSigned,
       };
     }
   }
@@ -148,30 +170,27 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
     phone: normPhone,
     qr_id: qrId,
     qr_code: qrImage,
-    // Raw signed string encoded into qr_code — for a caller (e.g. the
-    // Vaikuntham app) that wants to render its own QR image client-side
-    // rather than display our pre-rendered PNG.
-    qr_token: signedPayload,
   };
 }
 
 /**
  * POST /api/integration/prasadam/qr
- * Body: { event_id, name, phone, email?, quantity? }
- * event_id MUST be our MongoDB Event _id (shared with the community app).
+ * Body: { event_id, phone, name?, email?, quantity? }
+ * event_id is the event code shared with the Vaikuntham app, e.g. "SKJ26".
+ * Only event_id and phone are required.
  */
 exports.issueSingle = async (req, res) => {
   try {
     const { event_id, name, phone, email, quantity } = req.body;
 
-    if (!event_id || !isValidObjectId(event_id)) {
-      return res.status(400).json({ status: false, message: "Valid event_id (Mongo ObjectId) is required" });
+    if (!event_id) {
+      return res.status(400).json({ status: false, message: "event_id is required" });
     }
     if (!phone) {
       return res.status(400).json({ status: false, message: "phone is required" });
     }
 
-    const event = await Event.findById(event_id);
+    const event = await resolveEvent(event_id);
     if (!event) {
       return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
     }
@@ -186,11 +205,11 @@ exports.issueSingle = async (req, res) => {
     return res.status(200).json({
       status: true,
       message: result.reused ? "Prasadam coupon already exists — returning existing pass" : "Prasadam coupon QR generated successfully",
+      // qr_id is the id to convert into/display as a QR — same shape as
+      // sevaPassIssue and generateVolunteerQRBulk. qr_code is also included
+      // as a ready-made image, same as those endpoints, in case that's more
+      // convenient than rendering one from qr_id.
       qr_code: result.qr_code,
-      // Raw string the QR image encodes — use this if you're rendering the
-      // QR code yourselves (e.g. a PHP QR library) rather than displaying
-      // qr_code (a ready-made base64 PNG) directly.
-      qr_token: result.qr_token,
       qr_id: result.qr_id,
       name: result.name,
       phone: result.phone,
@@ -205,13 +224,17 @@ exports.issueSingle = async (req, res) => {
  * POST /api/integration/prasadam/qr/bulk
  * Body: { event_id, holders: [{ name, phone, email?, quantity? }, ...] }
  * Max 500 holders per call.
+ *
+ * NOT currently used by the Vaikuntham app — it issues one coupon at a time
+ * through issueSingle above. Kept working (and on the same event resolution)
+ * in case a bulk import is ever needed.
  */
 exports.issueBulk = async (req, res) => {
   try {
     const { event_id, holders } = req.body;
 
-    if (!event_id || !isValidObjectId(event_id)) {
-      return res.status(400).json({ status: false, message: "Valid event_id (Mongo ObjectId) is required" });
+    if (!event_id) {
+      return res.status(400).json({ status: false, message: "event_id is required" });
     }
     if (!Array.isArray(holders) || holders.length === 0) {
       return res.status(400).json({ status: false, message: "holders must be a non-empty array" });
@@ -220,7 +243,7 @@ exports.issueBulk = async (req, res) => {
       return res.status(400).json({ status: false, message: "Maximum 500 holders per bulk request" });
     }
 
-    const event = await Event.findById(event_id);
+    const event = await resolveEvent(event_id);
     if (!event) {
       return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
     }
