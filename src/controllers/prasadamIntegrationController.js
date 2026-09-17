@@ -108,11 +108,11 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
   if (existingHolder) {
     const existingPass = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
     if (existingPass) {
-      const payload = qrService.createPayload(
-        { ...existingHolder.toObject(), qrId: existingPass.qrId },
-        event, category, category.entryPoints || [],
-      );
-      const { image: qrImage } = await qrService.generateQRCode(payload);
+      // Nothing to build here: the pass already exists and qr_id is the whole
+      // answer. This branch used to re-render the QR PNG on every repeat call
+      // purely to put it in the response — pure waste now that the image is
+      // not returned, so the payload/QR generation is gone entirely and a
+      // repeat call is just two indexed lookups.
       return {
         success: true,
         reused: true,
@@ -124,7 +124,6 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
         // (see qrService.validateQR's qrId-only fallback), no signed token
         // needed on the caller's side.
         qr_id: existingPass.qrId,
-        qr_code: qrImage,
       };
     }
   }
@@ -143,6 +142,8 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
   const qrId = await qrService.generateQRId(event.eventCode, category.catCode);
   const entryPoints = category.entryPoints || [];
   const payload = qrService.createPayload({ ...holder.toObject(), qrId }, event, category, entryPoints);
+  // qrImage is still needed here even though it is not returned: payloadSigned
+  // goes on the QRPass, and the community-app push below sends the image.
   const { image: qrImage, signedPayload } = await qrService.generateQRCode(payload);
 
   await QRPass.create({
@@ -169,7 +170,6 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
     name: holder.name,
     phone: normPhone,
     qr_id: qrId,
-    qr_code: qrImage,
   };
 }
 
@@ -205,11 +205,11 @@ exports.issueSingle = async (req, res) => {
     return res.status(200).json({
       status: true,
       message: result.reused ? "Prasadam coupon already exists — returning existing pass" : "Prasadam coupon QR generated successfully",
-      // qr_id is the id to convert into/display as a QR — same shape as
-      // sevaPassIssue and generateVolunteerQRBulk. qr_code is also included
-      // as a ready-made image, same as those endpoints, in case that's more
-      // convenient than rendering one from qr_id.
-      qr_code: result.qr_code,
+      // qr_id is the id the caller renders as a QR. The base64 qr_code image
+      // this used to return as well was dropped on request: it made every
+      // response several KB for something the app can draw itself from the
+      // id, and the scanner only ever reads the id anyway. Putting it back
+      // is a one-line change if a caller ever genuinely needs the PNG.
       qr_id: result.qr_id,
       name: result.name,
       phone: result.phone,
