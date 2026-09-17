@@ -102,6 +102,23 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
     return { success: false, error: "Invalid or missing phone number", input: { name, phone } };
   }
 
+  // Echo the number back in the caller's own format rather than the 91-prefixed
+  // one. No other integration endpoint 91-prefixes what it returns, so doing it
+  // here made prasadam the odd one out and confused the app team — they send
+  // 9951141915 and got 919951141915 back.
+  //
+  // normPhone is still what gets stored, looked up and deduplicated on; only
+  // the response echoes what the caller typed.
+  const echoPhone = String(phone).trim();
+
+  // Display fields for the app, named to match the seva-sponsor push so the
+  // same pass-display code can render a prasadam coupon without a special
+  // case. `holder` is read from the pass type itself, so renaming it in the
+  // dashboard changes what the app shows. `category` carries the A/B/C tier
+  // for sponsors and a prasadam coupon has no tier, so it is null here.
+  const displayHolder = category?.name || "Prasadam Coupon";
+  const displayCategory = null;
+
   // One coupon QR per phone per event (re-use if already issued, same as
   // the existing volunteer integration behaviour).
   const existingHolder = await Holder.findOne({ eventId: event._id, phone: normPhone, catId: category._id });
@@ -117,13 +134,15 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
         success: true,
         reused: true,
         name: existingHolder.name,
-        phone: normPhone,
+        phone: echoPhone,
         // qr_id is the thing to convert into a QR/display — same as every
         // other integration flow (sevaPassIssue, generateVolunteerQRBulk).
         // The scanner already accepts a QR that encodes just this bare id
         // (see qrService.validateQR's qrId-only fallback), no signed token
         // needed on the caller's side.
         qr_id: existingPass.qrId,
+        holder: displayHolder,
+        category: displayCategory,
       };
     }
   }
@@ -168,8 +187,10 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
     success: true,
     reused: false,
     name: holder.name,
-    phone: normPhone,
+    phone: echoPhone,
     qr_id: qrId,
+    holder: displayHolder,
+    category: displayCategory,
   };
 }
 
@@ -181,6 +202,24 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
  */
 exports.issueSingle = async (req, res) => {
   try {
+    // req.body is undefined when the request body arrived in a format no
+    // mounted parser understands. Only express.json and express.urlencoded
+    // are mounted (see src/index.js) — there is no multer — so a caller
+    // sending multipart/form-data lands here with nothing parsed.
+    //
+    // Without this guard the destructure below throws, which the catch turns
+    // into an opaque 500 "Failed to generate Prasadam coupon QR" that tells
+    // the caller nothing about what they actually did wrong.
+    if (!req.body || typeof req.body !== "object") {
+      return res.status(400).json({
+        status: false,
+        message:
+          "Request body could not be read. Send JSON with Content-Type: " +
+          "application/json (application/x-www-form-urlencoded also works). " +
+          "multipart/form-data is not supported.",
+      });
+    }
+
     const { event_id, name, phone, email, quantity } = req.body;
 
     if (!event_id) {
@@ -213,6 +252,11 @@ exports.issueSingle = async (req, res) => {
       qr_id: result.qr_id,
       name: result.name,
       phone: result.phone,
+      // Named to match the seva-sponsor push so the app's existing pass-display
+      // code can render this without a prasadam-specific branch. category is
+      // null by design — that slot holds the A/B/C tier for sponsors.
+      holder: result.holder,
+      category: result.category,
     });
   } catch (error) {
     console.error("[Integration:Prasadam] issueSingle error:", error);
@@ -231,6 +275,17 @@ exports.issueSingle = async (req, res) => {
  */
 exports.issueBulk = async (req, res) => {
   try {
+    // Same unparsed-body guard as issueSingle above.
+    if (!req.body || typeof req.body !== "object") {
+      return res.status(400).json({
+        status: false,
+        message:
+          "Request body could not be read. Send JSON with Content-Type: " +
+          "application/json (application/x-www-form-urlencoded also works). " +
+          "multipart/form-data is not supported.",
+      });
+    }
+
     const { event_id, holders } = req.body;
 
     if (!event_id) {
