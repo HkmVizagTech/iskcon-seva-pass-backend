@@ -65,6 +65,16 @@ const holderTypeSchema = new mongoose.Schema({
     type: [String],
     default: [],
   },
+  // The "seva_type" value sent to the community app's seva-sponsor API for
+  // holders of this type on this event. Editable per holder type instead of
+  // a hardcoded map, since the community app's accepted values have changed
+  // more than once without notice. Blank means "use the built-in default"
+  // (see thirdPartyService.js's DEFAULT_SEVA_TYPE_BY_CODE).
+  communityAppSevaType: {
+    type: String,
+    trim: true,
+    default: "",
+  },
   createdAt: {
     type: Date,
     default: Date.now,

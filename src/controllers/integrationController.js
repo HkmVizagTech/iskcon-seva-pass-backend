@@ -290,7 +290,7 @@ exports.generateVolunteerQRBulk = async (req, res) => {
         // pushed as a seva-sponsor — it goes out via store-qr-code below.
         const catCode = (category.catCode || "").toUpperCase();
         if (["SP", "DN", "INV"].includes(catCode)) {
-          thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
+          thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name, holderTypeSevaType: category.communityAppSevaType || "" }).catch(() => {});
         }
 
         results.push({
@@ -841,7 +841,7 @@ exports.sevaPassIssue = async (req, res) => {
     thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: qrImage, event }).catch(() => {});
     const catCode = (category.catCode || "").toUpperCase();
     if (["SP", "DN", "INV"].includes(catCode)) {
-      thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name }).catch(() => {});
+      thirdPartyService.pushSevaSponsor({ holder, event, qrPass: qrPassObj, catCode, categoryName: category.name, holderTypeSevaType: category.communityAppSevaType || "" }).catch(() => {});
     }
 
     // Auto-deliver over WhatsApp too — see autoSendWhatsApp() above. Not sent

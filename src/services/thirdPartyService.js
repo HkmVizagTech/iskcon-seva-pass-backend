@@ -122,7 +122,7 @@ class ThirdPartyService {
     }
   }
 
-  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, subCategory, preacherPhone, sevaSlotName, instruction }) {
+  async pushSevaSponsor({ holder, event, qrPass, catCode, categoryName, subCategory, preacherPhone, sevaSlotName, instruction, holderTypeSevaType }) {
     const skip = this._checkPrereqs(event);
     if (skip) return skip;
     const thirdPartyEventId = event.thirdPartyEventId;
@@ -133,7 +133,25 @@ class ThirdPartyService {
       // kept as a local lookup, no longer sent as the "category" field.
       const passTypeMap = { SP: "sponsor", DN: "donor", INV: "invitee" };
       const passType = passTypeMap[(catCode || "").toUpperCase()] || "donor";
-      const sevaTypeMap = { sponsor: "abhisekam", donor: "darshan", invitee: "darshan" };
+
+      // Default seva_type per pass type, used only when the holder type on
+      // this event doesn't have its own communityAppSevaType set. Values are
+      // capitalized (first letter) to match the community app's expected
+      // display casing.
+      const DEFAULT_SEVA_TYPE_BY_TYPE = { sponsor: "Abhisekam", donor: "Darshan", invitee: "Darshan" };
+      const capitalizeFirst = (s) => {
+        const str = String(s || "").trim();
+        return str ? str.charAt(0).toUpperCase() + str.slice(1) : str;
+      };
+      // holderTypeSevaType: passed in from the caller, resolved from the
+      // HolderType.communityAppSevaType field for this holder's category —
+      // this is what makes the value editable per Sponsor/Donor/Invitee/etc
+      // instead of a fixed hardcoded map.
+      const resolvedSevaType = capitalizeFirst(
+        (typeof holderTypeSevaType === "string" && holderTypeSevaType.trim())
+          ? holderTypeSevaType
+          : (DEFAULT_SEVA_TYPE_BY_TYPE[passType] || "Darshan")
+      );
 
       // devotee_mobile_number = the PREACHER's phone, so the community app
       // can recognise which devotee this sponsor/donor was brought in by.
@@ -166,7 +184,7 @@ class ThirdPartyService {
         donor_mobile_number: bare10,
         ...(categoryLabel ? { category: categoryLabel } : {}),
         qrcode: qrPass?.qrId || "",
-        seva_type: sevaTypeMap[passType] || "darshan",
+        seva_type: resolvedSevaType,
         holder: holderLabel,
         // Custom instruction (rich HTML) typed by the admin takes priority.
         // Falls back to seva slot / category / event name when not set,

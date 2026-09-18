@@ -685,7 +685,7 @@ exports.createHolder = async (req, res) => {
     const incomingInstruction = (req.body.instruction || "").toString().trim();
 
     // Resolve pass type to check if it's a Sponsor type (catCode SP)
-    const categoryForCheck = await HolderType.findById(catId).select("catCode name").lean();
+    const categoryForCheck = await HolderType.findById(catId).select("catCode name communityAppSevaType").lean();
     const isSponsorCategory = (categoryForCheck?.catCode || "").toUpperCase() === "SP";
 
     // ── Per-account issue restrictions ───────────────────────────────────────
@@ -992,6 +992,7 @@ exports.createHolder = async (req, res) => {
             preacherPhone,
             sevaSlotName: sevaSlot?.name || "",
             instruction: holder?.instruction || "",
+            holderTypeSevaType: categoryForCheck?.communityAppSevaType || "",
           });
           // See SKIP_SPONSOR_STORE_QR above — this always fails for these
           // categories ("not registered for any volunteer"), so it's skipped
@@ -1674,6 +1675,7 @@ async function processSingleRecord(
             preacherPhone,
             sevaSlotName: sevaSlot?.name || "",
             instruction: holder?.instruction || "",
+            holderTypeSevaType: category?.communityAppSevaType || "",
           });
           // NOTE: `skipStoreQrCode` here means SKIP_SPONSOR_STORE_QR (see top
           // of file) — it must NOT be reused for the VL branch below: that
@@ -1884,7 +1886,7 @@ exports.retryCommunitySync = async (req, res) => {
     const qrPass = await QRPass.findOne({ qrId: qrId.toUpperCase() })
       .populate({ path: "holderId", select: "name phone email subCategory catId sevaSlotId preacherId instruction" })
       .populate("eventId")
-      .populate("catId", "name catCode");
+      .populate("catId", "name catCode communityAppSevaType");
 
     if (!qrPass) return res.status(404).json({ error: "QR pass not found" });
 
@@ -1911,6 +1913,7 @@ exports.retryCommunitySync = async (req, res) => {
         preacherPhone,
         sevaSlotName,
         instruction: holder?.instruction || "",
+        holderTypeSevaType: category?.communityAppSevaType || "",
       });
       // Retry the store-qr-code leg too (see createHolder — seva-sponsor
       // alone drops extra QRs for the same phone on their side).

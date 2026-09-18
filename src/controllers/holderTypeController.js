@@ -41,7 +41,8 @@ exports.getHolderType = async (req, res) => {
 exports.createHolderType = async (req, res) => {
   try {
     const { name, catCode, description, color, icon,
-            entryPointIds, issuerRoleRequired, overrideAllowedBy, categories } = req.body;
+            entryPointIds, issuerRoleRequired, overrideAllowedBy, categories,
+            communityAppSevaType } = req.body;
 
     if (!name || !catCode) {
       return res.status(400).json({ error: "Name and code are required" });
@@ -68,6 +69,7 @@ exports.createHolderType = async (req, res) => {
       overrideAllowedBy,
       isCustom: true,
       categories: Array.isArray(categories) ? categories : [],
+      communityAppSevaType: typeof communityAppSevaType === "string" ? communityAppSevaType.trim() : "",
     });
 
     const populated = await HolderType.findById(holderType._id)
@@ -84,7 +86,8 @@ exports.createHolderType = async (req, res) => {
 exports.updateHolderType = async (req, res) => {
   try {
     const { name, catCode, description, color, icon,
-            entryPointIds, issuerRoleRequired, overrideAllowedBy, isActive, categories } = req.body;
+            entryPointIds, issuerRoleRequired, overrideAllowedBy, isActive, categories,
+            communityAppSevaType } = req.body;
 
     // FIX: use $set so fields absent from the request are not wiped
     const updateData = {};
@@ -107,6 +110,7 @@ exports.updateHolderType = async (req, res) => {
     if (overrideAllowedBy) updateData.overrideAllowedBy = overrideAllowedBy;
     if (typeof isActive === "boolean") updateData.isActive = isActive;
     if (Array.isArray(categories)) updateData.categories = categories;
+    if (typeof communityAppSevaType === "string") updateData.communityAppSevaType = communityAppSevaType.trim();
 
     const holderType = await HolderType.findByIdAndUpdate(
       req.params.htId,
