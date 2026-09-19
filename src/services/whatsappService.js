@@ -130,9 +130,12 @@ class WhatsAppService {
       throw new Error("No WhatsApp provider configured (set GUPSHUP_ENABLED+GUPSHUP_API_KEY or WHATSAPP_API_KEY)");
     }
 
+    holderName = String(holderName || "").trim();
+    eventName  = String(eventName || "").trim();
+
     const phone = this.formatPhone(to);
-    const venue   = passDetails.venue || "ISKCON Temple, Visakhapatnam";
-    const dateStr = this._formatDate(passDetails.validFrom);
+    const venue   = String(passDetails.venue || "ISKCON Temple, Visakhapatnam").trim();
+    const dateStr = this._formatDate(passDetails.validFrom).trim();
 
     const isSponsor = passDetails.isSponsor === true || !!passDetails.sevaSlot;
 
