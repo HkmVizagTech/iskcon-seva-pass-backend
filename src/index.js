@@ -185,7 +185,19 @@ const MONGODB_URI =
 console.log("📡 Connecting to MongoDB...");
 mongoose
   .connect(MONGODB_URI)
-  .then(() => console.log("✅ Connected to MongoDB"))
+  .then(async () => {
+    console.log("✅ Connected to MongoDB");
+    // One-time idempotent migration: split the prasadam counter into the
+    // general "prasadam" lane and the "prasadam_coupon" lane, re-scoping
+    // already-issued coupon QR passes. Safe to run on every boot — it is a
+    // no-op once the coupon entry point exists and passes are already moved.
+    try {
+      const { runPrasadamCouponBackfill } = require("./migrations/prasadamCouponBackfill");
+      await runPrasadamCouponBackfill();
+    } catch (err) {
+      console.error("⚠️ Prasadam coupon lane backfill failed (continuing):", err.message);
+    }
+  })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err.message);
     setTimeout(() => {

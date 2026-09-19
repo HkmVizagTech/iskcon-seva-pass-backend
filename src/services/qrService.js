@@ -5,6 +5,7 @@ const QRPass = require("../models/QRPass");
 const EntryPoint = require("../models/EntryPoint");
 const Event = require("../models/Event");
 const ScanLog = require("../models/ScanLog");
+const { PRASADAM_COUPON } = require("../utils/entryPointTypes");
 
 class QRService {
   constructor() {
@@ -113,8 +114,9 @@ class QRService {
       // Step 2: fetch QR pass + entry point in parallel
       const [qrPassAny, entryPoint] = await Promise.all([
         QRPass.findOne({ qrId: payload.q })
-          .select("eventId entryPoints holderId redemptionHistory status allowedVenues")
-          .populate({ path: "holderId", select: "name subCategory sevaSlotId catId", populate: [{ path: "catId", select: "name" }, { path: "sevaSlotId", select: "code name time displayLabel" }] })
+          .select("eventId entryPoints holderId catId redemptionHistory status allowedVenues")
+          .populate({ path: "holderId", select: "name subCategory sevaSlotId catId", populate: [{ path: "catId", select: "name catCode" }, { path: "sevaSlotId", select: "code name time displayLabel" }] })
+          .populate({ path: "catId", select: "name catCode" })
           .lean(),
         EntryPoint.findById(epId)
           .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed stationLabel type redemptionGroupId")
@@ -124,14 +126,35 @@ class QRService {
       if (!qrPassAny) {
         return { valid: false, reason: "invalid", message: "Invalid QR code" };
       }
+
+      // ── Pass-type classification ────────────────────────────────────────
+      // Resolve WHICH pass this is (prasadam coupon vs any seva pass) purely
+      // from the DB by qrId, so it works for every already-issued QR with no
+      // re-encoding. qrPass.catId is the pass's own type; holder.catId is the
+      // fallback for older records that never set QRPass.catId. Surfaced to the
+      // scanner so a volunteer instantly knows the coupon lane from the seva
+      // pass lane at the prasadam counter.
+      const typeDoc =
+        (qrPassAny.catId && qrPassAny.catId.catCode)
+          ? qrPassAny.catId
+          : (qrPassAny.holderId?.catId || null);
+      const categoryCode =
+        (typeDoc?.catCode ? String(typeDoc.catCode).toUpperCase() : "") || null;
+      const isPrasadamCoupon = categoryCode === "PR";
+      const passType = isPrasadamCoupon ? "prasadam_coupon" : "seva_pass";
+      const typeInfo = { categoryCode, passType, isPrasadamCoupon };
+      // categoryName mirrors the SAME type doc used for classification, so the
+      // label and the code can never disagree.
+      const categoryName = typeDoc?.name || qrPassAny.holderId?.catId?.name || null;
+
       if (qrPassAny.status === "revoked") {
-        return { valid: false, reason: "revoked", message: "Pass has been revoked" };
+        return { valid: false, reason: "revoked", message: "Pass has been revoked", ...typeInfo };
       }
       if (qrPassAny.status === "expired") {
-        return { valid: false, reason: "expired", message: "Pass has expired" };
+        return { valid: false, reason: "expired", message: "Pass has expired", ...typeInfo };
       }
       if (qrPassAny.status !== "active") {
-        return { valid: false, reason: "invalid", message: "Pass is not active" };
+        return { valid: false, reason: "invalid", message: "Pass is not active", ...typeInfo };
       }
       const qrPass = qrPassAny;
 
@@ -146,6 +169,8 @@ class QRService {
           message: `Pass for ${allowedVenues.join(" / ")} — send to that venue`,
           holderName: qrPass.holderId?.name,
           allowedVenues,
+          categoryName,
+          ...typeInfo,
         };
       }
 
@@ -186,6 +211,8 @@ class QRService {
             ? `Old QR — ${passEvent?.name || "previous event"} has ended`
             : `This pass is for a different event${passEvent?.name ? ` (${passEvent.name})` : ""}`,
           holderName: qrPass.holderId?.name,
+          categoryName,
+          ...typeInfo,
         };
       }
       }
@@ -196,7 +223,13 @@ class QRService {
       const event = await Event.findById(qrPass.eventId)
         .select("dateStart dateEnd scanStart scanEnd name").lean();
       if (!event) {
-        return { valid: false, reason: "invalid", message: "Event not found" };
+        return {
+          valid: false,
+          reason: "invalid",
+          message: "Event not found",
+          categoryName,
+          ...typeInfo,
+        };
       }
 
       const now = new Date();
@@ -222,6 +255,9 @@ class QRService {
             valid: false,
             reason: "not_yet_valid",
             message: `Gate not open yet — scanning starts at ${openTime}`,
+            holderName: qrPass.holderId?.name,
+            categoryName,
+            ...typeInfo,
           };
         }
         if (now.getTime() > endMs + CLOCK_SKEW_MS) {
@@ -229,6 +265,9 @@ class QRService {
             valid: false,
             reason: "expired",
             message: `Old QR expired — ${event.name || "event"} has ended`,
+            holderName: qrPass.holderId?.name,
+            categoryName,
+            ...typeInfo,
           };
         }
       }
@@ -237,7 +276,31 @@ class QRService {
       // Step 4: check entry point access
       const hasEP = qrPass.entryPoints.some((ep) => ep.toString() === epIdStr);
       if (!hasEP) {
-        return { valid: false, reason: "not_included", message: "Not in your pass" };
+        // A pass scanned at the WRONG prasadam lane should tell the volunteer
+        // which counter to use, not just say "not in your pass". A coupon and a
+        // seva pass each live on their own lane entry point, so being here with
+        // the scanned counter being one of the two prasadam lanes is a
+        // lane-mismatch we can diagnose precisely.
+        const scannedType = String(entryPoint?.type || "");
+        let message = "Not in your pass";
+        if (isPrasadamCoupon && scannedType === "prasadam") {
+          message = "This is a Prasadam coupon — use the Prasadam Coupon counter";
+        } else if (!isPrasadamCoupon && scannedType === PRASADAM_COUPON) {
+          message = `This is a ${categoryName || "Seva"} pass — use the Prasadam counter, not the Coupon counter`;
+        }
+        return {
+          valid: false, reason: "not_included", message,
+          holderName: qrPass.holderId?.name,
+          subCategory: qrPass.holderId?.subCategory || null,
+          sevaSlot: qrPass.holderId?.sevaSlotId ? {
+            code: qrPass.holderId.sevaSlotId.code,
+            name: qrPass.holderId.sevaSlotId.name,
+            time: qrPass.holderId.sevaSlotId.time,
+            displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
+          } : null,
+          categoryName,
+          ...typeInfo,
+        };
       }
 
       // Step 5: check already used
@@ -259,7 +322,8 @@ class QRService {
                 time: qrPass.holderId.sevaSlotId.time,
                 displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
               } : null,
-              categoryName: qrPass.holderId?.catId?.name || null,
+              categoryName,
+              ...typeInfo,
               qrPass,  // include so scanController can log holderId
             };
           }
@@ -289,7 +353,8 @@ class QRService {
                 time: qrPass.holderId.sevaSlotId.time,
                 displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
               } : null,
-              categoryName: qrPass.holderId?.catId?.name || null,
+              categoryName,
+              ...typeInfo,
               qrPass,  // include so scanController can log holderId
             };
           }
@@ -302,13 +367,37 @@ class QRService {
           (rh) => rh.epId?.toString() === entryPoint.linkedEpId.toString(),
         );
         if (!linked) {
-          return { valid: false, reason: "link_required", message: "Scan prerequisite first" };
+          return {
+            valid: false, reason: "link_required", message: "Scan prerequisite first",
+            holderName: qrPass.holderId?.name,
+            subCategory: qrPass.holderId?.subCategory || null,
+            sevaSlot: qrPass.holderId?.sevaSlotId ? {
+              code: qrPass.holderId.sevaSlotId.code,
+              name: qrPass.holderId.sevaSlotId.name,
+              time: qrPass.holderId.sevaSlotId.time,
+              displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
+            } : null,
+            categoryName,
+            ...typeInfo,
+          };
         }
       }
 
       // Step 7: capacity check
       if (entryPoint.maxCapacity && entryPoint.currentCount >= entryPoint.maxCapacity) {
-        return { valid: false, reason: "capacity_full", message: "Capacity full" };
+        return {
+          valid: false, reason: "capacity_full", message: "Capacity full",
+          holderName: qrPass.holderId?.name,
+          subCategory: qrPass.holderId?.subCategory || null,
+          sevaSlot: qrPass.holderId?.sevaSlotId ? {
+            code: qrPass.holderId.sevaSlotId.code,
+            name: qrPass.holderId.sevaSlotId.name,
+            time: qrPass.holderId.sevaSlotId.time,
+            displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
+          } : null,
+          categoryName,
+          ...typeInfo,
+        };
       }
 
       return {
@@ -326,7 +415,8 @@ class QRService {
           time: qrPass.holderId.sevaSlotId.time,
           displayLabel: qrPass.holderId.sevaSlotId.displayLabel,
         } : null,
-        categoryName: qrPass.holderId?.catId?.name || null,
+        categoryName,
+        ...typeInfo,
       };
     } catch (error) {
       return { valid: false, reason: "invalid", message: "Invalid QR code" };

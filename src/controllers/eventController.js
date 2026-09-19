@@ -12,7 +12,7 @@ const {
   isEventAllowed,
   allowedEventIds,
 } = require("../utils/issuePermissions");
-const { JHULAN, isJhulan } = require("../utils/entryPointTypes");
+const { JHULAN, isJhulan, PRASADAM_COUPON } = require("../utils/entryPointTypes");
 
 exports.createEvent = async (req, res) => {
   try {
@@ -50,6 +50,7 @@ exports.createEvent = async (req, res) => {
       { name: "Venue Entry", stationLabel: "Main Gate", type: "venue_entry" },
       { name: "Jhulan", stationLabel: "Jhulan Queue", type: JHULAN },
       { name: "Special Prasadam", stationLabel: "Prasadam Counter", type: "prasadam" },
+      { name: "Prasadam Coupon", stationLabel: "Prasadam Coupon Counter", type: PRASADAM_COUPON },
       { name: "Bahumana", stationLabel: "Bahumana Desk", type: "bahumana" },
     ];
 
@@ -70,14 +71,17 @@ exports.createEvent = async (req, res) => {
     const patronEpIds = entryPoints
       .filter((ep) => ep.type === "venue_entry" || isJhulan(ep.type) || ep.type === "prasadam")
       .map((ep) => ep._id);
-    // Prasadam Coupon: scoped ONLY to the Special Prasadam counter — this is
+    // Prasadam Coupon: scoped ONLY to the Prasadam Coupon counter — this is
     // the dedicated pass type external systems (e.g. the Vaikuntham app's
     // "I will attend + opt Prasadam" flow, via POST /api/integration/
-    // prasadam/qr) issue a coupon QR under. Restricting it to just this one
-    // gate is deliberate — it's a coupon for the prasadam counter, not a
-    // general entry pass.
+    // prasadam/qr) issue a coupon QR under. It is deliberately a separate
+    // LANE from the general "Special Prasadam" counter (type "prasadam")
+    // that Sponsor/Donor/Volunteer/Patron passes scan at: coupons print here
+    // and nowhere else, so a coupon can never be double-served at the wrong
+    // counter. Restricting it to this one gate is deliberate — it's a coupon
+    // for the prasadam counter, not a general entry pass.
     const prasadamEpIds = entryPoints
-      .filter((ep) => ep.type === "prasadam")
+      .filter((ep) => ep.type === PRASADAM_COUPON)
       .map((ep) => ep._id);
 
     // MERGED: single set of 8 default pass types (HolderType absorbed Category).

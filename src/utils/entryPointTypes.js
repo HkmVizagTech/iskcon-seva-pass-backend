@@ -22,12 +22,22 @@ const JHULAN_LEGACY = "darshan";
 // Use this wherever you mean "the jhulan/darshan gate".
 const JHULAN_TYPES = [JHULAN, JHULAN_LEGACY];
 
+// The prasadam counter has two LANES with separate entry points:
+//   - "prasadam"           → general counter (Sponsor/Donor/Volunteer/Patron passes)
+//   - "prasadam_coupon"    → coupon counter (Prasadam Coupon PR passes only)
+// Keeping them as distinct types means every `type === "prasadam"` filter in
+// the codebase (event defaults, backfills, report grouping) automatically
+// excludes coupons without any extra predicate, and the scan verdict can tell
+// the volunteer exactly which counter a scanned pass belongs to.
+const PRASADAM_COUPON = "prasadam_coupon";
+
 // Full schema enum, in display order.
 const ENTRY_POINT_TYPES = [
   "venue_entry",
   JHULAN,
   JHULAN_LEGACY, // legacy — historical rows only
   "prasadam",
+  PRASADAM_COUPON,
   "bahumana",
   "vip_seat",
   "custom",
@@ -42,6 +52,7 @@ module.exports = {
   JHULAN,
   JHULAN_LEGACY,
   JHULAN_TYPES,
+  PRASADAM_COUPON,
   ENTRY_POINT_TYPES,
   isJhulan,
 };

@@ -174,6 +174,9 @@ exports.scanQR = async (req, res) => {
         subCategory: validation.subCategory || null,
       sevaSlot: validation.sevaSlot || null,
         categoryName: validation.categoryName || null,
+        categoryCode: validation.categoryCode || null,
+        passType: validation.passType || null,
+        isPrasadamCoupon: !!validation.isPrasadamCoupon,
       });
     }
 
@@ -216,6 +219,9 @@ exports.scanQR = async (req, res) => {
         subCategory: validation.subCategory || null,
         sevaSlot: validation.sevaSlot || null,
         categoryName: validation.categoryName || null,
+        categoryCode: validation.categoryCode || null,
+        passType: validation.passType || null,
+        isPrasadamCoupon: !!validation.isPrasadamCoupon,
       });
     }
 
@@ -245,6 +251,9 @@ exports.scanQR = async (req, res) => {
       subCategory: validation.subCategory || null,
       sevaSlot: validation.sevaSlot || null,
       categoryName: validation.categoryName || null,
+      categoryCode: validation.categoryCode || null,
+      passType: validation.passType || null,
+      isPrasadamCoupon: !!validation.isPrasadamCoupon,
       groupCount: incomingGroupCount,
       message: "Access granted",
     });
@@ -304,14 +313,33 @@ exports.getRecentScans = async (req, res) => {
       .populate({ path: "epId", select: "name stationLabel eventId",
         populate: { path: "eventId", select: "name eventCode" } })
       .populate("scannedBy", "name")
-      .populate("holderId", "name phone")
+      .populate({
+        path: "holderId",
+        select: "name phone catId",
+        populate: { path: "catId", select: "name catCode" },
+      })
       .sort({ scannedAt: -1 })
       .limit(limit * 3); // fetch more so filter still returns enough
 
+    // ADDITIVE pass-type classification so the live feed shows whether the
+    // scan was a prasadam coupon or a seva pass at a glance.
+    const scansWithType = scans.map((s) => {
+      const cat = s.holderId?.catId || null;
+      const categoryCode = cat?.catCode ? String(cat.catCode).toUpperCase() : null;
+      const isPrasadamCoupon = categoryCode === "PR";
+      return {
+        ...s.toObject(),
+        passType: isPrasadamCoupon ? "prasadam_coupon" : "seva_pass",
+        isPrasadamCoupon,
+        categoryCode,
+        categoryName: cat?.name || null,
+      };
+    });
+
     // Filter to event if route param provided
     const filtered = eventId
-      ? scans.filter(s => s.epId?.eventId?._id?.toString() === eventId)
-      : scans;
+      ? scansWithType.filter(s => s.epId?.eventId?._id?.toString() === eventId)
+      : scansWithType;
 
     res.json({ scans: filtered.slice(0, limit) });
   } catch (error) {

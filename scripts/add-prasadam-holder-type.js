@@ -9,7 +9,7 @@
 //
 // Unlike scripts/add-patron-holder-type.js (which only links to entry points
 // that already exist and skips an event with none), this script actively
-// CREATES the "Special Prasadam" entry point for an event that doesn't have
+// CREATES the "Prasadam Coupon" entry point for an event that doesn't have
 // one yet — a prasadam counter should exist everywhere, not just where an
 // admin happened to add one by hand.
 //
@@ -19,8 +19,19 @@
 //
 // Idempotent — safe to re-run:
 //   - an event that already has a PR type is skipped and reported
-//   - an event that already has a "prasadam"-type entry point reuses it
+//   - an event that already has a "prasadam_coupon"-type entry point reuses it
 //     rather than creating a duplicate counter
+//
+// A coupon is linked ONLY to the "Prasadam Coupon" counter lane
+// (type "prasadam_coupon"), never to the general "Special Prasadam" counter
+// (type "prasadam") that Sponsor/Donor/Volunteer/Patron passes scan at —
+// same split as eventController.createEvent and
+// prasadamIntegrationController.resolvePrasadamCategory.
+//
+// NOTE: events that ALREADY have a PR type (scoped to the old general
+// "prasadam" counter) are re-scoped by scripts/add-prasadam-coupon-entry-point.js,
+// which also moves already-issued coupon QR passes onto the coupon counter.
+// This script only covers events that have no PR type yet.
 //
 // Usage:
 //   node scripts/add-prasadam-holder-type.js --dry-run     # report only
@@ -43,12 +54,13 @@ const INCLUDE_PAST = process.argv.includes("--all");
 const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://localhost:27017/iskcon_seva_pass";
 
-// Must match the Prasadam entry in eventController.createEvent and the
-// auto-create fallback in prasadamIntegrationController.resolvePrasadamCategory.
+// Must match the Prasadam Coupon entry in eventController.createEvent, the
+// auto-create fallback in prasadamIntegrationController.resolvePrasadamCategory,
+// and the re-scope backfill scripts/add-prasadam-coupon-entry-point.js.
 const PRASADAM_EP = {
-  name: "Special Prasadam",
-  stationLabel: "Prasadam Counter",
-  type: "prasadam",
+  name: "Prasadam Coupon",
+  stationLabel: "Prasadam Coupon Counter",
+  type: "prasadam_coupon",
 };
 const PRASADAM_TYPE = {
   name: "Prasadam Coupon",
@@ -97,7 +109,7 @@ async function main() {
 
     let prasadamEP = await EntryPoint.findOne({
       eventId: event._id,
-      type: "prasadam",
+      type: "prasadam_coupon",
     }).lean();
 
     let epNote = `existing entry point "${prasadamEP?.name}"`;

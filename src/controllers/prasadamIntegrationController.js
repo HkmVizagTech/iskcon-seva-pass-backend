@@ -18,6 +18,7 @@ const EntryPoint = require("../models/EntryPoint");
 const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
+const { PRASADAM_COUPON } = require("../utils/entryPointTypes");
 
 function normalisePhone(phone) {
   if (!phone) return null;
@@ -68,19 +69,21 @@ async function resolvePrasadamCategory(event) {
 
   if (category) return category;
 
-  // FIX: this used to create the category with entryPoints: [] — meaning a
-  // coupon QR carried NO gate restriction at all (valid everywhere) instead
-  // of being scoped to the prasadam counter. Every new event already gets a
-  // "Special Prasadam" entry point (type "prasadam") from createEvent, so
-  // find and link it here; only create one from scratch for an older event
-  // that predates that default.
-  let prasadamEP = await EntryPoint.findOne({ eventId: event._id, type: "prasadam" });
+  // FIX: a coupon must be scoped to the Prasadam COUPON counter lane
+  // (type "prasadam_coupon"), never to the general "Special Prasadam"
+  // counter (type "prasadam") that Sponsor/Donor/Volunteer/Patron passes
+  // scan at. Otherwise a coupon carries the same entry point as a sponsor
+  // pass and a volunteer on either counter cannot tell the two apart.
+  // Every new event already gets a "Prasadam Coupon" entry point from
+  // createEvent, and scripts/add-prasadam-coupon-entry-point.js backfills
+  // existing events (and already-issued coupon QR passes) onto it.
+  let prasadamEP = await EntryPoint.findOne({ eventId: event._id, type: PRASADAM_COUPON });
   if (!prasadamEP) {
     prasadamEP = await EntryPoint.create({
       eventId: event._id,
-      name: "Special Prasadam",
-      stationLabel: "Prasadam Counter",
-      type: "prasadam",
+      name: "Prasadam Coupon",
+      stationLabel: "Prasadam Coupon Counter",
+      type: PRASADAM_COUPON,
     });
   }
 
