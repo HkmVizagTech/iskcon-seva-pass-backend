@@ -352,7 +352,10 @@ exports.volunteerLogin = async (req, res) => {
     const token = jwt.sign(
       { userId: volunteer._id, role: "volunteer" },
       process.env.JWT_SECRET,
-      { expiresIn: "12h" },
+      // Long-lived so volunteers on installed scanner PWAs stay logged in
+      // between uses (the app restores its session from localStorage); they
+      // still log out whenever they tap Exit.
+      { expiresIn: "30d" },
     );
 
     // Only return stations belonging to the volunteer's assigned events.
