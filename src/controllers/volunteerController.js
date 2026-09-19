@@ -181,6 +181,7 @@ exports.updateVolunteer = async (req, res) => {
       password,
       assignedEventIds,
       assignedEntryPointIds,
+      assignedVenues,
       isActive,
     } = req.body;
 
@@ -233,28 +234,46 @@ exports.updateVolunteer = async (req, res) => {
       updateData.assignedEntryPoints = finalEpIds;
     }
 
-    if (req.body.assignedVenues !== undefined)
-      updateData.assignedVenues = req.body.assignedVenues;
+    if (assignedVenues !== undefined) updateData.assignedVenues = assignedVenues;
 
-    // If password provided, it will be hashed by pre-save hook
+    // Password handling — CRITICAL: saving a password through
+    // `findOneAndUpdate` bypasses the User pre-save hook, so it would be
+    // stored as PLAINTEXT and every later login would fail with
+    // "invalid credentials". Load the document, assign the fields, and call
+    // `save()` so the hook hashes a changed password.
+    let passwordChanged = false;
     if (password) {
       updateData.password = password;
+      passwordChanged = true;
     }
 
-    const volunteer = await User.findOneAndUpdate(
-      { _id: req.params.id, role: "volunteer" },
-      { $set: updateData }, // FIX: was missing $set — Mongoose was replacing top-level fields
-      { returnDocument: "after", runValidators: true },
-    )
-      .select("-password")
-      .populate("assignedEvents", "name eventCode")
-      .populate("assignedEntryPoints", "name stationLabel type allowGroupCount");
+    const volunteer = await User.findOne({ _id: req.params.id, role: "volunteer" });
 
     if (!volunteer) {
       return res.status(404).json({ error: "Volunteer not found" });
     }
 
-    res.json({ success: true, volunteer });
+    // Scalars — only overwritten when a truthy value is supplied.
+    for (const key of ["name", "email", "phone"]) {
+      if (updateData[key]) volunteer[key] = updateData[key];
+    }
+    // Boolean + arrays — assigned explicitly so they can be emptied (false,
+    // [] etc.) rather than silently ignored.
+    if (typeof updateData.isActive === "boolean") volunteer.isActive = updateData.isActive;
+    if (Array.isArray(updateData.assignedEvents)) volunteer.assignedEvents = updateData.assignedEvents;
+    if (Array.isArray(updateData.assignedEntryPoints)) volunteer.assignedEntryPoints = updateData.assignedEntryPoints;
+    if (Array.isArray(updateData.assignedVenues)) volunteer.assignedVenues = updateData.assignedVenues;
+    if (passwordChanged) volunteer.password = updateData.password;
+
+    await volunteer.save();
+
+    await volunteer.populate("assignedEvents", "name eventCode");
+    await volunteer.populate("assignedEntryPoints", "name stationLabel type allowGroupCount");
+
+    const sanitized = volunteer.toObject();
+    delete sanitized.password;
+
+    res.json({ success: true, volunteer: sanitized });
   } catch (error) {
     console.error("Update volunteer error:", error);
     res.status(500).json({ error: "Failed to update volunteer" });
