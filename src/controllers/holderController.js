@@ -607,6 +607,17 @@ exports.updateHolder = async (req, res) => {
       }
     }
 
+    // A revoked pass's category must not be editable — it can never scan again.
+    if (update.subCategory || update.$unset?.subCategory) {
+      const existing = await Holder.findById(req.params.holderId).select("_id");
+      if (!existing) return res.status(404).json({ error: "Holder not found" });
+      if (await QRPass.exists({ holderId: existing._id, status: "revoked" })) {
+        return res.status(400).json({
+          error: "Cannot change the category of a revoked pass.",
+        });
+      }
+    }
+
     try {
       const holder = await Holder.findByIdAndUpdate(
         req.params.holderId,
@@ -652,6 +663,230 @@ exports.updateHolder = async (req, res) => {
  * A category change that collides with the phone+type+category uniqueness key
  * is reported as "conflict" and left untouched.
  */
+/**
+ * Shared resolver for bulk category-tier updates. See the JSON endpoint below
+ * for the full behaviour contract. Revoked passes are never touched: any
+ * holder whose QRPass is revoked is excluded from phone/name resolution and
+ * from the duplicate candidate lists, and a row whose ONLY match is revoked
+ * is reported as "revoked".
+ */
+async function runCategoryUpdates(eventId, rows, apply) {
+  const normTier = (v) => {
+    const s = String(v ?? "").trim().toUpperCase();
+    return !s || s === "NONE" || s === "N/A" || s === "-" ? undefined : s;
+  };
+  const nameLoose = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const namesMatch = (a, b) => {
+    if (!b) return true;
+    if (!a) return false;
+    const x = nameLoose(a), y = nameLoose(b);
+    return x === y || x.includes(y) || y.includes(x);
+  };
+  const pickHolder = (h) => ({
+    _id: h._id,
+    name: h.name,
+    phone: h.phone,
+    subCategory: h.subCategory || null,
+  });
+
+  const summary = {
+    total: rows.length,
+    willUpdate: 0,
+    willClear: 0,
+    noChange: 0,
+    updated: 0,
+    cleared: 0,
+    noChangeApplied: 0,
+    notFound: 0,
+    noPhone: 0,
+    nameMismatch: 0,
+    duplicate: 0,
+    revoked: 0,
+    notInEvent: 0,
+    conflict: 0,
+    failed: 0,
+  };
+  const results = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const raw = rows[i] || {};
+    const tier = normTier(
+      raw.subCategory !== undefined ? raw.subCategory : raw.category,
+    );
+    const givenName = String(raw.name ?? "").trim();
+    const givenPhone = String(raw.phone ?? "").trim();
+    const result = {
+      rowIndex: i,
+      name: givenName,
+      phone: givenPhone,
+      requestedCategory: tier || null,
+      status: "",
+      message: "",
+      holder: null,
+      matches: null,
+    };
+    const emit = (status, message, extra = {}) => {
+      result.status = status;
+      result.message = message;
+      Object.assign(result, extra);
+      results.push(result);
+    };
+
+    try {
+      // ── Resolution: find the exact holder for this row ─────────────────
+      let holder = null;
+
+      if (raw.holderId) {
+        holder = await Holder.findById(raw.holderId).select(
+          "name phone subCategory eventId",
+        );
+        if (!holder) {
+          summary.notFound++;
+          emit("not_found", "No pass found for the chosen holder.");
+          continue;
+        }
+        if (String(holder.eventId) !== String(eventId)) {
+          summary.notInEvent++;
+          result.holder = pickHolder(holder);
+          emit("not_in_event", "That pass belongs to a different event.");
+          continue;
+        }
+        if (await QRPass.exists({ holderId: holder._id, status: "revoked" })) {
+          summary.revoked++;
+          result.holder = pickHolder(holder);
+          emit("revoked", "This pass is revoked — its category cannot be edited.");
+          continue;
+        }
+      } else {
+        if (!givenPhone) {
+          summary.noPhone++;
+          emit("no_phone", "Phone is required for this row.");
+          continue;
+        }
+        const norm = normalisePhone(givenPhone);
+        const digitsOnly = givenPhone.replace(/\D/g, "");
+        const variants = [
+          ...new Set([givenPhone, digitsOnly, norm].filter(Boolean)),
+        ];
+        let matches = await Holder.find({
+          eventId,
+          phone: { $in: variants },
+        }).select("name phone subCategory eventId");
+
+        if (matches.length === 0) {
+          summary.notFound++;
+          emit("not_found", "No pass found for this phone in this event.");
+          continue;
+        }
+
+        // Revoked passes are excluded from category editing entirely.
+        const revokedIds = await QRPass.find({
+          holderId: { $in: matches.map((m) => m._id) },
+          status: "revoked",
+        }).select("holderId");
+        const revokedSet = new Set(revokedIds.map((r) => String(r.holderId)));
+        matches = matches.filter((m) => !revokedSet.has(String(m._id)));
+        if (matches.length === 0) {
+          summary.revoked++;
+          emit("revoked", "The pass on this number is revoked — its category cannot be edited.");
+          continue;
+        }
+
+        // A name hint can disambiguate duplicates that share a phone.
+        let effective = matches;
+        if (givenName) {
+          const named = matches.filter((m) => namesMatch(m.name, givenName));
+          if (named.length === 1) {
+            effective = named;
+          } else if (named.length > 1) {
+            summary.duplicate++;
+            emit("duplicate", "Several passes match this name and phone — choose one.", {
+              matches: matches.map(pickHolder),
+            });
+            continue;
+          }
+        }
+
+        if (effective.length > 1) {
+          summary.duplicate++;
+          emit("duplicate", "Several passes use this phone — choose which one.", {
+            matches: matches.map(pickHolder),
+          });
+          continue;
+        }
+
+        holder = effective[0];
+        if (givenName && !namesMatch(holder.name, givenName)) {
+          summary.nameMismatch++;
+          result.holder = pickHolder(holder);
+          emit("name_mismatch", `Found a pass on this phone but the name differs ("${holder.name}") — review before applying.`);
+          continue;
+        }
+      }
+
+      // ── Commit (apply mode only) ───────────────────────────────────────
+      result.holder = pickHolder(holder);
+      const prev = holder.subCategory || null;
+
+      if (prev === tier) {
+        if (apply) summary.noChangeApplied++;
+        else summary.noChange++;
+        emit("no_change", "Already set to that category.");
+        continue;
+      }
+      if (!apply) {
+        summary[tier ? "willUpdate" : "willClear"]++;
+        emit(
+          tier ? "will_update" : "will_clear",
+          tier ? `Will change ${prev ? `from ${prev} ` : ""}to ${tier}.` : "Will remove the category.",
+        );
+        continue;
+      }
+
+      try {
+        if (tier) {
+          await Holder.updateOne(
+            { _id: holder._id },
+            { $set: { subCategory: tier } },
+          );
+          summary.updated++;
+          emit("updated", `Category changed to ${tier}.`, {
+            holder: { ...result.holder, subCategory: tier },
+          });
+        } else {
+          await Holder.updateOne(
+            { _id: holder._id },
+            { $unset: { subCategory: 1 } },
+          );
+          summary.cleared++;
+          emit("cleared", "Category removed.", {
+            holder: { ...result.holder, subCategory: null },
+          });
+        }
+      } catch (err) {
+        if (err && err.code === 11000) {
+          summary.conflict++;
+          emit("conflict", "Another pass for this phone + type already uses that category.");
+        } else {
+          summary.failed++;
+          emit("failed", err.message);
+        }
+      }
+    } catch (err) {
+      summary.failed++;
+      emit("failed", err.message);
+    }
+  }
+
+  return { results, summary };
+}
+
+/**
+ * Bulk-update category tiers via JSON rows.
+ *   preview (apply falsy)  — resolve every row and report; nothing is written.
+ *   apply   (apply truthy) — persist the resolved changes.
+ * See runCategoryUpdates for row shape and revoke/duplicate handling.
+ */
 exports.bulkUpdateCategories = async (req, res) => {
   try {
     const { eventId, rows, apply } = req.body || {};
@@ -659,217 +894,84 @@ exports.bulkUpdateCategories = async (req, res) => {
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: "rows must be a non-empty array" });
     }
-
-    const normTier = (v) => {
-      const s = String(v ?? "").trim().toUpperCase();
-      return !s || s === "NONE" || s === "N/A" || s === "-" ? undefined : s;
-    };
-    const nameLoose = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
-    const namesMatch = (a, b) => {
-      if (!b) return true;
-      if (!a) return false;
-      const x = nameLoose(a), y = nameLoose(b);
-      return x === y || x.includes(y) || y.includes(x);
-    };
-
-    const summary = {
-      total: rows.length,
-      willUpdate: 0,
-      willClear: 0,
-      noChange: 0,
-      updated: 0,
-      cleared: 0,
-      noChangeApplied: 0,
-      notFound: 0,
-      noPhone: 0,
-      nameMismatch: 0,
-      duplicate: 0,
-      notInEvent: 0,
-      conflict: 0,
-      failed: 0,
-    };
-    const results = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const raw = rows[i] || {};
-      const tier = normTier(
-        raw.subCategory !== undefined ? raw.subCategory : raw.category,
-      );
-      const givenName = String(raw.name ?? "").trim();
-      const givenPhone = String(raw.phone ?? "").trim();
-      const result = {
-        rowIndex: i,
-        name: givenName,
-        phone: givenPhone,
-        requestedCategory: tier || null,
-        status: "",
-        message: "",
-        holder: null,
-        matches: null,
-      };
-      const emit = (status, message, extra = {}) => {
-        result.status = status;
-        result.message = message;
-        Object.assign(result, extra);
-        results.push(result);
-      };
-
-      try {
-        // ── Resolution: find the exact holder for this row ─────────────────
-        let holder = null;
-
-        if (raw.holderId) {
-          holder = await Holder.findById(raw.holderId).select(
-            "name phone subCategory eventId",
-          );
-          if (!holder) {
-            summary.notFound++;
-            emit("not_found", "No pass found for the chosen holder.");
-            continue;
-          }
-          if (String(holder.eventId) !== String(eventId)) {
-            summary.notInEvent++;
-            result.holder = {
-              _id: holder._id,
-              name: holder.name,
-              phone: holder.phone,
-              subCategory: holder.subCategory || null,
-            };
-            emit("not_in_event", "That pass belongs to a different event.");
-            continue;
-          }
-        } else {
-          if (!givenPhone) {
-            summary.noPhone++;
-            emit("no_phone", "Phone is required for this row.");
-            continue;
-          }
-          const norm = normalisePhone(givenPhone);
-          const digitsOnly = givenPhone.replace(/\D/g, "");
-          const variants = [
-            ...new Set([givenPhone, digitsOnly, norm].filter(Boolean)),
-          ];
-          const matches = await Holder.find({
-            eventId,
-            phone: { $in: variants },
-          }).select("name phone subCategory eventId");
-
-          if (matches.length === 0) {
-            summary.notFound++;
-            emit("not_found", "No pass found for this phone in this event.");
-            continue;
-          }
-
-          // A name hint can disambiguate duplicates that share a phone.
-          let effective = matches;
-          if (givenName) {
-            const named = matches.filter((m) => namesMatch(m.name, givenName));
-            if (named.length === 1) {
-              effective = named;
-            } else if (named.length > 1) {
-              summary.duplicate++;
-              emit("duplicate", "Several passes match this name and phone — choose one.", {
-                matches: matches.map((m) => ({
-                  _id: m._id,
-                  name: m.name,
-                  phone: m.phone,
-                  subCategory: m.subCategory || null,
-                })),
-              });
-              continue;
-            }
-          }
-
-          if (effective.length > 1) {
-            summary.duplicate++;
-            emit("duplicate", "Several passes use this phone — choose which one.", {
-              matches: matches.map((m) => ({
-                _id: m._id,
-                name: m.name,
-                phone: m.phone,
-                subCategory: m.subCategory || null,
-              })),
-            });
-            continue;
-          }
-
-          holder = effective[0];
-          if (givenName && !namesMatch(holder.name, givenName)) {
-            summary.nameMismatch++;
-            result.holder = {
-              _id: holder._id,
-              name: holder.name,
-              phone: holder.phone,
-              subCategory: holder.subCategory || null,
-            };
-            emit("name_mismatch", `Found a pass on this phone but the name differs ("${holder.name}") — review before applying.`);
-            continue;
-          }
-        }
-
-        // ── Commit (apply mode only) ───────────────────────────────────────
-        result.holder = {
-          _id: holder._id,
-          name: holder.name,
-          phone: holder.phone,
-          subCategory: holder.subCategory || null,
-        };
-        const prev = holder.subCategory || null;
-
-        if (prev === tier) {
-          if (apply) summary.noChangeApplied++;
-          else summary.noChange++;
-          emit("no_change", "Already set to that category.");
-          continue;
-        }
-        if (!apply) {
-          summary[tier ? "willUpdate" : "willClear"]++;
-          emit(
-            tier ? "will_update" : "will_clear",
-            tier ? `Will change ${prev ? `from ${prev} ` : ""}to ${tier}.` : "Will remove the category.",
-          );
-          continue;
-        }
-
-        try {
-          if (tier) {
-            await Holder.updateOne(
-              { _id: holder._id },
-              { $set: { subCategory: tier } },
-            );
-            summary.updated++;
-            emit("updated", `Category changed to ${tier}.`, {
-              holder: { ...result.holder, subCategory: tier },
-            });
-          } else {
-            await Holder.updateOne(
-              { _id: holder._id },
-              { $unset: { subCategory: 1 } },
-            );
-            summary.cleared++;
-            emit("cleared", "Category removed.", {
-              holder: { ...result.holder, subCategory: null },
-            });
-          }
-        } catch (err) {
-          if (err && err.code === 11000) {
-            summary.conflict++;
-            emit("conflict", "Another pass for this phone + type already uses that category.");
-          } else {
-            summary.failed++;
-            emit("failed", err.message);
-          }
-        }
-      } catch (err) {
-        summary.failed++;
-        emit("failed", err.message);
-      }
-    }
-
+    const { results, summary } = await runCategoryUpdates(eventId, rows, !!apply);
     res.json({ success: true, apply: !!apply, results, summary });
   } catch (error) {
     console.error("Bulk category update error:", error);
     res.status(500).json({ error: "Failed to update categories" });
+  }
+};
+
+/**
+ * Bulk-update category tiers from an uploaded CSV/XLSX sheet — same semantics
+ * as the JSON endpoint (preview/apply, dupe + revoked handling), so admins can
+ * edit categories exactly like they bulk-issue. Expected columns (header names
+ * are matched loosely): Name (optional), Phone, Category ("NONE" removes the
+ * tie). The dashboard uploads with apply=false to preview, then applies via
+ * the JSON endpoint so duplicate rows can be resolved against the candidate
+ * list first.
+ */
+exports.bulkUpdateCategoriesFile = async (req, res) => {
+  let filePath = null;
+  try {
+    const { eventId } = req.body || {};
+    const apply = req.body?.apply === "true" || req.body?.apply === true;
+    if (!eventId) return res.status(400).json({ error: "eventId is required" });
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    filePath = req.file.path;
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+    let records = [];
+    if (fileExt === ".csv") {
+      records = await parseCSV(filePath);
+    } else if ([".xlsx", ".xls"].includes(fileExt)) {
+      records = parseExcel(filePath);
+    } else {
+      return res.status(400).json({ error: "Unsupported file format — use CSV or XLSX" });
+    }
+
+    const NAME_KEYS = ["name", "holder name", "sponsor name", "full name", "devotee name"];
+    const PHONE_KEYS = ["phone", "phone number", "phone no", "mobile", "mobile number", "mobile no", "contact", "contact number", "ph no", "phonenumber"];
+    const CATEGORY_KEYS = ["category", "new category", "tier", "category tier", "subcategory", "sub category"];
+
+    const rows = records
+      .map((rec) => {
+        const normHeaders = new Map(
+          Object.keys(rec).map((k) => [
+            String(k).trim().toLowerCase().replace(/[\s_]+/g, " ").replace(/\s+/g, " "),
+            String(rec[k]).trim(),
+          ]),
+        );
+        const get = (keys) => {
+          for (const k of keys) {
+            const v = normHeaders.get(k);
+            if (v !== undefined && v !== "") return v;
+          }
+          return "";
+        };
+        return {
+          name: get(NAME_KEYS),
+          phone: get(PHONE_KEYS),
+          subCategory: get(CATEGORY_KEYS),
+        };
+      })
+      .filter((r) => r.phone || r.subCategory);
+
+    if (rows.length === 0) {
+      return res.status(400).json({
+        error: "No readable rows — expected columns like Name, Phone, Category.",
+      });
+    }
+
+    const { results, summary } = await runCategoryUpdates(eventId, rows, apply);
+    res.json({ success: true, apply, parsed: rows.length, results, summary });
+  } catch (error) {
+    console.error("Bulk category file update error:", error);
+    res.status(500).json({ error: "Failed to update categories" });
+  } finally {
+    if (filePath) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+    }
   }
 };
 

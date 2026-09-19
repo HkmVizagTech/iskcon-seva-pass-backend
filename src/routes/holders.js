@@ -69,6 +69,15 @@ router.post(
   holderController.bulkUpdateCategories,
 );
 
+// Same as above but from an uploaded CSV/XLSX sheet (mimics bulk-issue UX).
+router.post(
+  "/bulk-update-category/file",
+  protect,
+  authorize("super_admin", "event_admin"),
+  upload.single("file"),
+  holderController.bulkUpdateCategoriesFile,
+);
+
 // FIX: moved before /:holderId to prevent route collision
 router.get(
   "/download-failed/:filename",
