@@ -59,6 +59,16 @@ router.post(
   holderController.bulkImportHolders,
 );
 
+// Bulk category-tier update for already-issued passes. Uses POST /bulk-update-
+// category (declared before the /:holderId catch-all) so the URL always
+// matches this handler, never a holder ID. super_admin / event_admin only.
+router.post(
+  "/bulk-update-category",
+  protect,
+  authorize("super_admin", "event_admin"),
+  holderController.bulkUpdateCategories,
+);
+
 // FIX: moved before /:holderId to prevent route collision
 router.get(
   "/download-failed/:filename",
