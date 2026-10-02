@@ -19,6 +19,7 @@ const qrService = require("../services/qrService");
 const thirdPartyService = require("../services/thirdPartyService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
 const { PRASADAM_COUPON } = require("../utils/entryPointTypes");
+const { parseSessionWindow } = require("../utils/sessionWindow");
 
 function normalisePhone(phone) {
   if (!phone) return null;
@@ -99,19 +100,22 @@ async function resolvePrasadamCategory(event) {
 }
 
 // Core single-holder issuance logic — reused by both single and bulk endpoints.
-async function issuePrasadamQR(event, category, { name, phone, email, quantity }) {
+//
+// Two modes:
+//  - Legacy (no `win`): one coupon QR per phone per event, reused on repeat.
+//  - Session-scoped (`win` from parseSessionWindow): one coupon QR per phone per
+//    SESSION (a dated occasion such as "Sunday Feast Oct 11"), valid only inside
+//    that window. A standing event can then serve every session, and a new
+//    session always gets a fresh QR instead of the previous (already used) one.
+async function issuePrasadamQR(event, category, { name, phone, email, quantity }, win = null) {
   const normPhone = normalisePhone(phone);
   if (!normPhone) {
     return { success: false, error: "Invalid or missing phone number", input: { name, phone } };
   }
 
   // Echo the number back in the caller's own format rather than the 91-prefixed
-  // one. No other integration endpoint 91-prefixes what it returns, so doing it
-  // here made prasadam the odd one out and confused the app team — they send
-  // 9951141915 and got 919951141915 back.
-  //
-  // normPhone is still what gets stored, looked up and deduplicated on; only
-  // the response echoes what the caller typed.
+  // one (no other integration endpoint 91-prefixes what it returns). normPhone
+  // is what gets stored, looked up and deduplicated on.
   const echoPhone = String(phone).trim();
 
   // Display fields for the app, named to match the seva-sponsor push so the
@@ -122,86 +126,116 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
   const displayHolder = category?.name || "Prasadam Coupon";
   const displayCategory = null;
 
-  // One coupon QR per phone per event (re-use if already issued, same as
-  // the existing volunteer integration behaviour).
-  const existingHolder = await Holder.findOne({ eventId: event._id, phone: normPhone, catId: category._id });
-  if (existingHolder) {
-    const existingPass = await QRPass.findOne({ holderId: existingHolder._id, status: "active" });
+  const reusedResult = (holder, pass) => ({
+    success: true,
+    reused: true,
+    name: holder.name,
+    phone: echoPhone,
+    qr_id: pass.qrId,
+    holder: displayHolder,
+    category: displayCategory,
+    ...(win ? { valid_from: pass.validFrom, valid_until: pass.validUntil, session_ref: win.sessionRef } : {}),
+  });
+
+  // The person: one Holder per phone per event. Sessions hang off it as passes.
+  const holderFilter = { eventId: event._id, phone: normPhone, catId: category._id };
+  let holder = await Holder.findOne(holderFilter);
+
+  if (holder) {
+    const existingPass = await QRPass.findOne(
+      win ? { holderId: holder._id, sessionKey: win.sessionKey } : { holderId: holder._id, status: "active", sessionKey: null },
+    );
     if (existingPass) {
-      // Nothing to build here: the pass already exists and qr_id is the whole
-      // answer. This branch used to re-render the QR PNG on every repeat call
-      // purely to put it in the response — pure waste now that the image is
-      // not returned, so the payload/QR generation is gone entirely and a
-      // repeat call is just two indexed lookups.
-      return {
-        success: true,
-        reused: true,
-        name: existingHolder.name,
-        phone: echoPhone,
-        // qr_id is the thing to convert into a QR/display — same as every
-        // other integration flow (sevaPassIssue, generateVolunteerQRBulk).
-        // The scanner already accepts a QR that encodes just this bare id
-        // (see qrService.validateQR's qrId-only fallback), no signed token
-        // needed on the caller's side.
-        qr_id: existingPass.qrId,
-        holder: displayHolder,
-        category: displayCategory,
-      };
+      if (!win) return reusedResult(holder, existingPass);
+      if (existingPass.status !== "active") {
+        return { success: false, error: "This coupon was cancelled. Please ask the temple office.", input: { name, phone } };
+      }
+      // Same session asked again: keep the QR, follow any change to the session's window.
+      if (
+        existingPass.validFrom.getTime() !== win.validFrom.getTime() ||
+        existingPass.validUntil.getTime() !== win.validUntil.getTime()
+      ) {
+        existingPass.validFrom = win.validFrom;
+        existingPass.validUntil = win.validUntil;
+        await existingPass.save();
+      }
+      return reusedResult(holder, existingPass);
     }
   }
 
-  const holder = await Holder.create({
-    eventId: event._id,
-    catId: category._id,
-    phone: normPhone,
-    email: email || undefined,
-    name: name || `Devotee ${normPhone.slice(-4)}`,
-    holderType: deriveHolderTypeLabel(category),
-    source: "third_party",
-    customFields: quantity ? { prasadamQuantity: quantity } : undefined,
-  });
+  if (!holder) {
+    try {
+      holder = await Holder.create({
+        ...holderFilter,
+        email: email || undefined,
+        name: name || `Devotee ${normPhone.slice(-4)}`,
+        holderType: deriveHolderTypeLabel(category),
+        source: "third_party",
+        customFields: quantity ? { prasadamQuantity: quantity } : undefined,
+      });
+    } catch (err) {
+      // Two simultaneous requests for the same person: the other one won.
+      if (err && err.code === 11000) holder = await Holder.findOne(holderFilter);
+      if (!holder) throw err;
+    }
+  }
 
-  const qrId = await qrService.generateQRId(event.eventCode, category.catCode);
   const entryPoints = category.entryPoints || [];
-  const payload = qrService.createPayload({ ...holder.toObject(), qrId }, event, category, entryPoints);
-  // qrImage is still needed here even though it is not returned: payloadSigned
-  // goes on the QRPass, and the community-app push below sends the image.
-  const { image: qrImage, signedPayload } = await qrService.generateQRCode(payload);
+  let created;
+  try {
+    created = await qrService.createQRPassWithUniqueId({
+      event,
+      category,
+      holder,
+      entryPoints,
+      passFields: {
+        validFrom: win ? win.validFrom : event.dateStart,
+        validUntil: win ? win.validUntil : event.dateEnd,
+        ...(win ? { sessionKey: win.sessionKey, windowed: true } : {}),
+        deliveryMethod: "third_party",
+        deliveryStatus: "sent",
+        deliveredAt: new Date(),
+      },
+    });
+  } catch (err) {
+    // Same person + same session raced: return the pass the other request made.
+    if (win && err && err.code === 11000 && /uniq_holder_session|sessionKey/.test(err.message || "")) {
+      const pass = await QRPass.findOne({ holderId: holder._id, sessionKey: win.sessionKey });
+      if (pass) return reusedResult(holder, pass);
+    }
+    throw err;
+  }
 
-  await QRPass.create({
-    qrId,
-    holderId: holder._id,
-    eventId: event._id,
-    catId: category._id,
-    entryPoints: entryPoints.map((ep) => ep._id),
-    payloadSigned: signedPayload,
-    validFrom: event.dateStart,
-    validUntil: event.dateEnd,
-    deliveryMethod: "third_party",
-    deliveryStatus: "sent",
-    deliveredAt: new Date(),
-  });
-
-  // Push to community mobile app (non-fatal, fire-and-forget)
-  const qrPassObj = { qrId };
-  thirdPartyService.pushHolder({ holder, qrPass: qrPassObj, qrImageBase64: qrImage, event }).catch(() => {});
+  // Push to community mobile app (non-fatal, fire-and-forget; gated on the
+  // event's thirdPartyEventId, so a standing event without one never pushes)
+  thirdPartyService
+    .pushHolder({ holder, qrPass: { qrId: created.qrId }, qrImageBase64: created.qrImage, event })
+    .catch(() => {});
 
   return {
     success: true,
     reused: false,
     name: holder.name,
     phone: echoPhone,
-    qr_id: qrId,
+    qr_id: created.qrId,
     holder: displayHolder,
     category: displayCategory,
+    ...(win ? { valid_from: win.validFrom, valid_until: win.validUntil, session_ref: win.sessionRef } : {}),
   };
 }
 
 /**
  * POST /api/integration/prasadam/qr
- * Body: { event_id, phone, name?, email?, quantity? }
+ * Body: { event_id, phone, name?, email?, quantity?,
+ *          valid_for_date?, valid_from?, valid_until?, session_ref? }
  * event_id is the event code shared with the Vaikuntham app, e.g. "SKJ26".
  * Only event_id and phone are required.
+ *
+ * Session-scoped coupons (see utils/sessionWindow.js): send valid_for_date
+ * ("YYYY-MM-DD", IST) and/or valid_from/valid_until (ISO) plus session_ref.
+ * One QR per phone per session, valid only in that window, on a standing
+ * event that serves every session. Without these fields: one QR per phone per
+ * event, as before.
  */
 exports.issueSingle = async (req, res) => {
   try {
@@ -237,8 +271,13 @@ exports.issueSingle = async (req, res) => {
       return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
     }
 
+    const win = parseSessionWindow(req.body);
+    if (win && win.error) {
+      return res.status(400).json({ status: false, message: win.error });
+    }
+
     const category = await resolvePrasadamCategory(event);
-    const result = await issuePrasadamQR(event, category, { name, phone, email, quantity });
+    const result = await issuePrasadamQR(event, category, { name, phone, email, quantity }, win);
 
     if (!result.success) {
       return res.status(400).json({ status: false, message: result.error });
@@ -260,6 +299,8 @@ exports.issueSingle = async (req, res) => {
       // null by design — that slot holds the A/B/C tier for sponsors.
       holder: result.holder,
       category: result.category,
+      // Session-scoped coupons also say when they are valid (ISO, UTC)
+      ...(result.valid_until ? { valid_from: result.valid_from, valid_until: result.valid_until, session_ref: result.session_ref } : {}),
     });
   } catch (error) {
     console.error("[Integration:Prasadam] issueSingle error:", error);
@@ -306,12 +347,17 @@ exports.issueBulk = async (req, res) => {
       return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
     }
 
+    const win = parseSessionWindow(req.body);
+    if (win && win.error) {
+      return res.status(400).json({ status: false, message: win.error });
+    }
+
     const category = await resolvePrasadamCategory(event);
 
     const results = [];
     for (const h of holders) {
       try {
-        const r = await issuePrasadamQR(event, category, h);
+        const r = await issuePrasadamQR(event, category, h, win);
         results.push(r);
       } catch (e) {
         results.push({ success: false, error: e.message, input: h });

@@ -43,6 +43,15 @@ const qrPassSchema = new mongoose.Schema({
     type: Date,
     required: true,
   },
+  // Session-scoped passes (e.g. a prasadam coupon for one Sunday Feast).
+  // `sessionKey` names the session the pass belongs to (the caller's
+  // session_ref, else "date:YYYY-MM-DD"); a holder has at most one pass per
+  // session. When `windowed` is true, validFrom/validUntil are authoritative at
+  // the gate and the event's own scan window is ignored, which lets one standing
+  // event serve any number of dated sessions. Passes without these fields behave
+  // exactly as before.
+  sessionKey: { type: String, trim: true },
+  windowed: { type: Boolean, default: false },
   status: {
     type: String,
     enum: ["active", "used", "revoked", "expired"],
@@ -133,6 +142,11 @@ qrPassSchema.pre("save", function () {
 
 qrPassSchema.index({ qrId: 1, status: 1 }); // covers validateQR's findOne exactly
 qrPassSchema.index({ holderId: 1 }); // for holder lookups
+// One pass per holder per session. Partial, so passes without a session are untouched.
+qrPassSchema.index(
+  { holderId: 1, sessionKey: 1 },
+  { unique: true, partialFilterExpression: { sessionKey: { $type: "string" } }, name: "uniq_holder_session" },
+);
 qrPassSchema.index({ eventId: 1 }); // for event lookups
 qrPassSchema.index({ "redemptionHistory.epId": 1 }); // speeds up history .some() at DB level if needed later
 

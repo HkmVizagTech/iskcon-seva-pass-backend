@@ -59,14 +59,28 @@ test("validateQR accepts a JWT signed with QR_SECRET_KEY", async () => {
   }
 });
 
-test("validateQR rejects a bare qrId", async () => {
+test("validateQR rejects guessable legacy qrIds without a DB lookup", async () => {
   const restore = stubFinders({ pass: revokedPass });
   try {
     stubFinders.lastFilter = null;
+    for (const legacy of ["ISK-TEST26-GN-0000142", "ISK-TEST26-GN-00001"]) {
+      const res = await qrService.validateQR(legacy, EP_ID);
+      assert.strictEqual(res.valid, false);
+      assert.strictEqual(res.reason, "invalid");
+    }
+    assert.strictEqual(stubFinders.lastFilter, null, "must not even look the pass up");
+  } finally {
+    restore();
+  }
+});
+
+test("validateQR resolves an unguessable opaque id via the DB (revoked pass is refused)", async () => {
+  const restore = stubFinders({ pass: revokedPass });
+  try {
     const res = await qrService.validateQR(QR_ID, EP_ID);
     assert.strictEqual(res.valid, false);
-    assert.strictEqual(res.reason, "invalid");
-    assert.strictEqual(stubFinders.lastFilter, null, "must not even look the pass up");
+    assert.strictEqual(res.reason, "revoked");
+    assert.strictEqual(stubFinders.lastFilter.qrId, QR_ID);
   } finally {
     restore();
   }

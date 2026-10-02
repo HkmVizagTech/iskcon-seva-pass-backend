@@ -132,10 +132,10 @@ test("live scan: failed redemption never leaves a granted log", async () => {
   assert.deepStrictEqual(state.counters, []);
 });
 
-test("live scan: bare qrId is rejected and logged under a hash, with clientScanId", async () => {
+test("live scan: legacy sequential qrId is rejected and logged under a hash, with clientScanId", async () => {
   reset();
   const out = await call(scanController.scanQR, volunteer(), {
-    qrData: QR_ID, epId: EP.toString(), venue: "Kailash", clientScanId: "c-5",
+    qrData: "ISK-TEST26-GN-0000142", epId: EP.toString(), venue: "Kailash", clientScanId: "c-5",
   });
   assert.strictEqual(out.body.result, "invalid");
   assert.strictEqual(state.redeems.length, 0);

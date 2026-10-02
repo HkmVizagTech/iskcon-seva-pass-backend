@@ -11,6 +11,8 @@ const { PRASADAM_COUPON } = require("../utils/entryPointTypes");
 const QR_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // 32 symbols, 5 bits each
 const QR_ID_SUFFIX_LEN = 12; // 60 bits of entropy
 const QR_ID_MAX_ATTEMPTS = 5;
+// ISK-<event>-<type>-<12 base32 chars>; the entropy suffix is what makes it unguessable.
+const OPAQUE_QR_ID = /^ISK-[A-Za-z0-9_.-]{1,40}-[A-Z2-7]{12}$/;
 
 class QRService {
   constructor() {
@@ -166,15 +168,24 @@ class QRService {
     }
   }
 
-  async validateQR(qrData, epId, venue = null) {
+  // `at`: when the scan physically happened (offline replays); defaults to now.
+  // Callers clamp it to <= now, so a replay can never be validated in the future.
+  async validateQR(qrData, epId, venue = null, at = null) {
     try {
-      // Step 1: only a JWT signed with QR_SECRET_KEY (HS256) is accepted — it
-      // proves the pass was legitimately issued. A bare qrId is NOT a credential.
+      // Step 1: either a JWT signed with QR_SECRET_KEY (HS256), or an opaque
+      // pass id. Opaque ids carry 60 bits of CSPRNG entropy (see generateQRId),
+      // so a bare id is an unguessable bearer reference the DB lookup below must
+      // resolve — client apps (e.g. the community app) draw the QR from it.
+      // The old sequential ids (guessable) never match OPAQUE_QR_ID.
       let payload;
       try {
         payload = this.verifyPayload(qrData);
       } catch (jwtErr) {
-        return { valid: false, reason: "invalid", message: "Invalid QR code" };
+        if (typeof qrData === "string" && OPAQUE_QR_ID.test(qrData)) {
+          payload = { q: qrData };
+        } else {
+          return { valid: false, reason: "invalid", message: "Invalid QR code" };
+        }
       }
       if (!payload || typeof payload.q !== "string" || !payload.q) {
         return { valid: false, reason: "invalid", message: "Invalid QR code" };
@@ -183,7 +194,7 @@ class QRService {
       // Step 2: fetch QR pass + entry point in parallel
       const [qrPassAny, entryPoint] = await Promise.all([
         QRPass.findOne({ qrId: payload.q })
-          .select("eventId entryPoints holderId catId redemptionHistory status allowedVenues")
+          .select("eventId entryPoints holderId catId redemptionHistory status allowedVenues windowed validFrom validUntil")
           .populate({ path: "holderId", select: "name subCategory sevaSlotId catId", populate: [{ path: "catId", select: "name catCode" }, { path: "sevaSlotId", select: "code name time displayLabel" }] })
           .populate({ path: "catId", select: "name catCode" })
           .lean(),
@@ -285,13 +296,16 @@ class QRService {
         };
       }
 
-      const now = new Date();
+      const now = at instanceof Date && !isNaN(at.getTime()) && at.getTime() <= Date.now() ? at : new Date();
       const CLOCK_SKEW_MS = 5 * 60 * 1000; // 5 minutes tolerance
 
       // Use scanStart/scanEnd if set — these are the GATE timings.
       // Falls back to dateStart/dateEnd (ceremony timings) if scan window not configured.
-      const gateStart = event.scanStart || event.dateStart;
-      const gateEnd   = event.scanEnd   || event.dateEnd;
+      // A windowed pass (session coupon) carries its own validity window, which
+      // replaces the event's gate window.
+      const gateStart = qrPass.windowed ? qrPass.validFrom : (event.scanStart || event.dateStart);
+      const gateEnd   = qrPass.windowed ? qrPass.validUntil : (event.scanEnd   || event.dateEnd);
+      const windowLabel = qrPass.windowed ? "Coupon" : (event.name || "event");
 
       const hasValidStart = gateStart && !isNaN(new Date(gateStart).getTime());
       const hasValidEnd   = gateEnd   && !isNaN(new Date(gateEnd).getTime());
@@ -304,10 +318,15 @@ class QRService {
           const openTime = new Date(gateStart).toLocaleTimeString("en-IN", {
             timeZone: "Asia/Kolkata", hour: "numeric", minute: "2-digit", hour12: true,
           });
+          const openDay = new Date(gateStart).toLocaleDateString("en-IN", {
+            timeZone: "Asia/Kolkata", day: "numeric", month: "short",
+          });
           return {
             valid: false,
             reason: "not_yet_valid",
-            message: `Gate not open yet — scanning starts at ${openTime}`,
+            message: qrPass.windowed
+              ? `Coupon not valid yet — starts ${openDay}, ${openTime}`
+              : `Gate not open yet — scanning starts at ${openTime}`,
             holderName: qrPass.holderId?.name,
             categoryName,
             ...typeInfo,
@@ -317,7 +336,9 @@ class QRService {
           return {
             valid: false,
             reason: "expired",
-            message: `Old QR expired — ${event.name || "event"} has ended`,
+            message: qrPass.windowed
+              ? `${windowLabel} expired — it was valid until ${new Date(gateEnd).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true })}`
+              : `Old QR expired — ${windowLabel} has ended`,
             holderName: qrPass.holderId?.name,
             categoryName,
             ...typeInfo,

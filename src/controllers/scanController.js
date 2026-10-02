@@ -293,7 +293,8 @@ async function processScan(ctx) {
     };
   }
 
-  const validation = await qrService.validateQR(qrData, epId, venue);
+  // Offline replays are judged at the time they were scanned, not at sync time
+  const validation = await qrService.validateQR(qrData, epId, venue, offline ? scannedAt : null);
   const finalStationLabel = stationLabel || validation.entryPoint?.stationLabel || String(epId);
   const validatedQrId = validation.payload?.q || qrId;
 
