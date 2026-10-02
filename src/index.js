@@ -93,6 +93,7 @@ app.use("/api/reports", require("./routes/reports"));
 app.use("/api/volunteers", require("./routes/volunteers"));
 app.use("/api/preachers", require("./routes/preachers"));
 app.use("/api/integration", require("./routes/integration"));
+app.use("/api/clients", require("./routes/clients"));
 // Unauthenticated, rate-limited devotee self-service (pass lookup at the venue)
 app.use("/api/public", require("./routes/public"));
 
@@ -170,7 +171,12 @@ const PORT = process.env.PORT || 5000;
 
 // ─── Critical env var checks (fail fast in production) ───────────────────────
 if (process.env.NODE_ENV === "production") {
-  const required = ["JWT_SECRET", "QR_SECRET_KEY", "MONGODB_URI", "INTEGRATION_API_KEY"];
+  const required = ["JWT_SECRET", "QR_SECRET_KEY", "MONGODB_URI"];
+  // Integration callers authenticate with per-app keys (POST /api/clients); the
+  // shared INTEGRATION_API_KEY is only the legacy fallback.
+  if (!process.env.INTEGRATION_API_KEY) {
+    console.warn("⚠️  INTEGRATION_API_KEY not set — only registered client apps (POST /api/clients) can call /api/integration");
+  }
   // Optional but logged as warnings if missing
   const recommended = ["THIRD_PARTY_API_URL", "THIRD_PARTY_API_KEY"];
   if (!process.env.WHATSAPP_WEBHOOK_SECRET) {

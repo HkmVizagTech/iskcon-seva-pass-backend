@@ -20,6 +20,7 @@ const thirdPartyService = require("../services/thirdPartyService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
 const { PRASADAM_COUPON } = require("../utils/entryPointTypes");
 const { parseSessionWindow } = require("../utils/sessionWindow");
+const { passTypeAllowed } = require("../middleware/clientAuth");
 
 function normalisePhone(phone) {
   if (!phone) return null;
@@ -99,6 +100,23 @@ async function resolvePrasadamCategory(event) {
   return category.populate("entryPoints");
 }
 
+// A pass type (catCode) of an event, with its entry points. "PR" is created on
+// first use (see resolvePrasadamCategory); any other type must already exist.
+async function resolvePassCategory(event, type) {
+  if (type === "PR") return resolvePrasadamCategory(event);
+  return HolderType.findOne({ eventId: event._id, catCode: type }).populate("entryPoints");
+}
+
+// Session keys are namespaced by client, so two apps (or a staging and a
+// production server) can reuse the same session_ref without sharing QRs.
+function namespaceWindow(win, client) {
+  if (!win) return win;
+  return { ...win, sessionKey: `${client ? client.slug : "legacy"}:${win.sessionKey}` };
+}
+
+const clientObjectId = (client) =>
+  client && !client.legacy && mongoose.isValidObjectId(client.id) ? client.id : undefined;
+
 // Core single-holder issuance logic — reused by both single and bulk endpoints.
 //
 // Two modes:
@@ -107,7 +125,7 @@ async function resolvePrasadamCategory(event) {
 //    SESSION (a dated occasion such as "Sunday Feast Oct 11"), valid only inside
 //    that window. A standing event can then serve every session, and a new
 //    session always gets a fresh QR instead of the previous (already used) one.
-async function issuePrasadamQR(event, category, { name, phone, email, quantity }, win = null) {
+async function issuePrasadamQR(event, category, { name, phone, email, quantity }, win = null, client = null) {
   const normPhone = normalisePhone(phone);
   if (!normPhone) {
     return { success: false, error: "Invalid or missing phone number", input: { name, phone } };
@@ -192,6 +210,7 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
         validFrom: win ? win.validFrom : event.dateStart,
         validUntil: win ? win.validUntil : event.dateEnd,
         ...(win ? { sessionKey: win.sessionKey, windowed: true } : {}),
+        ...(clientObjectId(client) ? { issuedByClient: clientObjectId(client) } : {}),
         deliveryMethod: "third_party",
         deliveryStatus: "sent",
         deliveredAt: new Date(),
@@ -237,7 +256,7 @@ async function issuePrasadamQR(event, category, { name, phone, email, quantity }
  * event that serves every session. Without these fields: one QR per phone per
  * event, as before.
  */
-exports.issueSingle = async (req, res) => {
+async function issueOne(req, res, forcedType) {
   try {
     // req.body is undefined when the request body arrived in a format no
     // mounted parser understands. Only express.json and express.urlencoded
@@ -271,21 +290,30 @@ exports.issueSingle = async (req, res) => {
       return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
     }
 
-    const win = parseSessionWindow(req.body);
-    if (win && win.error) {
-      return res.status(400).json({ status: false, message: win.error });
+    const parsedWin = parseSessionWindow(req.body);
+    if (parsedWin && parsedWin.error) {
+      return res.status(400).json({ status: false, message: parsedWin.error });
     }
+    const win = namespaceWindow(parsedWin, req.client);
 
-    const category = await resolvePrasadamCategory(event);
-    const result = await issuePrasadamQR(event, category, { name, phone, email, quantity }, win);
+    const type = String(forcedType || req.body.type || "PR").trim().toUpperCase();
+    if (!passTypeAllowed(req.client, type)) {
+      return res.status(403).json({ status: false, message: `This API key is not allowed to issue ${type} passes` });
+    }
+    const category = await resolvePassCategory(event, type);
+    if (!category) {
+      return res.status(404).json({ status: false, message: `Pass type ${type} not found for event ${event.eventCode}` });
+    }
+    const result = await issuePrasadamQR(event, category, { name, phone, email, quantity }, win, req.client);
 
     if (!result.success) {
       return res.status(400).json({ status: false, message: result.error });
     }
 
+    const label = type === "PR" ? "Prasadam coupon" : "Pass";
     return res.status(200).json({
       status: true,
-      message: result.reused ? "Prasadam coupon already exists — returning existing pass" : "Prasadam coupon QR generated successfully",
+      message: result.reused ? `${label} already exists — returning existing pass` : `${label} QR generated successfully`,
       // qr_id is the id the caller renders as a QR. The base64 qr_code image
       // this used to return as well was dropped on request: it made every
       // response several KB for something the app can draw itself from the
@@ -303,10 +331,15 @@ exports.issueSingle = async (req, res) => {
       ...(result.valid_until ? { valid_from: result.valid_from, valid_until: result.valid_until, session_ref: result.session_ref } : {}),
     });
   } catch (error) {
-    console.error("[Integration:Prasadam] issueSingle error:", error);
-    return res.status(500).json({ status: false, message: "Failed to generate Prasadam coupon QR" });
+    console.error("[Integration:Prasadam] issue error:", error);
+    return res.status(500).json({ status: false, message: "Failed to generate QR" });
   }
-};
+}
+
+exports.issueSingle = (req, res) => issueOne(req, res, "PR");
+
+// POST /api/integration/passes — same, for any pass type ("type", default "PR")
+exports.issuePass = (req, res) => issueOne(req, res, null);
 
 /**
  * POST /api/integration/prasadam/qr/bulk
@@ -347,9 +380,13 @@ exports.issueBulk = async (req, res) => {
       return res.status(404).json({ status: false, message: `Event not found for event_id: ${event_id}` });
     }
 
-    const win = parseSessionWindow(req.body);
-    if (win && win.error) {
-      return res.status(400).json({ status: false, message: win.error });
+    const parsedWin = parseSessionWindow(req.body);
+    if (parsedWin && parsedWin.error) {
+      return res.status(400).json({ status: false, message: parsedWin.error });
+    }
+    const win = namespaceWindow(parsedWin, req.client);
+    if (!passTypeAllowed(req.client, "PR")) {
+      return res.status(403).json({ status: false, message: "This API key is not allowed to issue PR passes" });
     }
 
     const category = await resolvePrasadamCategory(event);
@@ -357,7 +394,7 @@ exports.issueBulk = async (req, res) => {
     const results = [];
     for (const h of holders) {
       try {
-        const r = await issuePrasadamQR(event, category, h, win);
+        const r = await issuePrasadamQR(event, category, h, win, req.client);
         results.push(r);
       } catch (e) {
         results.push({ success: false, error: e.message, input: h });

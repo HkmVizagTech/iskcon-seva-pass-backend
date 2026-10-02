@@ -5,6 +5,7 @@
 // When someone marks interest on their platform, they call this endpoint.
 // We create/find the holder in our system and return the QR code.
 
+const { eventAllowed, wildcard } = require("../middleware/clientAuth");
 const Event = require("../models/Event");
 const HolderType = require("../models/HolderType");
 const EntryPoint = require("../models/EntryPoint");
@@ -371,6 +372,10 @@ exports.getQRDetails = async (req, res) => {
     if (!qrPass) {
       return res.status(404).json({ status: false, message: "QR pass not found" });
     }
+    // Same answer as "not found" so a restricted client cannot probe other events' ids
+    if (qrPass.eventId && !eventAllowed(req.client, qrPass.eventId.eventCode)) {
+      return res.status(404).json({ status: false, message: "QR pass not found" });
+    }
 
     return res.json({
       status: qrPass.status || "active",
@@ -417,6 +422,11 @@ exports.getAllEvents = async (req, res) => {
     if (search) {
       const re = new RegExp(escapeRegExp(search), "i");
       query.$or = [{ name: re }, { eventCode: re }];
+    }
+
+    // A client limited to certain events only sees those
+    if (req.client && !wildcard(req.client.allowedEvents)) {
+      query.eventCode = { $in: req.client.allowedEvents.map((c) => String(c).toUpperCase()) };
     }
 
     const events = await Event.find(query)

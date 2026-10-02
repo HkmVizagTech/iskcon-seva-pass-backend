@@ -77,7 +77,7 @@ test("date-only sessions are keyed by the date", async () => {
   const z = await issue({ valid_for_date: day(9) });
   assert.strictEqual(x.qr_id, y.qr_id);
   assert.notStrictEqual(x.qr_id, z.qr_id);
-  assert.strictEqual(passes[0].sessionKey, `date:${d1}`);
+  assert.strictEqual(passes[0].sessionKey, `legacy:date:${d1}`, "no registered client -> namespaced as legacy");
 });
 
 test("re-asking after the office moves the session follows the new window", async () => {

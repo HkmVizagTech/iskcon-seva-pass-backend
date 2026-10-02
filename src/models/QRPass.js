@@ -52,6 +52,9 @@ const qrPassSchema = new mongoose.Schema({
   // exactly as before.
   sessionKey: { type: String, trim: true },
   windowed: { type: Boolean, default: false },
+  // Which registered client app issued this pass (absent for dashboard issues
+  // and for the legacy shared key).
+  issuedByClient: { type: mongoose.Schema.Types.ObjectId, ref: "ClientApp" },
   status: {
     type: String,
     enum: ["active", "used", "revoked", "expired"],
