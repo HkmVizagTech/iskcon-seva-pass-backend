@@ -162,8 +162,10 @@ class ThirdPartyService {
         ? String(preacherPhone).replace(/^91/, "").slice(-10)
         : bare10;
 
-      // "holder" field carries the pass TYPE name (Sponsor / Donor / Invitee).
-      const holderLabel = categoryName || catCode || "";
+      // "holder" field carries the pass TYPE (Sponsor / Donor / Patron /
+      // Invitational) — the only values the community app accepts, so the
+      // display name "Invitee" is mapped to "Invitational".
+      const holderLabel = communityHolderLabel(catCode, categoryName);
 
       // "category" field carries the A/B/C sub-category tier — sponsors
       // usually have one, donors and invitees usually do not.
@@ -302,4 +304,20 @@ class ThirdPartyService {
   }
 }
 
-module.exports = new ThirdPartyService();
+// The community app's seva-sponsor `holder` accepts only these (case-insensitive);
+// anything else is rejected with 422 "The selected holder is invalid."
+const COMMUNITY_HOLDERS = { donor: "Donor", sponsor: "Sponsor", patron: "Patron", invitational: "Invitational" };
+const COMMUNITY_HOLDER_BY_CODE = { SP: "Sponsor", DN: "Donor", INV: "Invitational" };
+
+function communityHolderLabel(catCode, categoryName) {
+  const name = String(categoryName || "").trim().toLowerCase();
+  if (COMMUNITY_HOLDERS[name]) return COMMUNITY_HOLDERS[name];
+  if (["invitee", "invitation", "invited", "invitees"].includes(name)) return "Invitational";
+  const byCode = COMMUNITY_HOLDER_BY_CODE[String(catCode || "").toUpperCase()];
+  if (byCode) return byCode;
+  return categoryName || catCode || "";
+}
+
+const service = new ThirdPartyService();
+service.communityHolderLabel = communityHolderLabel;
+module.exports = service;
