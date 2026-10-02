@@ -2,6 +2,14 @@ const express = require("express");
 const router = express.Router();
 const reportController = require("../controllers/reportController");
 const { protect, authorize, requirePermission } = require("../middleware/auth");
+const { HOLDER_READ_ROLES } = require("../utils/roles");
+const { objectIdParam } = require("../middleware/validator");
+
+router.param("eventId", objectIdParam);
+
+// Reports expose holder PII and event-wide totals: staff roles only. 'self',
+// 'volunteer', and 'announcer' (bahumana view only) are excluded.
+const staff = authorize(...HOLDER_READ_ROLES);
 
 // Every reporting endpoint is gated on the per-account `canViewReports` flag,
 // so a restricted issuer cannot read event-wide totals — not even by calling
@@ -14,8 +22,8 @@ const { protect, authorize, requirePermission } = require("../middleware/auth");
 const canReport = requirePermission("canViewReports");
 
 // Report routes
-router.get("/dashboard", protect, canReport, reportController.getDashboardStats);
-router.get("/analytics", protect, canReport, reportController.getAnalytics);
+router.get("/dashboard", protect, staff, canReport, reportController.getDashboardStats);
+router.get("/analytics", protect, staff, canReport, reportController.getAnalytics);
 router.get("/events/:eventId/bahumana-announcement", protect, authorize("super_admin","event_admin","campaign_manager","announcer"), reportController.getBahumanaAnnouncement);
 // FIX: the frontend's "CSV" button on the Bahumana Announcement view has
 // always called this exact path, but no route for it was ever registered —
@@ -23,19 +31,21 @@ router.get("/events/:eventId/bahumana-announcement", protect, authorize("super_a
 // controller function (exportBahumanaAnnouncement) already existed and
 // worked fine; it just had nothing routing to it.
 router.get("/events/:eventId/bahumana-announcement/export", protect, authorize("super_admin","event_admin","campaign_manager","announcer"), reportController.exportBahumanaAnnouncement);
-router.get("/analytics/export", protect, canReport, reportController.exportAnalytics);
+router.get("/analytics/export", protect, staff, canReport, reportController.exportAnalytics);
 router.get(
   "/events/:eventId/summary",
   protect,
+  staff,
   canReport,
   reportController.getEventSummary,
 );
-router.get("/events/:eventId/scan-log", protect, canReport, reportController.getScanLog);
-router.get("/events/:eventId/scan-venues", protect, canReport, reportController.getScanVenues);
-router.get("/events/:eventId/no-shows", protect, canReport, reportController.getNoShows);
+router.get("/events/:eventId/scan-log", protect, staff, canReport, reportController.getScanLog);
+router.get("/events/:eventId/scan-venues", protect, staff, canReport, reportController.getScanVenues);
+router.get("/events/:eventId/no-shows", protect, staff, canReport, reportController.getNoShows);
 router.get(
   "/events/:eventId/capacity",
   protect,
+  staff,
   canReport,
   reportController.getCapacityReport,
 );
@@ -48,6 +58,9 @@ router.get(
 router.get(
   "/events/:eventId/holders-detail",
   protect,
+  // Preachers are allowed here only because the controller scopes them to
+  // their own holders.
+  authorize(...HOLDER_READ_ROLES, "preacher"),
   canReport,
   reportController.getHolderDetailsReport,
 );

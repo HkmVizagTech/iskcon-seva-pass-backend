@@ -63,6 +63,9 @@ const User = require("../models/User");
 const qrService = require("../services/qrService");
 const whatsappService = require("../services/whatsappService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
+const { escapeRegex } = require("../utils/regex");
+const { isObjectId } = require("../utils/objectId");
+const { sanitizeHtml } = require("../utils/html");
 const {
   checkIssuePermission,
   isLimitedToOwnHolders,
@@ -141,12 +144,20 @@ async function resolvePreacherPhone(preacherId) {
 const fs = require("fs");
 const path = require("path");
 
+// Roles that may see a pass's signed payload (a working credential).
+const STAFF_QR_ROLES = ["super_admin", "event_admin", "campaign_manager", "issuer", "announcer"];
+
 /**
  * Get QR pass details
  */
 exports.getQRDetails = async (req, res) => {
   try {
-    const qrPass = await QRPass.findOne({ qrId: req.params.qrId })
+    if (!STAFF_QR_ROLES.includes(String(req.user?.role || ""))) {
+      return res.status(403).json({
+        error: `Role ${req.user?.role} is not authorized to access this route`,
+      });
+    }
+    const qrPass = await QRPass.findOne({ qrId: String(req.params.qrId).toUpperCase() })
       .populate("holderId", "name phone email")
       .populate("eventId", "name eventCode")
       .populate("entryPoints", "name stationLabel type");
@@ -161,7 +172,9 @@ exports.getQRDetails = async (req, res) => {
       .select("eventId issuedBy").lean();
     if (scopeHolder && blockedByHolderScope(req, res, scopeHolder)) return;
 
-    res.json({ qrPass });
+    res.json({
+      qrPass: { ...qrPass.toObject(), imageUrl: qrService.signedImageUrl(qrPass.qrId) },
+    });
   } catch (error) {
     console.error("Get QR details error:", error);
     res.status(500).json({ error: "Failed to fetch QR details" });
@@ -265,18 +278,20 @@ exports.resendQR = async (req, res) => {
     };
 
     if (deliveryMethod === "whatsapp" || deliveryMethod === "both") {
-      await whatsappService.sendQRMessage(
+      const waResult = await whatsappService.sendQRMessage(
         holder.phone || holder.whatsappNumber,
         qrImage,
         holder.name,
         evt.name,
         passDetails,
       );
+      if (waResult?.messageId) qrPass.deliveryMessageId = waResult.messageId;
     }
 
     qrPass.deliveryMethod = deliveryMethod;
     qrPass.deliveredAt = new Date();
     qrPass.deliveryStatus = "sent";
+    qrPass.deliveryError = undefined;
     await qrPass.save();
 
     res.json({
@@ -311,6 +326,7 @@ exports.resendQR = async (req, res) => {
 exports.resendAllWhatsapp = async (req, res) => {
   try {
     const { eventId } = req.params;
+    if (!isObjectId(eventId)) return res.status(400).json({ error: "Invalid event id" });
     if (blockedByEventScope(req, res, eventId)) return;
 
     const event = await Event.findById(eventId);
@@ -388,7 +404,7 @@ exports.resendAllWhatsapp = async (req, res) => {
             isSponsor: isSponsorCategory,
           };
 
-          await whatsappService.sendQRMessage(
+          const waResult = await whatsappService.sendQRMessage(
             holder.phone || holder.whatsappNumber,
             qrImage,
             holder.name,
@@ -396,8 +412,10 @@ exports.resendAllWhatsapp = async (req, res) => {
             passDetails,
           );
 
+          if (waResult?.messageId) qrPass.deliveryMessageId = waResult.messageId;
           qrPass.deliveryStatus = "sent";
           qrPass.deliveredAt = new Date();
+          qrPass.deliveryError = undefined;
           await qrPass.save();
           sent++;
           console.log(`[ResendAll] WhatsApp sent for ${holder.name} (${holder.phone}) — qrId ${qrPass.qrId}`);
@@ -405,6 +423,7 @@ exports.resendAllWhatsapp = async (req, res) => {
           failed++;
           try {
             qrPass.deliveryStatus = "failed";
+            qrPass.deliveryError = err.message;
             await qrPass.save();
           } catch (_) {}
           console.error(`[ResendAll] WhatsApp failed for qrId ${qrPass.qrId}:`, err.message);
@@ -426,12 +445,18 @@ exports.resendAllWhatsapp = async (req, res) => {
 exports.getHolders = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { search, catId, page = 1, limit = 20 } = req.query;
+    const { search, catId } = req.query;
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 200);
+    if (!isObjectId(eventId)) return res.status(400).json({ error: "Invalid event id" });
     if (blockedByEventScope(req, res, eventId)) return;
 
     const query = { eventId };
 
-    if (catId) query.catId = catId;
+    if (catId) {
+      if (!isObjectId(catId)) return res.status(400).json({ error: "Invalid catId" });
+      query.catId = catId;
+    }
 
     // Restricted accounts see only the passes they issued themselves.
     // Applied to the query (not the response) so the pagination total is
@@ -441,10 +466,11 @@ exports.getHolders = async (req, res) => {
     }
 
     if (search) {
+      const searchRe = new RegExp(escapeRegex(String(search).slice(0, 100)), "i");
       query.$or = [
-        { name: new RegExp(search, "i") },
-        { phone: new RegExp(search, "i") },
-        { email: new RegExp(search, "i") },
+        { name: searchRe },
+        { phone: searchRe },
+        { email: searchRe },
       ];
     }
 
@@ -453,8 +479,8 @@ exports.getHolders = async (req, res) => {
       .populate("issuedBy", "name")
       .populate("preacherId", "name")
       .sort({ issuedAt: -1 })
-      .limit(Number(limit))
-      .skip((Number(page) - 1) * Number(limit));
+      .limit(limit)
+      .skip((page - 1) * limit);
 
     const total = await Holder.countDocuments(query);
 
@@ -482,8 +508,8 @@ exports.getHolders = async (req, res) => {
       holders: holdersWithPasses,
       pagination: {
         total,
-        page: Number(page),
-        pages: Math.ceil(total / Number(limit)),
+        page,
+        pages: Math.ceil(total / limit),
       },
     });
   } catch (error) {
@@ -497,6 +523,9 @@ exports.getHolders = async (req, res) => {
  */
 exports.getHolderDetails = async (req, res) => {
   try {
+    if (!isObjectId(req.params.holderId)) {
+      return res.status(400).json({ error: "Invalid holder id" });
+    }
     const holder = await Holder.findById(req.params.holderId)
       .populate("catId")
       .populate("issuedBy", "name email")
@@ -557,7 +586,18 @@ exports.getHolderDetails = async (req, res) => {
         .map((s) => s.realVenue)
     )];
 
-    res.json({ holder, qrPass, scans: scansWithVenue, venuesVisited });
+    // The signed payload is a working credential — staff roles only.
+    let qrPassOut = null;
+    if (qrPass) {
+      qrPassOut = qrPass.toObject();
+      if (STAFF_QR_ROLES.includes(String(req.user?.role || ""))) {
+        qrPassOut.imageUrl = qrService.signedImageUrl(qrPass.qrId);
+      } else {
+        delete qrPassOut.payloadSigned;
+      }
+    }
+
+    res.json({ holder, qrPass: qrPassOut, scans: scansWithVenue, venuesVisited });
   } catch (error) {
     console.error("Get holder details error:", error);
     res.status(500).json({ error: "Failed to fetch holder details" });
@@ -569,6 +609,9 @@ exports.getHolderDetails = async (req, res) => {
  */
 exports.updateHolder = async (req, res) => {
   try {
+    if (!isObjectId(req.params.holderId)) {
+      return res.status(400).json({ error: "Invalid holder id" });
+    }
     const ALLOWED_FIELDS = [
       "name",
       "phone",
@@ -891,6 +934,7 @@ exports.bulkUpdateCategories = async (req, res) => {
   try {
     const { eventId, rows, apply } = req.body || {};
     if (!eventId) return res.status(400).json({ error: "eventId is required" });
+    if (!isObjectId(String(eventId))) return res.status(400).json({ error: "Invalid eventId" });
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: "rows must be a non-empty array" });
     }
@@ -916,10 +960,11 @@ exports.bulkUpdateCategoriesFile = async (req, res) => {
   try {
     const { eventId } = req.body || {};
     const apply = req.body?.apply === "true" || req.body?.apply === true;
-    if (!eventId) return res.status(400).json({ error: "eventId is required" });
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-
     filePath = req.file.path;
+    if (!eventId) return res.status(400).json({ error: "eventId is required" });
+    if (!isObjectId(String(eventId))) return res.status(400).json({ error: "Invalid eventId" });
+
     const fileExt = path.extname(req.file.originalname).toLowerCase();
     let records = [];
     if (fileExt === ".csv") {
@@ -980,6 +1025,9 @@ exports.bulkUpdateCategoriesFile = async (req, res) => {
  */
 exports.deleteHolder = async (req, res) => {
   try {
+    if (!isObjectId(req.params.holderId)) {
+      return res.status(400).json({ error: "Invalid holder id" });
+    }
     await Holder.findByIdAndDelete(req.params.holderId);
     await QRPass.deleteOne({ holderId: req.params.holderId });
     res.json({ success: true, message: "Holder deleted" });
@@ -1010,6 +1058,13 @@ exports.createHolder = async (req, res) => {
       venues,      // optional array of venue NAMES the pass is valid at
       sevaDate,    // optional — which day of a multi-day event this holder's seva is on
     } = req.body;
+
+    if (!isObjectId(eventId)) {
+      return res.status(400).json({ error: "Invalid event id" });
+    }
+    if (!isObjectId(String(catId || ""))) {
+      return res.status(400).json({ error: "A valid catId is required" });
+    }
 
     const event = await Event.findById(eventId);
     if (!event) {
@@ -1048,12 +1103,16 @@ exports.createHolder = async (req, res) => {
     //   • slotCode            → seva slot code — drives timing/seating
     const incomingTier = (req.body.subCategory || req.body.tier || "").toString().trim().toUpperCase();
     const incomingSlotCode = (req.body.sevaSlotCode || req.body.slotCode || "").toString().trim().toUpperCase();
-    // Custom instruction (rich HTML from the dashboard editor) — passthrough,
-    // no case/trim transforms since it may contain meaningful HTML markup.
-    const incomingInstruction = (req.body.instruction || "").toString().trim();
+    // Custom instruction (rich HTML from the dashboard editor) — no case
+    // transforms since it carries meaningful markup, but it is allowlist-
+    // sanitized (no script/iframe/on* handlers/javascript: URLs) before storing.
+    const incomingInstruction = sanitizeHtml(req.body.instruction);
 
     // Resolve pass type to check if it's a Sponsor type (catCode SP)
-    const categoryForCheck = await HolderType.findById(catId).select("catCode name communityAppSevaType").lean();
+    const categoryForCheck = await HolderType.findById(catId).select("catCode name communityAppSevaType eventId").lean();
+    if (categoryForCheck && String(categoryForCheck.eventId) !== String(event._id)) {
+      return res.status(400).json({ error: "Pass type does not belong to this event" });
+    }
     const isSponsorCategory = (categoryForCheck?.catCode || "").toUpperCase() === "SP";
 
     // ── Per-account issue restrictions ───────────────────────────────────────
@@ -1257,10 +1316,6 @@ exports.createHolder = async (req, res) => {
       }
     }
 
-    const qrId = await qrService.generateQRId(
-      event.eventCode,
-      category.catCode,
-    );
     // validFrom/validUntil stored in QRPass for display purposes only.
     // Scan validation reads live event dates from DB — not these stored values.
     // If the holder has a sevaDate (from the sheet/form's Date field, for
@@ -1268,27 +1323,17 @@ exports.createHolder = async (req, res) => {
     const validFrom = holder.sevaDate || event.dateStart;
     const validUntil = event.dateEnd;
 
-    const payload = qrService.createPayload(
-      { ...holder.toObject(), qrId },
+    const { qrId, qrPass, qrImage } = await qrService.createQRPassWithUniqueId({
       event,
       category,
-      finalEntryPoints,
-    );
-
-    const { image: qrImage, signedPayload } =
-      await qrService.generateQRCode(payload);
-
-    const qrPass = await QRPass.create({
-      qrId,
-      holderId: holder._id,
-      eventId,
-      catId,
-      entryPoints: finalEntryPoints.map((ep) => ep._id),
-      payloadSigned: signedPayload,
-      validFrom,
-      validUntil,
-      deliveryMethod: deliveryMethod || "none",
-      allowedVenues,
+      holder,
+      entryPoints: finalEntryPoints,
+      passFields: {
+        validFrom,
+        validUntil,
+        deliveryMethod: deliveryMethod || "none",
+        allowedVenues,
+      },
     });
 
     let deliveryStatus = "pending";
@@ -1339,6 +1384,7 @@ exports.createHolder = async (req, res) => {
       } catch (error) {
         console.error("WhatsApp send error:", error.message, error.response?.data);
         qrPass.deliveryStatus = "failed";
+        qrPass.deliveryError = error.message;
         deliveryStatus = "failed";
         deliveryError = error.message;
       }
@@ -1407,6 +1453,7 @@ exports.createHolder = async (req, res) => {
       qrPass: {
         qrId: qrPass.qrId,
         qrImage,
+        imageUrl: qrService.signedImageUrl(qrPass.qrId),
         validFrom,
         validUntil,
         deliveryStatus,
@@ -1425,6 +1472,7 @@ exports.createHolder = async (req, res) => {
 exports.exportHolders = async (req, res) => {
   try {
     const { eventId } = req.params;
+    if (!isObjectId(eventId)) return res.status(400).json({ error: "Invalid event id" });
     if (blockedByEventScope(req, res, eventId)) return;
     // Export honours the same "own passes only" limit as the list — otherwise
     // it would be a one-click way around it.
@@ -1446,12 +1494,18 @@ exports.exportHolders = async (req, res) => {
 
     for (const holder of holders) {
       const qrPass = qrMap[holder._id.toString()];
-      csvOutput += `"${holder.name}",`;
-      csvOutput += `"${holder.phone}",`;
-      csvOutput += `"${holder.email || ""}",`;
-      csvOutput += `"${holder.catId?.name || ""}",`;
-      csvOutput += `"${qrPass?.qrId || ""}",`;
-      csvOutput += `"${qrPass?.status || ""}"\n`;
+      // Quote every cell and neutralise spreadsheet formulas (=, +, -, @)
+      const cell = (v) => {
+        let s = String(v ?? "");
+        if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+        return `"${s.replace(/"/g, '""')}"`;
+      };
+      csvOutput += `${cell(holder.name)},`;
+      csvOutput += `${cell(holder.phone)},`;
+      csvOutput += `${cell(holder.email)},`;
+      csvOutput += `${cell(holder.catId?.name)},`;
+      csvOutput += `${cell(qrPass?.qrId)},`;
+      csvOutput += `${cell(qrPass?.status)}\n`;
     }
 
     res.setHeader("Content-Type", "text/csv");
@@ -1479,12 +1533,27 @@ exports.bulkImportHolders = async (req, res) => {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
+    if (!isObjectId(eventId) || !isObjectId(String(categoryId || ""))) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+      return res.status(400).json({ error: "Valid event id and categoryId are required" });
+    }
+
     const event = await Event.findById(eventId);
-    if (!event) return res.status(404).json({ error: "Event not found" });
+    if (!event) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+      return res.status(404).json({ error: "Event not found" });
+    }
 
     const category =
       await HolderType.findById(categoryId).populate("entryPoints");
-    if (!category) return res.status(404).json({ error: "Pass type not found" });
+    if (!category) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+      return res.status(404).json({ error: "Pass type not found" });
+    }
+    if (String(category.eventId) !== String(event._id)) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+      return res.status(400).json({ error: "Pass type does not belong to this event" });
+    }
 
     // ── Per-account issue restrictions ───────────────────────────────────────
     // Bulk import is the obvious bypass route for a restricted account — it
@@ -1658,13 +1727,21 @@ exports.bulkImportHolders = async (req, res) => {
 
 exports.downloadFailedImport = async (req, res) => {
   try {
-    const filePath = path.join(
-      __dirname,
-      "../../uploads",
-      req.params.filename,
-    );
-    if (!fs.existsSync(filePath))
+    const uploadsDir = path.resolve(__dirname, "../../uploads");
+    const requested = String(req.params.filename || "");
+    const name = path.basename(requested);
+    if (!name || name !== requested || name.startsWith(".")) {
       return res.status(404).json({ error: "File not found" });
+    }
+    const filePath = path.resolve(uploadsDir, name);
+    if (path.dirname(filePath) !== uploadsDir) {
+      return res.status(404).json({ error: "File not found" });
+    }
+    let stat;
+    try { stat = fs.statSync(filePath); } catch (_) { stat = null; }
+    if (!stat || !stat.isFile()) {
+      return res.status(404).json({ error: "File not found" });
+    }
     res.download(filePath);
   } catch (error) {
     res.status(500).json({ error: "Failed to download file" });
@@ -1673,6 +1750,9 @@ exports.downloadFailedImport = async (req, res) => {
 
 exports.getCategoryEntryPoints = async (req, res) => {
   try {
+    if (!isObjectId(req.params.categoryId)) {
+      return res.status(400).json({ error: "Invalid category id" });
+    }
     const category = await HolderType.findById(req.params.categoryId).populate(
       "entryPoints",
     );
@@ -1694,6 +1774,9 @@ exports.getCategoryEntryPoints = async (req, res) => {
 exports.getFailedImports = async (req, res) => {
   try {
     const FailedImport = require("../models/FailedImport");
+    if (!isObjectId(req.params.eventId)) {
+      return res.status(400).json({ error: "Invalid event id" });
+    }
     if (blockedByEventScope(req, res, req.params.eventId)) return;
     const imports = await FailedImport.find({ eventId: req.params.eventId })
       .sort({ createdAt: -1 })
@@ -1760,11 +1843,11 @@ async function processSingleRecord(
   }
   instructionLines.sort((a, b) => a.n - b.n);
   let rowInstruction = instructionLines.length > 0
-    ? `<ul>${instructionLines.map((l) => `<li>${l.val}</li>`).join("")}</ul>`
+    ? `<ul>${instructionLines.map((l) => `<li>${sanitizeHtml(l.val)}</li>`).join("")}</ul>`
     : "";
   if (!rowInstruction) {
     const plain = (record.Instruction || record.instruction || "").toString().trim();
-    if (plain) rowInstruction = plain;
+    if (plain) rowInstruction = sanitizeHtml(plain);
   }
 
   const preacherRaw = (record.Preacher || record.preacher || "").toString().trim();
@@ -1936,47 +2019,34 @@ async function processSingleRecord(
       }
     }
 
-    const qrId = await qrService.generateQRId(
-      event.eventCode,
-      category.catCode,
-    );
     const entryPoints = category.entryPoints;
-    const payload = qrService.createPayload(
-      { ...holder.toObject(), qrId },
+    const { qrId, qrPass, qrImage } = await qrService.createQRPassWithUniqueId({
       event,
       category,
+      holder,
       entryPoints,
-    );
-    const { image: qrImage, signedPayload } =
-      await qrService.generateQRCode(payload);
-
-    const qrPass = await QRPass.create({
-      qrId,
-      holderId: holder._id,
-      eventId: event._id,
-      catId: category._id,
-      entryPoints: entryPoints.map((ep) => ep._id),
-      payloadSigned: signedPayload,
-      validFrom: rowDate || event.dateStart,
-      validUntil: event.dateEnd,
-      deliveryMethod,
-      deliveryStatus: "pending",
-      // If the CSV provides Venue (comma-separated for multiple), restrict the
-      // pass to those venues (matching the event's actual venue names where
-      // possible); otherwise valid at every venue.
-      allowedVenues: (() => {
-        const candidates = Array.from(
-          new Set(venueList.filter((v) => typeof v === "string" && v.trim())),
-        );
-        const eventNames = (Array.isArray(event.venue) ? event.venue : [])
-          .map((ev) => String(ev?.name || "").trim()).filter(Boolean);
-        if (candidates.length === 0) return [];
-        const resolved = candidates.flatMap((c) => {
-          const match = eventNames.find((n) => n.toLowerCase() === c.toLowerCase());
-          return match ? [match] : [];
-        });
-        return resolved.length ? resolved : [];
-      })(),
+      passFields: {
+        validFrom: rowDate || event.dateStart,
+        validUntil: event.dateEnd,
+        deliveryMethod,
+        deliveryStatus: "pending",
+        // If the CSV provides Venue (comma-separated for multiple), restrict the
+        // pass to those venues (matching the event's actual venue names where
+        // possible); otherwise valid at every venue.
+        allowedVenues: (() => {
+          const candidates = Array.from(
+            new Set(venueList.filter((v) => typeof v === "string" && v.trim())),
+          );
+          const eventNames = (Array.isArray(event.venue) ? event.venue : [])
+            .map((ev) => String(ev?.name || "").trim()).filter(Boolean);
+          if (candidates.length === 0) return [];
+          const resolved = candidates.flatMap((c) => {
+            const match = eventNames.find((n) => n.toLowerCase() === c.toLowerCase());
+            return match ? [match] : [];
+          });
+          return resolved.length ? resolved : [];
+        })(),
+      },
     });
 
     // FIX: WhatsApp delivery failure does NOT return success:false.
@@ -1985,7 +2055,7 @@ async function processSingleRecord(
     // but we don't orphan the holder record.
     if (deliveryMethod === "whatsapp" || deliveryMethod === "both" || deliveryMethod === "mobile_whatsapp") {
       try {
-        await whatsappService.sendQRMessage(
+        const waResult = await whatsappService.sendQRMessage(
           formattedPhone,
           qrImage,
           name,
@@ -2006,10 +2076,12 @@ async function processSingleRecord(
             } : null,
           },
         );
+        if (waResult?.messageId) qrPass.deliveryMessageId = waResult.messageId;
         qrPass.deliveryStatus = "sent";
         qrPass.deliveredAt = new Date();
       } catch (e) {
         qrPass.deliveryStatus = "failed";
+        qrPass.deliveryError = e.message;
         await qrPass.save();
         // Return success:true because the QR was created — just delivery failed
         return {
@@ -2145,7 +2217,7 @@ exports.manualEntry = async (req, res) => {
     const ScanLog = require("../models/ScanLog");
     const EntryPoint = require("../models/EntryPoint");
 
-    const qrPass = await QRPass.findOne({ qrId: qrId.toUpperCase() })
+    const qrPass = await QRPass.findOne({ qrId: String(qrId).toUpperCase() })
       .populate({ path: "holderId", select: "name phone whatsappNumber subCategory catId sevaSlotId eventId sevaDate",
         populate: [{ path: "catId", select: "name catCode color" },
                    { path: "sevaSlotId", select: "code name time displayLabel" }] })
@@ -2154,33 +2226,92 @@ exports.manualEntry = async (req, res) => {
 
     if (!qrPass) return res.status(404).json({ error: "QR pass not found" });
     if (qrPass.status !== "active") return res.status(400).json({ error: "QR pass is not active" });
+    if (blockedByEventScope(req, res, qrPass.eventId?._id || qrPass.eventId)) return;
 
-    // Resolve entry point
+    // Resolve entry point. Prefer the pass's own venue-entry/first entry point
+    // over an arbitrary event entry point — redeeming the wrong lane would burn
+    // that lane's one-time entitlement.
     let resolvedEpId = epId;
     let resolvedLabel = stationLabel || "Manual Entry";
-    if (!resolvedEpId) {
-      // Use the first entry point for the event
-      const ep = await EntryPoint.findOne({ eventId: qrPass.eventId }).select("_id name stationLabel");
-      if (ep) { resolvedEpId = ep._id; resolvedLabel = ep.name || resolvedLabel; }
+    let resolvedEp = null;
+    if (resolvedEpId) {
+      if (!isObjectId(String(resolvedEpId))) {
+        return res.status(400).json({ error: "Invalid epId" });
+      }
+      resolvedEp = await EntryPoint.findOne({
+        _id: resolvedEpId,
+        eventId: qrPass.eventId?._id || qrPass.eventId,
+      }).select("_id name stationLabel type multiEntryAllowed redemptionGroupId eventId");
+      if (!resolvedEp) {
+        return res.status(400).json({ error: "Entry point does not belong to this pass's event" });
+      }
+    } else {
+      const passEps = qrPass.entryPoints || [];
+      const preferred = passEps.find((ep) => ep.type === "venue_entry") || passEps[0];
+      resolvedEp = preferred
+        ? await EntryPoint.findById(preferred._id).select("_id name stationLabel type multiEntryAllowed redemptionGroupId eventId")
+        : await EntryPoint.findOne({ eventId: qrPass.eventId?._id || qrPass.eventId, type: "venue_entry" })
+            .select("_id name stationLabel type multiEntryAllowed redemptionGroupId eventId") ||
+          await EntryPoint.findOne({ eventId: qrPass.eventId?._id || qrPass.eventId })
+            .select("_id name stationLabel type multiEntryAllowed redemptionGroupId eventId");
+      if (resolvedEp && !stationLabel) resolvedLabel = resolvedEp.name || resolvedLabel;
     }
+    if (!resolvedEp) {
+      return res.status(400).json({ error: "No entry point available for this pass" });
+    }
+    resolvedEpId = resolvedEp._id;
+    const manualVenue =
+      typeof req.body.venue === "string" && req.body.venue.trim() ? req.body.venue.trim() : null;
 
-    // Create scan log with source: manual
-    await ScanLog.create({
+    // Redeem through the same atomic path as a scan so the pass cannot be
+    // reused (neither by a second manual entry nor by a later scan).
+    const redemptionGroupEpIds = await qrService.resolveRedemptionGroup(
+      resolvedEp,
+      resolvedEpId,
+      resolvedEp.eventId,
+    );
+    const redemption = await qrService.redeemQR(
+      qrPass.qrId, resolvedEpId, userId, resolvedLabel, manualVenue, {}, 1,
+      {
+        multiEntryAllowed: resolvedEp.multiEntryAllowed,
+        redemptionGroupEpIds,
+        source: "manual",
+      },
+    );
+
+    const scanLogBase = {
       qrId: qrPass.qrId,
       holderId: qrPass.holderId?._id || qrPass.holderId,
       epId: resolvedEpId,
       scannedBy: userId,
       stationLabel: resolvedLabel,
-      result: "granted",
+      venue: manualVenue,
       source: "manual",
-      notes: reason || "Manual entry by admin",
-      deviceInfo: { ipAddress: req.ip, source: "admin_dashboard" },
-    });
+      notes: reason ? String(reason).slice(0, 500) : "Manual entry by admin",
+      deviceInfo: { ipAddress: req.ip },
+    };
+
+    if (!redemption.redeemed) {
+      try {
+        await ScanLog.create({ ...scanLogBase, result: "already_used" });
+      } catch (e) {
+        console.error("manualEntry ScanLog(already_used) write error:", e.message);
+      }
+      return res.status(409).json({
+        success: false,
+        result: "already_used",
+        error: "Already marked as attended — this pass has already been used here",
+        message: "Already marked as attended — this pass has already been used here",
+        holderName: qrPass.holderId?.name,
+        qrId: qrPass.qrId,
+      });
+    }
+
+    // Create scan log with source: manual
+    await ScanLog.create({ ...scanLogBase, result: "granted" });
 
     // Update entry point counter
-    if (resolvedEpId) {
-      await EntryPoint.findByIdAndUpdate(resolvedEpId, { $inc: { currentCount: 1 } });
-    }
+    await EntryPoint.findByIdAndUpdate(resolvedEpId, { $inc: { currentCount: 1 } });
 
     // ── Resend the QR over WhatsApp (best-effort — never blocks the entry) ──
     let whatsappSent = false;
@@ -2347,9 +2478,11 @@ exports.resendSponsorsWithNewVenue = async (req, res) => {
   try {
     const { eventId } = req.params;
     const newVenue = (req.body.newVenue || "").toString().trim();
+    if (!isObjectId(eventId)) return res.status(400).json({ error: "Invalid event id" });
     if (!newVenue) {
       return res.status(400).json({ error: "newVenue is required" });
     }
+    if (blockedByEventScope(req, res, eventId)) return;
 
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ error: "Event not found" });
@@ -2460,6 +2593,14 @@ exports.resendSponsorsBulkFile = async (req, res) => {
   const filePath = req.file.path;
   try {
     const { eventId } = req.params;
+    if (!isObjectId(eventId)) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+      return res.status(400).json({ error: "Invalid event id" });
+    }
+    if (blockedByEventScope(req, res, eventId)) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+      return;
+    }
 
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ error: "Event not found" });

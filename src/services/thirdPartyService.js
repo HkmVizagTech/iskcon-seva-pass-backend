@@ -18,6 +18,7 @@
 
 const axios = require("axios");
 const FormData = require("form-data");
+const { sanitizeHtml } = require("../utils/html");
 
 const COMMON_HEADERS = {
   Accept: "application/json",
@@ -189,7 +190,7 @@ class ThirdPartyService {
         // Custom instruction (rich HTML) typed by the admin takes priority.
         // Falls back to seva slot / category / event name when not set,
         // preserving the previous auto-derived behaviour.
-        instruction: instruction || sevaSlotName || categoryName || event?.name || "",
+        instruction: sanitizeHtml(instruction) || sevaSlotName || categoryName || event?.name || "",
       };
 
       // NOTE: this used to retry once with seva_type omitted on a 422

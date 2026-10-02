@@ -3,12 +3,14 @@ const router = express.Router();
 const authController = require("../controllers/authController");
 const { protect } = require("../middleware/auth");
 const { validate } = require("../middleware/validator");
+const { authLimiters, passwordResetLimiters } = require("../middleware/rateLimit");
+const { canAssignRole, canManageUser, isValidRole } = require("../utils/roles");
+const mongoose = require("mongoose");
 
 // Public routes
-router.post("/register", validate("register"), authController.register);
-router.post("/login", validate("login"), authController.login);
-router.post("/forgot-password", authController.forgotPassword);
-router.post("/reset-password", authController.resetPassword);
+router.post("/login", authLimiters(), validate("login"), authController.login);
+router.post("/forgot-password", passwordResetLimiters(), authController.forgotPassword);
+router.post("/reset-password", passwordResetLimiters(), authController.resetPassword);
 
 // Protected routes
 router.get("/profile", protect, authController.getProfile);
@@ -17,6 +19,9 @@ router.post("/change-password", protect, authController.changePassword);
 
 // Admin routes — FIX: add role guards (previously any authenticated user could manage users)
 const { authorize } = require("../middleware/auth");
+// Account creation is admin-only; the controller additionally forces role
+// "self" for anyone but a super_admin.
+router.post("/register", protect, authorize("super_admin"), validate("register"), authController.register);
 router.get("/users", protect, authorize("super_admin", "event_admin"), authController.getAllUsers);
 router.put("/users/:id", protect, authorize("super_admin"), authController.updateUser);
 router.delete("/users/:id", protect, authorize("super_admin"), authController.deleteUser);
@@ -96,7 +101,26 @@ function buildStaffUpdate(body = {}) {
 
 async function updateStaffUser(req, res) {
   try {
+    if (!mongoose.isValidObjectId(req.params.userId)) {
+      return res.status(400).json({ error: "Invalid user id" });
+    }
     const update = buildStaffUpdate(req.body);
+
+    const target = await User.findById(req.params.userId).select("role");
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (!canManageUser(req.user, target)) {
+      return res.status(403).json({ error: "You cannot modify an account of equal or higher role" });
+    }
+    const isSelf = String(target._id) === String(req.user._id);
+    if (isSelf && (update.role !== undefined || update.isActive === false)) {
+      return res.status(400).json({ error: "You cannot change your own role or deactivate yourself" });
+    }
+    if (update.role !== undefined) {
+      if (!isValidRole(update.role)) return res.status(400).json({ error: "Invalid role" });
+      if (!canAssignRole(req.user, update.role)) {
+        return res.status(403).json({ error: "You cannot assign this role" });
+      }
+    }
 
     // Restrictions on a super_admin are meaningless — issuePermissions.js
     // always bypasses them — so refuse rather than storing a setting that

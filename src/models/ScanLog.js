@@ -45,6 +45,7 @@ const scanLogSchema = new mongoose.Schema({
       "not_yet_valid",   // event hasn't started
       "capacity_full",   // station at max capacity
       "duplicate",       // dedup-blocked repeat scan
+      "stale",           // offline scan too old to redeem (logged only)
     ],
     required: true,
   },

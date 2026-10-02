@@ -20,7 +20,7 @@ https://iskcon-seva-pass-backend-production.up.railway.app
 - The Generate QR endpoint uses the HTTP POST method.
 - Request bodies are sent as JSON.
 - If a volunteer does not already exist by mobile number, the system automatically creates one.
-- No authentication is required for the Generate QR endpoint.
+- Every endpoint requires an API key, sent as the `X-API-Key` header (or `Authorization: Bearer <key>`). Requests without a valid key receive `401`.
 
 ---
 
@@ -72,6 +72,7 @@ POST /api/integration/generate-volunteer-qr
 ```
 POST https://iskcon-seva-pass-backend-production.up.railway.app/api/integration/generate-volunteer-qr
 Content-Type: application/json
+X-API-Key: <your-api-key>
 
 {
   "event_id": "TST2",

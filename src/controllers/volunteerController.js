@@ -1,6 +1,8 @@
 const User = require("../models/User");
 const EntryPoint = require("../models/EntryPoint");
 const Event = require("../models/Event");
+const { escapeRegex } = require("../utils/regex");
+const { isObjectId } = require("../utils/objectId");
 
 // Create volunteer (Admin only)
 exports.createVolunteer = async (req, res) => {
@@ -101,14 +103,18 @@ exports.getVolunteers = async (req, res) => {
     const query = { role: "volunteer" };
 
     if (eventId) {
+      if (!isObjectId(String(eventId))) {
+        return res.status(400).json({ error: "Invalid eventId" });
+      }
       query.assignedEvents = eventId;
     }
 
     if (search) {
+      const searchRe = new RegExp(escapeRegex(String(search).slice(0, 100)), "i");
       query.$or = [
-        { name: new RegExp(search, "i") },
-        { email: new RegExp(search, "i") },
-        { phone: new RegExp(search, "i") },
+        { name: searchRe },
+        { email: searchRe },
+        { phone: searchRe },
       ];
     }
 
@@ -152,6 +158,9 @@ exports.getVolunteers = async (req, res) => {
 // Get single volunteer
 exports.getVolunteer = async (req, res) => {
   try {
+    if (!isObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid volunteer id" });
+    }
     const volunteer = await User.findOne({
       _id: req.params.id,
       role: "volunteer",
@@ -174,6 +183,9 @@ exports.getVolunteer = async (req, res) => {
 // Update volunteer
 exports.updateVolunteer = async (req, res) => {
   try {
+    if (!isObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid volunteer id" });
+    }
     const {
       name,
       email,
@@ -283,6 +295,9 @@ exports.updateVolunteer = async (req, res) => {
 // Delete volunteer
 exports.deleteVolunteer = async (req, res) => {
   try {
+    if (!isObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid volunteer id" });
+    }
     const volunteer = await User.findOneAndDelete({
       _id: req.params.id,
       role: "volunteer",
@@ -310,6 +325,9 @@ exports.getAvailableEntryPoints = async (req, res) => {
     if (eventId) {
       // eventId can be a string (single) or array (multiple)
       const eventIds = Array.isArray(eventId) ? eventId : [eventId];
+      if (!eventIds.every((id) => isObjectId(String(id)))) {
+        return res.status(400).json({ error: "Invalid eventId" });
+      }
       query.eventId = eventIds.length === 1 ? eventIds[0] : { $in: eventIds };
     }
 
@@ -328,6 +346,15 @@ exports.getAvailableEntryPoints = async (req, res) => {
 exports.volunteerLogin = async (req, res) => {
   try {
     const { email, phone, password } = req.body;
+
+    // Only plain strings — an object here would be a query operator (NoSQL injection)
+    if (
+      (email !== undefined && typeof email !== "string") ||
+      (phone !== undefined && typeof phone !== "string") ||
+      typeof password !== "string" || !password
+    ) {
+      return res.status(400).json({ error: "Invalid credentials format" });
+    }
 
     // Find volunteer by email or phone
     const query = { role: "volunteer" };

@@ -6,6 +6,7 @@ const compression = require("compression");
 const dotenv = require("dotenv");
 const path = require("path");
 const Redis = require("ioredis");
+const { authLimiters, generalLimiter } = require("./middleware/rateLimit");
 
 // Load environment variables
 dotenv.config({ path: path.join(__dirname, "../.env") });
@@ -76,59 +77,11 @@ app.use("/uploads", express.static(uploadDir));
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
-
-// ── WhatsApp delivery test — admin only ──────────────────────────────────────
-app.post("/api/test/whatsapp", async (req, res) => {
-  try {
-    const { protect, authorize } = require("./src/middleware/auth");
-    // Inline auth check
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) return res.status(401).json({ error: "No token" });
-
-    const jwt = require("jsonwebtoken");
-    const User = require("./src/models/User");
-    const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
-    const user = await User.findById(decoded.userId).select("-password");
-    if (!user || !["super_admin","event_admin"].includes(user.role)) {
-      return res.status(403).json({ error: "Not authorized" });
-    }
-
-    const { phone, holderName } = req.body;
-    if (!phone) return res.status(400).json({ error: "phone required" });
-
-    const whatsappService = require("./src/services/whatsappService");
-
-    // Check env vars
-    const envCheck = {
-      WHATSAPP_API_KEY: !!process.env.WHATSAPP_API_KEY,
-      WHATSAPP_API_URL: process.env.WHATSAPP_API_URL || "(default: https://wapi.flaxxa.com/api/v1)",
-      HELP_CONTACT: process.env.HELP_CONTACT || "(default: 8977761187)",
-    };
-
-    // Send a minimal test with a placeholder QR image (1x1 white PNG base64)
-    const testQR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg==";
-    try {
-      const result = await whatsappService.sendQRMessage(
-        phone,
-        testQR,
-        holderName || "Test Devotee",
-        "Test Event",
-        { entryPoints: ["Main Gate"], qrId: "TEST-001", validFrom: new Date().toISOString(), venue: "ISKCON Temple" }
-      );
-      res.json({ success: true, envCheck, result });
-    } catch (e) {
-      res.json({
-        success: false,
-        envCheck,
-        error: e.message,
-        responseData: e.response?.data,
-        statusCode: e.response?.status,
-      });
-    }
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+// Brute-force limits on the volunteer login, mounted here so routes/volunteers.js stays untouched.
+app.post("/api/volunteers/login", ...authLimiters("Too many login attempts. Please try again later."));
+// Machine-to-machine and unauthenticated surfaces get a general per-IP ceiling.
+app.use("/api/integration", generalLimiter(600));
+app.use("/api/public", generalLimiter(120));
 
 app.use("/api/events/:eventId/seva-slots", require("./routes/sevaSlots"));
 app.use("/api/events", require("./routes/events"));
@@ -156,19 +109,21 @@ app.get("/health", (req, res) => {
 
 // Version — used to verify Railway deployed the latest commit
 app.get("/version", (req, res) => {
-  res.json({ build: "production-v67-editable-seva-type", time: new Date().toISOString() });
-});
-
-// Test route
-app.get("/api/test", (req, res) => {
-  res.json({ message: "API is working!" });
+  res.json({
+    build: process.env.RAILWAY_GIT_COMMIT_SHA || "unknown",
+    time: new Date().toISOString(),
+  });
 });
 
 // Error handling
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(err.status || 500).json({
-    error: err.message || "Internal server error",
+  const status = err.status || 500;
+  res.status(status).json({
+    error:
+      status >= 500 && process.env.NODE_ENV === "production"
+        ? "Internal server error"
+        : err.message || "Internal server error",
   });
 });
 
@@ -215,9 +170,12 @@ const PORT = process.env.PORT || 5000;
 
 // ─── Critical env var checks (fail fast in production) ───────────────────────
 if (process.env.NODE_ENV === "production") {
-  const required = ["JWT_SECRET", "QR_SECRET_KEY", "MONGODB_URI"];
+  const required = ["JWT_SECRET", "QR_SECRET_KEY", "MONGODB_URI", "INTEGRATION_API_KEY"];
   // Optional but logged as warnings if missing
-  const recommended = ["INTEGRATION_API_KEY", "THIRD_PARTY_API_URL", "THIRD_PARTY_API_KEY"];
+  const recommended = ["THIRD_PARTY_API_URL", "THIRD_PARTY_API_KEY"];
+  if (!process.env.WHATSAPP_WEBHOOK_SECRET) {
+    console.warn("⚠️  WHATSAPP_WEBHOOK_SECRET not set — /api/webhooks/whatsapp accepts unauthenticated callbacks");
+  }
   for (const key of recommended) {
     if (!process.env[key]) console.warn(`⚠️  ${key} not set — third-party integration disabled`);
   }
@@ -232,8 +190,7 @@ if (process.env.NODE_ENV === "production") {
 
 app.listen(PORT, () => {
   console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📡 Health check: http://localhost:${PORT}/health`);
-  console.log(`📡 Test endpoint: http://localhost:${PORT}/api/test\n`);
+  console.log(`📡 Health check: http://localhost:${PORT}/health\n`);
 });
 
 module.exports = { app, redis };

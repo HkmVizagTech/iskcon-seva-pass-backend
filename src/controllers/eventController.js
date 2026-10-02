@@ -13,13 +13,24 @@ const {
   allowedEventIds,
 } = require("../utils/issuePermissions");
 const { JHULAN, isJhulan, PRASADAM_COUPON } = require("../utils/entryPointTypes");
+const { escapeRegex } = require("../utils/regex");
+const { HOLDER_READ_ROLES } = require("../utils/roles");
+
+// Fields a client may set when creating an event (createdBy and _id are server-controlled).
+const CREATE_ALLOWED = [
+  "name", "description", "dateStart", "dateEnd", "scanStart", "scanEnd",
+  "thirdPartyEventId", "venue", "bannerImage", "donorThreshold", "settings",
+  "devoteeAppCategories",
+];
 
 exports.createEvent = async (req, res) => {
   try {
     const eventData = {
-      ...req.body,
+      ...Object.fromEntries(
+        CREATE_ALLOWED.filter((k) => req.body[k] !== undefined).map((k) => [k, req.body[k]]),
+      ),
       // FIX: sanitise eventCode — strip spaces and special chars so QR IDs are always clean
-      eventCode: (req.body.eventCode || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
+      eventCode: String(req.body.eventCode || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
       createdBy: req.user._id || req.user.userId,
     };
     if (!eventData.eventCode) {
@@ -171,8 +182,8 @@ exports.getEvents = async (req, res) => {
 
     if (search) {
       query.$or = [
-        { name: new RegExp(search, "i") },
-        { eventCode: new RegExp(search, "i") },
+        { name: new RegExp(escapeRegex(search), "i") },
+        { eventCode: new RegExp(escapeRegex(search), "i") },
       ];
     }
 
@@ -250,7 +261,11 @@ exports.getEventDetails = async (req, res) => {
         .populate("holderId", "name phone"),
     ]);
 
-    res.json({ event, entryPoints, categories: holderTypes, recentActivity: recentScans });
+    res.json({
+      event, entryPoints, categories: holderTypes,
+      // Holder names/phones: staff roles only.
+      recentActivity: HOLDER_READ_ROLES.includes(req.user.role) ? recentScans : [],
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch event details" });
   }

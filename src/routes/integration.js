@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const integrationController = require("../controllers/integrationController");
 const prasadamController = require("../controllers/prasadamIntegrationController");
+const { safeEqual } = require("../utils/safeEqual");
 
 // ─── API key middleware ───────────────────────────────────────────────────────
 // The third-party system authenticates using an API key in the
@@ -19,7 +20,7 @@ const requireApiKey = (req, res, next) => {
   const bearer = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
   const provided = header || bearer;
 
-  if (!provided || provided !== expectedKey) {
+  if (!provided || !safeEqual(provided, expectedKey)) {
     return res.status(401).json({ status: false, message: "Invalid API key" });
   }
 
@@ -49,11 +50,12 @@ router.get("/events/:eventCode/categories", requireApiKey, integrationController
 // PATCH /api/integration/events/:eventCode/devotee-categories
 router.patch("/events/:eventCode/devotee-categories", requireApiKey, integrationController.updateDevoteeCategories);
 
-// ─── Bulk volunteer QR generation (public — no auth) ────────────────────────
+// ─── Bulk volunteer QR generation ───────────────────────────────────────────
 // POST /api/integration/generate-volunteer-qr
 // The mobile app calls this when a devotee selects volunteers and taps "Generate QR"
 router.post(
   "/generate-volunteer-qr",
+  requireApiKey,
   integrationController.generateVolunteerQRBulk,
 );
 
@@ -70,18 +72,10 @@ router.delete("/preachers/:id", requireApiKey, integrationController.deletePreac
 // ─── Prasadam Coupon integration (Vaikuntham app) ────────────────────────────
 // Matches events by the short event code (e.g. "SKJ26"), the same code the
 // Vaikuntham app uses — see prasadamIntegrationController.resolveEvent.
-//
-// Deliberately NO requireApiKey, matching /generate-volunteer-qr above: the
-// Vaikuntham app was never issued an integration key and every endpoint it
-// already calls is open, so a key here would have made prasadam the one call
-// in their app needing credentials.
-//
-// Trade-off to be aware of: anyone who knows this URL and a live event code
-// can mint coupons, and each call writes a Holder + QRPass row. If that is
-// ever abused, the fix is rate limiting or restoring the key and handing it
-// to the app team — not silently breaking their flow.
-router.post("/prasadam/qr", prasadamController.issueSingle);
-router.post("/prasadam/qr/bulk", prasadamController.issueBulk);
+// Requires X-API-Key like every other issuing endpoint here: each call writes
+// a Holder + QRPass row, so it cannot be open to anyone with an event code.
+router.post("/prasadam/qr", requireApiKey, prasadamController.issueSingle);
+router.post("/prasadam/qr/bulk", requireApiKey, prasadamController.issueBulk);
 
 // ─── QR pass details (live status + scan history) ────────────────────────────
 // GET /api/integration/qr/:qrId

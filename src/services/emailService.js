@@ -1,4 +1,6 @@
 const nodemailer = require("nodemailer");
+const qrService = require("./qrService");
+const { escapeHtml } = require("../utils/html");
 
 class EmailService {
   constructor() {
@@ -37,7 +39,7 @@ class EmailService {
 
   generateEmailTemplate(holderName, eventName, passDetails, qrImage) {
     const entries = (passDetails.entryPoints || [])
-      .map((ep) => `<li>${ep}</li>`)
+      .map((ep) => `<li>${escapeHtml(ep)}</li>`)
       .join("");
 
     // FIX: format dates in IST, not raw ISO strings
@@ -45,8 +47,14 @@ class EmailService {
     const fmtDate = (d) => {
       try { return new Date(d).toLocaleString("en-IN", istOpts); } catch { return d || ""; }
     };
-    const validFromStr = fmtDate(passDetails.validFrom);
-    const validUntilStr = fmtDate(passDetails.validUntil);
+    const validFromStr = escapeHtml(fmtDate(passDetails.validFrom));
+    const validUntilStr = escapeHtml(fmtDate(passDetails.validUntil));
+    const qrSrc = passDetails?.qrId
+      ? qrService.signedImageUrl(
+          passDetails.qrId,
+          process.env.BACKEND_PUBLIC_URL || "https://iskcon-seva-pass-backend-production.up.railway.app",
+        )
+      : qrImage;
 
     return `
       <!DOCTYPE html>
@@ -73,11 +81,11 @@ class EmailService {
             <p>Hare Krishna! Your pass is ready</p>
           </div>
           <div class="content">
-            <h2>Dear ${holderName},</h2>
-            <p>Your pass for <strong>${eventName}</strong> has been generated successfully.</p>
+            <h2>Dear ${escapeHtml(holderName)},</h2>
+            <p>Your pass for <strong>${escapeHtml(eventName)}</strong> has been generated successfully.</p>
 
             <div class="qr-container">
-              <img src="${passDetails?.qrId ? `${process.env.BACKEND_PUBLIC_URL || "https://iskcon-seva-pass-backend-production.up.railway.app"}/api/qr/${passDetails.qrId}/image` : qrImage}" alt="QR Code" class="qr-image">
+              <img src="${escapeHtml(qrSrc)}" alt="QR Code" class="qr-image">
             </div>
 
             <div class="details">

@@ -1,5 +1,6 @@
 const axios = require("axios");
 const FormData = require("form-data");
+const qrService = require("./qrService");
 
 class WhatsAppService {
   constructor() {
@@ -79,7 +80,7 @@ class WhatsAppService {
       throw new Error("BACKEND_PUBLIC_URL is required for Gupshup (QR image must be publicly accessible)");
     }
 
-    const imageUrl = `${this.backendPublicUrl}/api/qr/${qrId}/image`;
+    const imageUrl = qrService.signedImageUrl(qrId, this.backendPublicUrl);
 
     const body = new URLSearchParams();
     body.append("channel", "whatsapp");

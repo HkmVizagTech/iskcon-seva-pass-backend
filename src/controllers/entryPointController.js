@@ -2,6 +2,7 @@ const EntryPoint = require("../models/EntryPoint");
 const HolderType = require("../models/HolderType");
 const User = require("../models/User");
 const QRPass = require("../models/QRPass");
+const { isEventAllowed } = require("../utils/issuePermissions");
 
 const EP_ALLOWED_FIELDS = [
   "name", "stationLabel", "type", "description",
@@ -11,6 +12,12 @@ const EP_ALLOWED_FIELDS = [
 
 exports.getEntryPoints = async (req, res) => {
   try {
+    if (!isEventAllowed(req.user, req.params.eventId)) {
+      return res.status(403).json({
+        code: "EVENT_NOT_ALLOWED",
+        error: "Your account is not assigned to this event.",
+      });
+    }
     const entryPoints = await EntryPoint.find({ eventId: req.params.eventId });
     res.json(entryPoints);
   } catch (error) {
@@ -20,7 +27,10 @@ exports.getEntryPoints = async (req, res) => {
 
 exports.createEntryPoint = async (req, res) => {
   try {
-    const data = { ...req.body, eventId: req.params.eventId };
+    const data = { eventId: req.params.eventId };
+    for (const field of EP_ALLOWED_FIELDS) {
+      if (req.body[field] !== undefined) data[field] = req.body[field];
+    }
     if (data.linkedEpId === "" || data.linkedEpId === "none") data.linkedEpId = null;
     if (data.redemptionGroupId === "" || data.redemptionGroupId === "none") data.redemptionGroupId = null;
     if (data.maxCapacity === "" || data.maxCapacity === 0) data.maxCapacity = null;

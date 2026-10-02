@@ -1,3 +1,10 @@
+// Usage:
+//   ADMIN_EMAIL=you@example.org ADMIN_PASSWORD='...' node scripts/create-admin.js
+//   node scripts/create-admin.js --email=you@example.org --password='...'
+//
+// Creates a super_admin. If the account already exists nothing is changed
+// unless --reset is passed, in which case its password is replaced.
+// ADMIN_NAME / ADMIN_PHONE are optional.
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const dotenv = require("dotenv");
@@ -5,6 +12,20 @@ const path = require("path");
 
 // Load env from backend directory
 dotenv.config({ path: path.join(__dirname, "../.env") });
+
+const MIN_PASSWORD_LENGTH = 12;
+
+const argv = process.argv.slice(2);
+const arg = (name) => {
+  const hit = argv.find((a) => a.startsWith(`--${name}=`));
+  return hit ? hit.slice(name.length + 3) : undefined;
+};
+const reset = argv.includes("--reset");
+
+const email = (process.env.ADMIN_EMAIL || arg("email") || "").trim().toLowerCase();
+const password = process.env.ADMIN_PASSWORD || arg("password") || "";
+const name = process.env.ADMIN_NAME || arg("name") || "Super Admin";
+const phone = process.env.ADMIN_PHONE || arg("phone") || undefined;
 
 // Simple User schema for this script
 const userSchema = new mongoose.Schema({
@@ -20,6 +41,15 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model("User", userSchema);
 
 async function createAdmin() {
+  if (!email || !password) {
+    console.error("ADMIN_EMAIL and ADMIN_PASSWORD (or --email / --password) are required.");
+    process.exit(1);
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    console.error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+    process.exit(1);
+  }
+
   try {
     const MONGODB_URI =
       process.env.MONGODB_URI || "mongodb://localhost:27017/iskcon_seva_pass";
@@ -28,35 +58,32 @@ async function createAdmin() {
     await mongoose.connect(MONGODB_URI);
     console.log("✅ Connected to MongoDB\n");
 
-    // Check if admin exists
-    const existingAdmin = await User.findOne({
-      email: "admin@iskconvizag.org",
-    });
+    const existingAdmin = await User.findOne({ email });
 
     if (existingAdmin) {
-      console.log("ℹ️ Admin user already exists");
-      console.log("   Email: admin@iskconvizag.org");
-      console.log("   Password: Admin@123");
+      if (!reset) {
+        console.log(`ℹ️ A user with email ${email} already exists. Nothing changed.`);
+        console.log("   Pass --reset to replace its password.");
+        await mongoose.disconnect();
+        process.exit(0);
+      }
 
-      // Update password if needed
       const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash("Admin@123", salt);
-      existingAdmin.password = hashedPassword;
+      existingAdmin.password = await bcrypt.hash(password, salt);
       await existingAdmin.save();
-      console.log("✅ Password reset to: Admin@123\n");
+      console.log(`✅ Password reset for ${email}\n`);
 
       await mongoose.disconnect();
       process.exit(0);
     }
 
-    // Create admin user
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash("Admin@123", salt);
+    const hashedPassword = await bcrypt.hash(password, salt);
 
-    const admin = await User.create({
-      name: "Super Admin",
-      email: "admin@iskconvizag.org",
-      phone: "+919999999999",
+    await User.create({
+      name,
+      email,
+      phone,
       password: hashedPassword,
       role: "super_admin",
       isActive: true,
@@ -64,12 +91,8 @@ async function createAdmin() {
     });
 
     console.log("✅ Admin user created successfully!");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("📧 Email:    admin@iskconvizag.org");
-    console.log("🔑 Password: Admin@123");
-    console.log("👤 Role:     super_admin");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    console.log("⚠️  Please change the password after first login!\n");
+    console.log(`📧 Email: ${email}`);
+    console.log("👤 Role:  super_admin\n");
 
     await mongoose.disconnect();
     process.exit(0);

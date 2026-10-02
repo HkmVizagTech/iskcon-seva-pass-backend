@@ -93,8 +93,8 @@ exports.createPreacher = async (req, res) => {
     const { name, email, phone, password, shortCode } = req.body;
 
     if (!name) return res.status(400).json({ error: "Name is required" });
-    if (!password || password.length < 6)
-      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    if (typeof password !== "string" || password.length < 8)
+      return res.status(400).json({ error: "Password must be at least 8 characters" });
     if (!email && !phone)
       return res.status(400).json({ error: "Email or phone is required" });
     if (!shortCode)
@@ -226,8 +226,8 @@ exports.deletePreacher = async (req, res) => {
 exports.resetPreacherPassword = async (req, res) => {
   try {
     const { password } = req.body;
-    if (!password || password.length < 6)
-      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    if (typeof password !== "string" || password.length < 8)
+      return res.status(400).json({ error: "Password must be at least 8 characters" });
     const preacher = await User.findOne({ _id: req.params.id, role: "preacher" });
     if (!preacher) return res.status(404).json({ error: "Preacher not found" });
     preacher.password = password;
@@ -243,9 +243,12 @@ exports.resetPreacherPassword = async (req, res) => {
 exports.preacherLogin = async (req, res) => {
   try {
     const { email, phone, password } = req.body;
-    if (!password) return res.status(400).json({ error: "Password is required" });
+    if (!password || typeof password !== "string")
+      return res.status(400).json({ error: "Password is required" });
     if (!email && !phone)
       return res.status(400).json({ error: "Email or phone is required" });
+    if ((email && typeof email !== "string") || (phone && typeof phone !== "string"))
+      return res.status(400).json({ error: "Invalid email or phone" });
 
     const query = { role: "preacher" };
     if (email) query.email = email.toLowerCase();
@@ -303,6 +306,9 @@ exports.getMyHolders = async (req, res) => {
         const ev = await mongoose.model("Event").findOne({ eventCode: String(eventCode).toUpperCase() }).select("_id");
         if (ev) query.eventId = ev._id;
       } else if (eventId) {
+        if (!mongoose.isObjectIdOrHexString(String(eventId))) {
+          return res.status(400).json({ error: "Invalid eventId" });
+        }
         query.eventId = eventId;
       }
 
@@ -356,7 +362,7 @@ exports.getMyHolders = async (req, res) => {
     }
 
     if (search) {
-      const rgx = new RegExp(search, "i");
+      const rgx = new RegExp(escapeRegExp(search), "i");
       query.$and = [
         { $or: query.$or },
         { $or: [{ name: rgx }, { phone: rgx }] },

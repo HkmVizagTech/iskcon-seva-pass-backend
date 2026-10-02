@@ -5,6 +5,7 @@ const Event = require("../models/Event");
 const PaidTier = require("../models/PaidTier");
 const WebhookEvent = require("../models/WebhookEvent");
 const qrService = require("../services/qrService");
+const { safeEqual } = require("../utils/safeEqual");
 
 exports.handleRazorpayWebhook = async (req, res) => {
   try {
@@ -26,7 +27,7 @@ exports.handleRazorpayWebhook = async (req, res) => {
       .update(rawBody)
       .digest("hex");
 
-    if (signature !== expectedSignature) {
+    if (!signature || !safeEqual(signature, expectedSignature)) {
       return res.status(400).json({ error: "Invalid signature" });
     }
 
@@ -131,9 +132,11 @@ exports.handleWhatsAppWebhook = async (req, res) => {
     const body = req.body;
 
     // Support both Flaxxa format and legacy Twilio format
-    const messageId = body.message_id || body.MessageSid;
-    const rawStatus = body.status || body.MessageStatus;
-    const phone = body.phone || body.From;
+    // Coerced to strings so a crafted JSON object can never become a query operator.
+    const str = (v) => (v === undefined || v === null || typeof v === "object" ? "" : String(v));
+    const messageId = str(body.message_id || body.MessageSid);
+    const rawStatus = str(body.status || body.MessageStatus);
+    const phone = str(body.phone || body.From);
     const errorCode = body.error_code;
     const errorMessage = body.error_message;
 
@@ -161,10 +164,13 @@ exports.handleWhatsAppWebhook = async (req, res) => {
       // Fall back to phone lookup if no message_id match
       const Holder = require("../models/Holder");
 
+      // Status only moves forward: a late "sent" must not overwrite "delivered".
+      const noDowngrade = deliveryStatus === "sent" ? { deliveryStatus: { $nin: ["delivered"] } } : {};
+
       let updated = false;
       if (messageId) {
         const result = await QRPass.updateOne(
-          { deliveryMessageId: messageId },
+          { deliveryMessageId: messageId, ...noDowngrade },
           { $set: {
             deliveryStatus,
             ...(deliveryStatus === "failed" ? {
@@ -173,22 +179,29 @@ exports.handleWhatsAppWebhook = async (req, res) => {
             ...(deliveryStatus === "delivered" ? { deliveredAt: new Date() } : {}),
           }},
         );
-        updated = result.modifiedCount > 0;
+        // A matched-but-unchanged pass (already at this status, or a refused
+        // downgrade) still counts: the message id was recognised.
+        updated = result.matchedCount > 0 ||
+          (await QRPass.exists({ deliveryMessageId: messageId })) !== null;
       }
 
-      // Fall back to phone-based lookup
+      // Fall back to phone-based lookup. A phone can hold passes across events,
+      // so only the most recent active pass is updated, never every one.
       if (!updated && phone) {
         const normalised = phone.replace(/[^\d]/g, "");
-        const holder = await Holder.findOne({ phone: normalised }).select("_id");
-        if (holder) {
-          await QRPass.updateMany(
-            { holderId: holder._id, status: "active" },
+        const phones = normalised.length === 10 ? [normalised, "91" + normalised] : [normalised];
+        const holders = await Holder.find({ phone: { $in: phones } }).select("_id").lean();
+        if (holders.length > 0) {
+          await QRPass.findOneAndUpdate(
+            { holderId: { $in: holders.map((h) => h._id) }, status: "active", ...noDowngrade },
             { $set: {
               deliveryStatus,
               ...(deliveryStatus === "failed" ? {
                 deliveryError: `${errorCode}: ${errorMessage || "delivery failed"}`,
               } : {}),
+              ...(deliveryStatus === "delivered" ? { deliveredAt: new Date() } : {}),
             }},
+            { sort: { createdAt: -1 } },
           );
         }
       }
@@ -206,7 +219,11 @@ exports.verifyWhatsAppWebhook = (req, res) => {
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+  if (
+    mode === "subscribe" &&
+    process.env.WHATSAPP_VERIFY_TOKEN &&
+    safeEqual(token, process.env.WHATSAPP_VERIFY_TOKEN)
+  ) {
     res.status(200).send(challenge);
   } else {
     res.sendStatus(403);

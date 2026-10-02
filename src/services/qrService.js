@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const QRCode = require("qrcode");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
@@ -7,13 +8,17 @@ const Event = require("../models/Event");
 const ScanLog = require("../models/ScanLog");
 const { PRASADAM_COUPON } = require("../utils/entryPointTypes");
 
+const QR_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // 32 symbols, 5 bits each
+const QR_ID_SUFFIX_LEN = 12; // 60 bits of entropy
+const QR_ID_MAX_ATTEMPTS = 5;
+
 class QRService {
   constructor() {
     this.secretKey = process.env.QR_SECRET_KEY;
     if (!this.secretKey) {
-      if (process.env.NODE_ENV === "production") {
+      if (!["development", "test"].includes(process.env.NODE_ENV)) {
         throw new Error(
-          "FATAL: QR_SECRET_KEY env var is required in production.",
+          "FATAL: QR_SECRET_KEY env var is required (the dev fallback only works when NODE_ENV is 'development' or 'test').",
         );
       }
       console.warn(
@@ -23,15 +28,85 @@ class QRService {
     }
   }
 
+  // Unguessable id: readable prefix + CSPRNG suffix.
   async generateQRId(eventCode, catCode) {
-    const count = await QRPass.countDocuments({
-      qrId: new RegExp(`^ISK-${eventCode}-${catCode}-`),
-    });
-    const serial = (count + 1).toString().padStart(5, "0");
-    const rand = Math.floor(Math.random() * 100)
-      .toString()
-      .padStart(2, "0");
-    return `ISK-${eventCode}-${catCode}-${serial}${rand}`;
+    const bytes = crypto.randomBytes(QR_ID_SUFFIX_LEN);
+    let suffix = "";
+    for (let i = 0; i < QR_ID_SUFFIX_LEN; i++) {
+      suffix += QR_ID_ALPHABET[bytes[i] & 31];
+    }
+    return `ISK-${eventCode}-${catCode}-${suffix}`;
+  }
+
+  // Generates the id, signs the payload and inserts the QRPass, retrying with a
+  // fresh id if the unique index on qrId ever reports a duplicate.
+  async createQRPassWithUniqueId({ event, category, holder, entryPoints, passFields = {} }) {
+    for (let attempt = 0; attempt < QR_ID_MAX_ATTEMPTS; attempt++) {
+      const qrId = await this.generateQRId(event.eventCode, category.catCode);
+      const payload = this.createPayload(
+        { ...holder.toObject(), qrId },
+        event,
+        category,
+        entryPoints,
+      );
+      const { image, signedPayload } = await this.generateQRCode(payload);
+      try {
+        const qrPass = await QRPass.create({
+          qrId,
+          holderId: holder._id,
+          eventId: event._id,
+          catId: category._id,
+          entryPoints: entryPoints.map((ep) => ep._id),
+          payloadSigned: signedPayload,
+          ...passFields,
+        });
+        return { qrId, qrPass, qrImage: image, signedPayload };
+      } catch (err) {
+        const dupQrId =
+          err && err.code === 11000 && (err.keyPattern?.qrId || /qrId/.test(err.message || ""));
+        if (!dupQrId) throw err;
+      }
+    }
+    throw new Error("Could not allocate a unique QR id");
+  }
+
+  // ─── Public QR image URLs ──────────────────────────────────────────────────
+  // GET /api/qr/:qrId/image only serves requests carrying ?t=HMAC(qrId), so it
+  // cannot be used to enumerate ids. Every place that builds an image URL must
+  // go through signedImageUrl.
+  imageToken(qrId) {
+    return crypto.createHmac("sha256", this.secretKey).update(String(qrId)).digest("hex");
+  }
+
+  verifyImageToken(qrId, token) {
+    if (typeof token !== "string" || !/^[a-f0-9]{64}$/i.test(token)) return false;
+    const expected = Buffer.from(this.imageToken(qrId), "hex");
+    const given = Buffer.from(token, "hex");
+    return expected.length === given.length && crypto.timingSafeEqual(expected, given);
+  }
+
+  signedImageUrl(qrId, baseUrl) {
+    const base = String(baseUrl || process.env.BACKEND_PUBLIC_URL || "").replace(/\/$/, "");
+    return `${base}/api/qr/${encodeURIComponent(qrId)}/image?t=${this.imageToken(qrId)}`;
+  }
+
+  // Resolves the shared-redemption group for an entry point (null when the EP is
+  // standalone). Two ways an EP can be part of ONE combined entrance (scanned
+  // only once across the whole group, e.g. Bahumana desks one per venue):
+  //   1. EXPLICIT — EPs share the same redemptionGroupId (any type).
+  //   2. AUTOMATIC — every `bahumana`-type EP of the event is combined.
+  // The returned list ALWAYS includes the current EP.
+  async resolveRedemptionGroup(entryPoint, epId, eventId) {
+    const explicitGroup = entryPoint && entryPoint.redemptionGroupId;
+    const isBahumanaAuto = entryPoint && entryPoint.type === "bahumana";
+    if (!explicitGroup && !isBahumanaAuto) return null;
+    const match = explicitGroup
+      ? { eventId, redemptionGroupId: entryPoint.redemptionGroupId }
+      : { eventId, type: "bahumana" };
+    const groupEps = await EntryPoint.find(match).select("_id").lean();
+    return [
+      ...new Set(groupEps.map((e) => e._id.toString()).concat(String(epId))),
+    ];
   }
 
   // ─── Payload only carries identity + entry point list ──────────────────────
@@ -93,22 +168,16 @@ class QRService {
 
   async validateQR(qrData, epId, venue = null) {
     try {
-      // Step 1: verify JWT signature — proves it was legitimately issued.
-      // FALLBACK: some delivery surfaces (third-party app, re-rendered QRs)
-      // encode just the qrId (e.g. ISK-ACT26-GN-0000137) instead of the JWT.
-      // Accept that too — the pass record is then looked up by qrId and ALL
-      // the same checks (status, live event dates, station membership,
-      // already-used, capacity, dedup) still apply.
+      // Step 1: only a JWT signed with QR_SECRET_KEY (HS256) is accepted — it
+      // proves the pass was legitimately issued. A bare qrId is NOT a credential.
       let payload;
       try {
         payload = this.verifyPayload(qrData);
       } catch (jwtErr) {
-        const candidate = String(qrData || "").trim().toUpperCase();
-        if (/^ISK-[A-Z0-9]+-[A-Z0-9]+-\d+$/.test(candidate)) {
-          payload = { q: candidate }; // qrId-only QR
-        } else {
-          return { valid: false, reason: "invalid", message: "Invalid QR code" };
-        }
+        return { valid: false, reason: "invalid", message: "Invalid QR code" };
+      }
+      if (!payload || typeof payload.q !== "string" || !payload.q) {
+        return { valid: false, reason: "invalid", message: "Invalid QR code" };
       }
 
       // Step 2: fetch QR pass + entry point in parallel
@@ -119,7 +188,7 @@ class QRService {
           .populate({ path: "catId", select: "name catCode" })
           .lean(),
         EntryPoint.findById(epId)
-          .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed stationLabel type redemptionGroupId")
+          .select("eventId linkedEpId maxCapacity currentCount multiEntryAllowed allowGroupCount stationLabel type redemptionGroupId")
           .lean(),
       ]);
 
@@ -174,29 +243,13 @@ class QRService {
         };
       }
 
-      // Resolve the shared-redemption group for this entry point (if any).
-      // Two ways an EP can be part of ONE combined entrance (scanned only once
-      // across the whole group, e.g. Bahumana desks one per venue):
-      //   1. EXPLICIT — EPs share the same redemptionGroupId (any type).
-      //   2. AUTOMATIC — every `bahumana`-type EP of the event is combined, so
-      //      the user can claim bahumana at ANY one venue only, not both.
-      // redemptionGroupEpIds ALWAYS includes the current EP, so downstream
-      // group-aware checks are a drop-in for the single-EP path.
+      // Shared-redemption group for this entry point (see resolveRedemptionGroup).
       const epIdStr = epId.toString();
-      let redemptionGroupEpIds = null;
-      const explicitGroup = entryPoint && entryPoint.redemptionGroupId;
-      const isBahumanaAuto = entryPoint && entryPoint.type === "bahumana";
-      if (explicitGroup || isBahumanaAuto) {
-        const match = explicitGroup
-          ? { eventId: qrPass.eventId, redemptionGroupId: entryPoint.redemptionGroupId }
-          : { eventId: qrPass.eventId, type: "bahumana" };
-        const groupEps = await EntryPoint.find(match).select("_id").lean();
-        redemptionGroupEpIds = [
-          ...new Set(
-            groupEps.map((e) => e._id.toString()).concat(epIdStr),
-          ),
-        ];
-      }
+      const redemptionGroupEpIds = await this.resolveRedemptionGroup(
+        entryPoint,
+        epIdStr,
+        qrPass.eventId,
+      );
 
       if (!entryPoint || entryPoint.eventId.toString() !== qrPass.eventId.toString()) {
         {
@@ -441,24 +494,11 @@ class QRService {
       } else {
         // Per-venue entrance (shared EP, e.g. Jhulan/Prasadam): allow once per
         // venue. When a venue is provided, block only if this exact EP was
-        // already granted at the SAME venue. Without a venue, block if used here
-        // at all (conservative, matches legacy behavior).
-        const epObjectId = new mongoose.Types.ObjectId(String(epId));
-        const existing = await QRPass.findOne({ qrId, status: "active" })
-          .select("redemptionHistory")
-          .lean();
-        const alreadyUsedHere = (existing?.redemptionHistory || []).some((rh) => {
-          if (String(rh.epId) !== String(epId) || rh.result !== "granted") return false;
-          if (venue) return rh.venue ? rh.venue === venue : false;
-          return true;
-        });
-        if (alreadyUsedHere) {
-          return { redeemed: false };
-        }
-        // Guard against duplicates across the atomic write via a per-venue
-        // unique-ish pattern is not possible in Mongo for subdocuments, so we
-        // rely on this read-then-write plus the in-memory/DB dedup. To keep the
-        // write atomic we still apply a no-op guard below.
+        // already granted at the SAME venue (legacy grants with no venue don't
+        // block). Without a venue, block if used here at all (conservative).
+        const used = { epId: new mongoose.Types.ObjectId(String(epId)), result: "granted" };
+        if (venue) used.venue = venue;
+        filter.redemptionHistory = { $not: { $elemMatch: used } };
       }
     }
     const qrPass = await QRPass.findOneAndUpdate(
@@ -468,6 +508,7 @@ class QRService {
           redemptionHistory: {
             epId, scannedAt: new Date(), scannedBy: userId,
             stationLabel, venue: venue || undefined, result: "granted", groupCount,
+            source: opts.source || "scanner",
           },
         },
       },

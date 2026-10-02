@@ -3,6 +3,11 @@ const router = express.Router();
 const holderController = require("../controllers/holderController");
 const { protect, authorize } = require("../middleware/auth");
 const upload = require("../middleware/upload");
+const { HOLDER_READ_ROLES } = require("../utils/roles");
+const { objectIdParam } = require("../middleware/validator");
+
+["holderId", "eventId", "categoryId"].forEach((p) => router.param(p, objectIdParam));
+const canRead = authorize(...HOLDER_READ_ROLES);
 
 // "issuer" is a limited pass-issuing account. It reaches the same issue routes
 // as a campaign_manager; WHAT it may actually issue (which holder types, which
@@ -15,7 +20,7 @@ const CAN_ISSUE = ["super_admin", "event_admin", "campaign_manager", "issuer"];
 // /:holderId, so Express matched them as holder IDs and returned 404.
 
 // QR operations
-router.get("/qr/:qrId", protect, holderController.getQRDetails);
+router.get("/qr/:qrId", protect, canRead, holderController.getQRDetails);
 router.post(
   "/qr/:qrId/retry-community-sync",
   protect,
@@ -97,6 +102,7 @@ router.get(
 router.get(
   "/failed-imports/:eventId",
   protect,
+  canRead,
   holderController.getFailedImports,
 );
 
@@ -107,10 +113,11 @@ router.post(
   authorize(...CAN_ISSUE),
   holderController.createHolder,
 );
-router.get("/events/:eventId/holders", protect, holderController.getHolders);
+router.get("/events/:eventId/holders", protect, canRead, holderController.getHolders);
 router.get(
   "/events/:eventId/holders/export",
   protect,
+  canRead,
   holderController.exportHolders,
 );
 // Duplicate of routes/events.js's /:eventId/holders/resend-whatsapp — see
@@ -124,7 +131,7 @@ router.post(
 );
 
 // Parameterised catch-all routes LAST
-router.get("/:holderId", protect, holderController.getHolderDetails);
+router.get("/:holderId", protect, canRead, holderController.getHolderDetails);
 router.patch(
   "/:holderId",
   protect,

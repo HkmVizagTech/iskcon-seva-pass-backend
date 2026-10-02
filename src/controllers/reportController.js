@@ -5,6 +5,11 @@ const QRPass = require("../models/QRPass");
 const ScanLog = require("../models/ScanLog");
 const EntryPoint = require("../models/EntryPoint");
 const mongoose = require("mongoose");
+const { escapeRegex } = require("../utils/regex");
+
+// eventId arrives as a query param on the analytics endpoints; "all"/empty means unscoped.
+const badEventQuery = (eventId) =>
+  eventId && eventId !== "all" && !mongoose.isObjectIdOrHexString(String(eventId));
 
 exports.getEventSummary = async (req, res) => {
   try {
@@ -96,14 +101,14 @@ exports.getHolderDetailsReport = async (req, res) => {
         holderQuery.catId = { $in: types.map((t) => t._id) };
       }
     }
-    if (venue) holderQuery.venueName = new RegExp(venue, "i");
-    if (preacher) holderQuery.preacher = new RegExp(preacher, "i");
+    if (venue) holderQuery.venueName = new RegExp(escapeRegex(venue), "i");
+    if (preacher) holderQuery.preacher = new RegExp(escapeRegex(preacher), "i");
 
     // Scope preacher role to their own holders only
     if (req.user.role === "preacher") {
       holderQuery.$or = [
         { preacherId: req.user._id },
-        { preacher: new RegExp(`^${req.user.name}$`, "i") },
+        { preacher: new RegExp(`^${escapeRegex(req.user.name)}$`, "i") },
       ];
     }
 
@@ -163,7 +168,7 @@ exports.getScanLog = async (req, res) => {
     // skip(N) on large collections scans N documents — gets exponentially slower per page
     // before= accepts the scannedAt ISO string of the last item from the previous page
     const {
-      before, limit = 50, result: resultFilter, slotId, session,
+      before, limit: rawLimit = 50, result: resultFilter, slotId, session,
       venue,          // ScanLog.venue — where the scan physically happened
       allowedVenue,   // QRPass.allowedVenues — which venue(s) the pass itself is restricted to
       catId,          // Holder.catId — category (Sponsor/Donor/etc)
@@ -171,6 +176,11 @@ exports.getScanLog = async (req, res) => {
       epId,           // EntryPoint._id — specific station/entry point
       search,         // free-text: holder name or phone number
     } = req.query;
+
+    const limit = Math.min(Math.max(parseInt(rawLimit, 10) || 50, 1), 500);
+    if (before && Number.isNaN(new Date(before).getTime())) {
+      return res.status(400).json({ error: "Invalid before cursor" });
+    }
 
     const eventEntryPoints = await EntryPoint.find({ eventId }).select("_id");
     let epIds = eventEntryPoints.map((ep) => ep._id);
@@ -217,11 +227,12 @@ exports.getScanLog = async (req, res) => {
     if (search && search.trim()) {
       const Holder = require("../models/Holder");
       const term = search.trim();
+      const digits = term.replace(/\D/g, "");
       const matched = await Holder.find({
         eventId,
         $or: [
-          { name: { $regex: term, $options: "i" } },
-          { phone: { $regex: term.replace(/\D/g, ""), $options: "i" } },
+          { name: { $regex: escapeRegex(term), $options: "i" } },
+          ...(digits ? [{ phone: { $regex: escapeRegex(digits), $options: "i" } }] : []),
         ],
       }).select("_id").lean();
       const matchedIds = new Set(matched.map((h) => h._id.toString()));
@@ -466,6 +477,7 @@ exports.getDashboardStats = async (req, res) => {
 exports.getAnalytics = async (req, res) => {
   try {
     const { eventId, session = "all" } = req.query;
+    if (badEventQuery(eventId)) return res.status(400).json({ error: "Invalid eventId" });
     const scoped = eventId && eventId !== "all";
     const eventObjectId = scoped ? new mongoose.Types.ObjectId(eventId) : null;
 
@@ -729,6 +741,7 @@ exports.getAnalytics = async (req, res) => {
 exports.exportAnalytics = async (req, res) => {
   try {
     const { eventId, angle, session = "all" } = req.query;
+    if (badEventQuery(eventId)) return res.status(400).json({ error: "Invalid eventId" });
     const scoped = eventId && eventId !== "all";
     const eventObjectId = scoped ? new mongoose.Types.ObjectId(eventId) : null;
     const epFilter = scoped ? { eventId: eventObjectId } : {};

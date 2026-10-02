@@ -73,11 +73,12 @@ function istDayStart(now = new Date()) {
 async function resolveCategory(eventId, requested) {
   const attempts = [];
   if (requested) {
+    requested = String(requested);
     attempts.push({ catCode: requested.toUpperCase() });
     attempts.push({ name: new RegExp(`^${escapeRegExp(requested)}$`, "i") });
     // Partial / fuzzy match — "VIP" matches "VIP Guest", "Don" matches "Donor", etc.
-    attempts.push({ catCode: new RegExp(requested.toUpperCase(), "i") });
-    attempts.push({ name: new RegExp(requested, "i") });
+    attempts.push({ catCode: new RegExp(escapeRegExp(requested.toUpperCase()), "i") });
+    attempts.push({ name: new RegExp(escapeRegExp(requested), "i") });
   }
   attempts.push({ catCode: "INV" });
   attempts.push({ name: /^invitee$/i });
@@ -159,8 +160,8 @@ exports.generateVolunteerQRBulk = async (req, res) => {
     const event = await Event.findOne({
       $or: [
         { eventCode: eventIdStr },
-        { thirdPartyEventId: event_id },
-        { _id: String(event_id).match(/^[0-9a-fA-F]{24}$/) ? event_id : null },
+        { thirdPartyEventId: String(event_id) },
+        { _id: String(event_id).match(/^[0-9a-fA-F]{24}$/) ? String(event_id) : null },
       ],
     });
     if (!event) {
@@ -414,7 +415,7 @@ exports.getAllEvents = async (req, res) => {
     }
 
     if (search) {
-      const re = new RegExp(search, "i");
+      const re = new RegExp(escapeRegExp(search), "i");
       query.$or = [{ name: re }, { eventCode: re }];
     }
 
@@ -617,7 +618,7 @@ exports.getEventEntryPoints = async (req, res) => {
     const query = { eventId: event._id, isActive: true };
 
     if (venue) {
-      query["location.building"] = new RegExp(venue, "i");
+      query["location.building"] = new RegExp(escapeRegExp(venue), "i");
     }
 
     const entryPoints = await EntryPoint.find(query)
@@ -667,8 +668,8 @@ exports.sevaPassIssue = async (req, res) => {
     const event = await Event.findOne({
       $or: [
         { eventCode: eventIdStr },
-        { thirdPartyEventId: event_id },
-        { _id: String(event_id).match(/^[0-9a-fA-F]{24}$/) ? event_id : null },
+        { thirdPartyEventId: String(event_id) },
+        { _id: String(event_id).match(/^[0-9a-fA-F]{24}$/) ? String(event_id) : null },
       ],
     });
     if (!event) {
@@ -725,7 +726,7 @@ exports.sevaPassIssue = async (req, res) => {
       const typeName = (process.env.INTEGRATION_HOLDER_TYPE || "invitee").trim();
       let holderType = await HolderType.findOne({
         eventId: event._id, isActive: true,
-        $or: [{ code: typeName.toUpperCase() }, { name: new RegExp("^" + typeName + "$", "i") }],
+        $or: [{ code: typeName.toUpperCase() }, { name: new RegExp("^" + escapeRegExp(typeName) + "$", "i") }],
       });
       if (!holderType) {
         holderType = await HolderType.findOne({ eventId: event._id, isDefault: true, isActive: true });
@@ -882,6 +883,9 @@ exports.createPreacher = async (req, res) => {
 
     if (!name || !password || !shortCode) {
       return res.status(400).json({ status: false, message: "name, password, and shortCode are required" });
+    }
+    if (typeof password !== "string" || password.length < 8) {
+      return res.status(400).json({ status: false, message: "password must be at least 8 characters" });
     }
     if (!email && !phone) {
       return res.status(400).json({ status: false, message: "email or phone is required" });

@@ -6,6 +6,10 @@ const holderTypeController = require("../controllers/holderTypeController");
 const holderController = require("../controllers/holderController");
 const { protect, authorize } = require("../middleware/auth");
 const upload = require("../middleware/upload");
+const { HOLDER_READ_ROLES } = require("../utils/roles");
+const { objectIdParam } = require("../middleware/validator");
+
+["id", "eventId", "epId", "htId"].forEach((p) => router.param(p, objectIdParam));
 
 // NOTE: the issue + bulk-import routes near the bottom of this file are
 // DUPLICATES of routes in routes/holders.js. THESE are the ones the admin
@@ -121,8 +125,18 @@ router.post(
   authorize(...CAN_ISSUE),
   holderController.createHolder,
 );
-router.get("/:eventId/holders", protect, holderController.getHolders);
-router.get("/:eventId/holders/export", protect, holderController.exportHolders);
+router.get(
+  "/:eventId/holders",
+  protect,
+  authorize(...HOLDER_READ_ROLES),
+  holderController.getHolders,
+);
+router.get(
+  "/:eventId/holders/export",
+  protect,
+  authorize(...HOLDER_READ_ROLES),
+  holderController.exportHolders,
+);
 router.post(
   "/:eventId/holders/bulk",
   protect,
@@ -166,7 +180,7 @@ router.get("/:eventId/sync-status", _p2, _a2("super_admin","event_admin"), async
 });
 
 // ── Diagnostic: what outbound IP does Railway actually use? ─────────────────
-router.get("/__diag/outbound-ip", async (req, res) => {
+router.get("/__diag/outbound-ip", _p2, _a2("super_admin"), async (req, res) => {
   try {
     const axios = require("axios");
     const r = await axios.get("https://api.ipify.org?format=json", { timeout: 8000 });

@@ -2,9 +2,13 @@ const express = require("express");
 const router = express.Router();
 const preacherController = require("../controllers/preacherController");
 const { protect, authorize } = require("../middleware/auth");
+const { objectIdParam } = require("../middleware/validator");
+const { authLimiters } = require("../middleware/rateLimit");
+
+router.param("id", objectIdParam);
 
 // ─── Public ───────────────────────────────────────────────────────────────────
-router.post("/login", preacherController.preacherLogin);
+router.post("/login", authLimiters(), preacherController.preacherLogin);
 
 // ─── Preacher's own dashboard (requires preacher login) ───────────────────────
 router.get("/me/holders", protect, authorize("preacher"), preacherController.getMyHolders);

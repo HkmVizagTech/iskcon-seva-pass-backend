@@ -2,6 +2,10 @@ const express = require("express");
 const router = express.Router({ mergeParams: true }); // picks up :eventId from parent
 const { protect, authorize } = require("../middleware/auth");
 const SevaSlot = require("../models/SevaSlot");
+const { objectIdParam, requireObjectIdParams } = require("../middleware/validator");
+
+router.use(requireObjectIdParams("eventId"));
+router.param("slotId", objectIdParam);
 
 const ADMIN = ["super_admin", "event_admin"];
 

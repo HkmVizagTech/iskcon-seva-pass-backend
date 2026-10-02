@@ -82,6 +82,9 @@ const qrPassSchema = new mongoose.Schema({
     enum: ["pending", "sent", "delivered", "failed"],
     default: "pending",
   },
+  // Provider message id (matched by the delivery-status webhook) + last failure
+  deliveryMessageId: { type: String, index: true, sparse: true },
+  deliveryError: String,
   redemptionHistory: [
     {
       epId: {
@@ -108,6 +111,8 @@ const qrPassSchema = new mongoose.Schema({
           "link_required",
         ],
       },
+      groupCount: Number,
+      source: { type: String, enum: ["scanner", "manual", "offline"] },
     },
   ],
   version: {

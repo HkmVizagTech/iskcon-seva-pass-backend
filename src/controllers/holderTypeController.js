@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const HolderType = require("../models/HolderType");
 const EntryPoint = require("../models/EntryPoint");
 const Holder = require("../models/Holder");
@@ -29,9 +30,15 @@ exports.getHolderTypes = async (req, res) => {
 
 exports.getHolderType = async (req, res) => {
   try {
-    const holderType = await HolderType.findById(req.params.htId)
+    const holderType = await HolderType.findOne({ _id: req.params.htId, eventId: req.params.eventId })
       .populate("entryPoints", "name stationLabel type");
     if (!holderType) return res.status(404).json({ error: "Holder type not found" });
+    if (!isEventAllowed(req.user, holderType.eventId)) {
+      return res.status(403).json({
+        code: "EVENT_NOT_ALLOWED",
+        error: "Your account is not assigned to this event.",
+      });
+    }
     res.json(holderType);
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch holder type" });
@@ -112,8 +119,8 @@ exports.updateHolderType = async (req, res) => {
     if (Array.isArray(categories)) updateData.categories = categories;
     if (typeof communityAppSevaType === "string") updateData.communityAppSevaType = communityAppSevaType.trim();
 
-    const holderType = await HolderType.findByIdAndUpdate(
-      req.params.htId,
+    const holderType = await HolderType.findOneAndUpdate(
+      { _id: req.params.htId, eventId: req.params.eventId },
       { $set: updateData },
       { returnDocument: "after", runValidators: true },
     ).populate("entryPoints", "name stationLabel type");
@@ -130,8 +137,11 @@ exports.updateHolderType = async (req, res) => {
 
 exports.deleteHolderType = async (req, res) => {
   try {
-    const existing = await HolderType.findById(req.params.htId);
+    const existing = await HolderType.findOne({ _id: req.params.htId, eventId: req.params.eventId });
     if (!existing) return res.status(404).json({ error: "Holder type not found" });
+    if (req.query.moveToTypeId && !mongoose.isObjectIdOrHexString(String(req.query.moveToTypeId))) {
+      return res.status(400).json({ error: "Invalid moveToTypeId" });
+    }
 
     if (existing.isDefault) {
       return res.status(409).json({ error: "Default pass types cannot be deleted. Deactivate them instead." });
