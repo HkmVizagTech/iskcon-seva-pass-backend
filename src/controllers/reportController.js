@@ -4,8 +4,10 @@ const HolderType = require("../models/HolderType");
 const QRPass = require("../models/QRPass");
 const ScanLog = require("../models/ScanLog");
 const EntryPoint = require("../models/EntryPoint");
+const ClientApp = require("../models/ClientApp");
 const mongoose = require("mongoose");
 const { escapeRegex } = require("../utils/regex");
+const { isCollected, sortNewestFirst, groupByHolder, classifyNoShows, sessionRollup } = require("../utils/holderPasses");
 
 // eventId arrives as a query param on the analytics endpoints; "all"/empty means unscoped.
 const badEventQuery = (eventId) =>
@@ -19,6 +21,13 @@ exports.getEventSummary = async (req, res) => {
     // FIX: scope all queries to the specific event
 
     const totalIssued = await QRPass.countDocuments({ eventId: eventObjectId });
+    // A holder may own several passes (one per session): count people and
+    // collected passes separately from passes issued.
+    const [holderIds, passesCollected, sessionKeys] = await Promise.all([
+      QRPass.distinct("holderId", { eventId: eventObjectId }),
+      QRPass.countDocuments({ eventId: eventObjectId, "redemptionHistory.result": "granted" }),
+      QRPass.distinct("sessionKey", { eventId: eventObjectId, windowed: true }),
+    ]);
 
     // Get entry point IDs for this event, then filter scan logs
     const eventEntryPoints = await EntryPoint.find({ eventId: eventObjectId }).select("_id");
@@ -80,7 +89,12 @@ exports.getEventSummary = async (req, res) => {
       { $sort: { count: -1 } },
     ]);
 
-    res.json({ totalIssued, totalScanned, byEntryPoint, byHolderType, byVenue, byScanVenue });
+    res.json({
+      totalIssued, totalScanned, byEntryPoint, byHolderType, byVenue, byScanVenue,
+      uniqueHolders: holderIds.length,
+      passesCollected,
+      sessionCount: sessionKeys.length,
+    });
   } catch (error) {
     console.error("getEventSummary error:", error);
     res.status(500).json({ error: "Failed to fetch event summary" });
@@ -132,15 +146,14 @@ exports.getHolderDetailsReport = async (req, res) => {
         )
       : qrPasses;
 
-    const passMap = {};
-    for (const qp of filteredPasses) {
-      passMap[qp.holderId.toString()] = qp;
-    }
+    // A holder may own several passes (one per session): one row per holder,
+    // entry points of the newest pass, scans of all of them.
+    const passMap = groupByHolder(filteredPasses);
 
     const report = holders
-      .filter((h) => !entryPoint || passMap[h._id.toString()])
+      .filter((h) => !entryPoint || passMap.has(h._id.toString()))
       .map((holder) => {
-        const qrPass = passMap[holder._id.toString()];
+        const own = sortNewestFirst(passMap.get(holder._id.toString()) || []);
         return {
           holder: {
             name: holder.name,
@@ -149,8 +162,10 @@ exports.getHolderDetailsReport = async (req, res) => {
             venue: holder.venueName || holder.customFields?.venue || "",
           },
           holderType: holder.catId?.name,
-          entryPoints: qrPass?.entryPoints || [],
-          scans: qrPass?.redemptionHistory || [],
+          entryPoints: own[0]?.entryPoints || [],
+          scans: own.flatMap((p) => p.redemptionHistory || []),
+          passCount: own.length,
+          collectedCount: own.filter(isCollected).length,
         };
       });
 
@@ -331,15 +346,58 @@ exports.getNoShows = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    const noShows = await QRPass.find({
+    const now = new Date();
+
+    // Active passes never granted entry. A failed scan (wrong gate) is still a
+    // no-show; a session pass whose window is open or upcoming is "pending".
+    const uncollected = await QRPass.find({
       eventId,
       status: "active",
-      "redemptionHistory.0": { $exists: false },
-    }).populate("holderId", "name phone email");
+      "redemptionHistory.result": { $ne: "granted" },
+    })
+      .select("-payloadSigned")
+      .populate("holderId", "name phone email");
+    const holderIds = [...new Set(uncollected.map((p) => String(p.holderId?._id || p.holderId)))];
+    const collectedHolderIds = holderIds.length
+      ? await QRPass.distinct("holderId", {
+          eventId,
+          holderId: { $in: holderIds },
+          "redemptionHistory.result": "granted",
+        })
+      : [];
+    const { noShows, pending, holderCount } = classifyNoShows(uncollected, collectedHolderIds, now);
+    noShows.sort((a, b) => new Date(b.validFrom) - new Date(a.validFrom));
 
-    res.json({ noShows, count: noShows.length });
+    // count: missed passes (one per missed session); holderCount: people who
+    // missed and never collected any pass of this event.
+    res.json({ noShows, count: noShows.length, holderCount, pendingCount: pending.length });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch no-shows" });
+  }
+};
+
+// Sessions of a standing event: its windowed passes grouped by sessionKey.
+exports.getSessions = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const passes = await QRPass.find({ eventId, windowed: true })
+      .select("sessionKey validFrom validUntil status redemptionHistory.result issuedByClient")
+      .lean();
+    const sessions = sessionRollup(passes);
+    const clientIds = [...new Set(sessions.flatMap((s) => s.clientIds))];
+    const clients = clientIds.length
+      ? await ClientApp.find({ _id: { $in: clientIds } }).select("name slug").lean()
+      : [];
+    const names = Object.fromEntries(clients.map((c) => [String(c._id), c.name]));
+    res.json({
+      sessions: sessions.map(({ clientIds: ids, ...s }) => ({
+        ...s,
+        clients: ids.map((id) => names[id] || "Removed client"),
+      })),
+    });
+  } catch (error) {
+    console.error("getSessions error:", error);
+    res.status(500).json({ error: "Failed to fetch sessions" });
   }
 };
 
@@ -380,7 +438,15 @@ exports.exportReport = async (req, res) => {
       .populate("holderId")
       .populate("entryPoints");
 
-    let csv = "Name,Phone,Email,QR ID,Entry Points,Scans,Status\n";
+    // One row per pass; session columns are filled for session (windowed) passes.
+    let csv = "Name,Phone,Email,QR ID,Entry Points,Scans,Status,Collected,Session,Valid From (IST),Valid Until (IST)\n";
+    const ist = (d) => (d ? new Date(d).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "");
+    // sessionKey carries a client-supplied ref: quote it and neutralise formulas.
+    const cell = (v) => {
+      let s = String(v ?? "");
+      if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
 
     passes.forEach((pass) => {
       csv += `"${pass.holderId?.name || ""}",`;
@@ -389,7 +455,11 @@ exports.exportReport = async (req, res) => {
       csv += `"${pass.qrId}",`;
       csv += `"${pass.entryPoints.map((ep) => ep.name).join("; ")}",`;
       csv += `${pass.redemptionHistory.length},`;
-      csv += `${pass.status}\n`;
+      csv += `${pass.status},`;
+      csv += `${isCollected(pass) ? "yes" : "no"},`;
+      csv += `${cell(pass.windowed ? pass.sessionKey : "")},`;
+      csv += `"${pass.windowed ? ist(pass.validFrom) : ""}",`;
+      csv += `"${pass.windowed ? ist(pass.validUntil) : ""}"\n`;
     });
 
     res.setHeader("Content-Type", "text/csv");

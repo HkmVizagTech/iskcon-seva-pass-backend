@@ -42,6 +42,7 @@ router.get(
 router.get("/events/:eventId/scan-log", protect, staff, canReport, reportController.getScanLog);
 router.get("/events/:eventId/scan-venues", protect, staff, canReport, reportController.getScanVenues);
 router.get("/events/:eventId/no-shows", protect, staff, canReport, reportController.getNoShows);
+router.get("/events/:eventId/sessions", protect, staff, canReport, reportController.getSessions);
 router.get(
   "/events/:eventId/capacity",
   protect,

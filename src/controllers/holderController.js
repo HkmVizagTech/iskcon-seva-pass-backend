@@ -60,18 +60,31 @@ const QRPass = require("../models/QRPass");
 const EntryPoint = require("../models/EntryPoint");
 const ScanLog = require("../models/ScanLog");
 const User = require("../models/User");
+require("../models/ClientApp"); // registers the model for issuedByClient populate
 const qrService = require("../services/qrService");
 const whatsappService = require("../services/whatsappService");
 const { deriveHolderTypeLabel } = require("../utils/holderTypeLabel");
 const { escapeRegex } = require("../utils/regex");
 const { isObjectId } = require("../utils/objectId");
 const { sanitizeHtml } = require("../utils/html");
+const { isCollected, sortNewestFirst, primaryPass, groupByHolder } = require("../utils/holderPasses");
 const {
   checkIssuePermission,
   isLimitedToOwnHolders,
   isEventAllowed,
   canIssueAdditionalPass,
 } = require("../utils/issuePermissions");
+
+// Holders whose passes are ALL revoked. A holder with a revoked pass and a live
+// one (a replacement, or other sessions) is still editable.
+async function fullyRevokedHolders(holderIds) {
+  const [revoked, live] = await Promise.all([
+    QRPass.distinct("holderId", { holderId: { $in: holderIds }, status: "revoked" }),
+    QRPass.distinct("holderId", { holderId: { $in: holderIds }, status: { $ne: "revoked" } }),
+  ]);
+  const liveSet = new Set(live.map(String));
+  return new Set(revoked.map(String).filter((id) => !liveSet.has(id)));
+}
 
 // The community app's "store-qr-code" endpoint is their VOLUNTEER
 // registration API. It was ALSO being called for every Sponsor/Donor/Invitee
@@ -487,18 +500,25 @@ exports.getHolders = async (req, res) => {
     const holderIds = holders.map((h) => h._id);
     // FIX: Single batch query instead of N+1 loop
     const qrPasses = await QRPass.find({ holderId: { $in: holderIds } });
+    const byHolder = groupByHolder(qrPasses);
 
+    // One row per holder. With several passes (one per session) the row shows
+    // the pass usable now, else the newest, plus the count.
     const holdersWithPasses = holders.map((holder) => {
-      const qrPass = qrPasses.find(
-        (qp) => qp.holderId.toString() === holder._id.toString(),
-      );
+      const own = byHolder.get(holder._id.toString()) || [];
+      const qrPass = primaryPass(own);
       return {
         ...holder.toObject(),
+        passCount: own.length,
         qrPass: qrPass
           ? {
               qrId: qrPass.qrId,
               status: qrPass.status,
               redemptionCount: qrPass.redemptionHistory.length,
+              collected: isCollected(qrPass),
+              windowed: !!qrPass.windowed,
+              validFrom: qrPass.validFrom,
+              validUntil: qrPass.validUntil,
             }
           : null,
       };
@@ -538,9 +558,12 @@ exports.getHolderDetails = async (req, res) => {
 
     if (blockedByHolderScope(req, res, holder)) return;
 
-    const qrPass = await QRPass.findOne({ holderId: holder._id }).populate(
-      "entryPoints",
+    const passes = sortNewestFirst(
+      await QRPass.find({ holderId: holder._id })
+        .populate("entryPoints")
+        .populate("issuedByClient", "name slug"),
     );
+    const qrPass = primaryPass(passes);
 
     // ── Scan history with real-venue attribution ──────────────────────────
     // Venue is determined by the scanning volunteer's account prefix
@@ -567,6 +590,7 @@ exports.getHolderDetails = async (req, res) => {
       const scannedAtIST = new Date(new Date(l.scannedAt).getTime() + IST_OFFSET_MS);
       return {
         _id:           l._id,
+        qrId:          l.qrId,
         scannedAt:     l.scannedAt,
         scannedAtIST:  scannedAtIST.toISOString(),
         result:        l.result,
@@ -587,17 +611,19 @@ exports.getHolderDetails = async (req, res) => {
     )];
 
     // The signed payload is a working credential — staff roles only.
-    let qrPassOut = null;
-    if (qrPass) {
-      qrPassOut = qrPass.toObject();
-      if (STAFF_QR_ROLES.includes(String(req.user?.role || ""))) {
-        qrPassOut.imageUrl = qrService.signedImageUrl(qrPass.qrId);
-      } else {
-        delete qrPassOut.payloadSigned;
-      }
-    }
+    const isStaff = STAFF_QR_ROLES.includes(String(req.user?.role || ""));
+    const passesOut = passes.map((p) => {
+      const o = p.toObject();
+      o.collected = isCollected(p);
+      if (isStaff) o.imageUrl = qrService.signedImageUrl(p.qrId);
+      else delete o.payloadSigned;
+      return o;
+    });
+    const qrPassOut = qrPass ? passesOut[passes.indexOf(qrPass)] : null;
 
-    res.json({ holder, qrPass: qrPassOut, scans: scansWithVenue, venuesVisited });
+    // qrPass: the pass usable now (else the newest), as before; passes: all of
+    // the holder's passes, newest session first.
+    res.json({ holder, qrPass: qrPassOut, passes: passesOut, scans: scansWithVenue, venuesVisited });
   } catch (error) {
     console.error("Get holder details error:", error);
     res.status(500).json({ error: "Failed to fetch holder details" });
@@ -654,7 +680,7 @@ exports.updateHolder = async (req, res) => {
     if (update.subCategory || update.$unset?.subCategory) {
       const existing = await Holder.findById(req.params.holderId).select("_id");
       if (!existing) return res.status(404).json({ error: "Holder not found" });
-      if (await QRPass.exists({ holderId: existing._id, status: "revoked" })) {
+      if ((await fullyRevokedHolders([existing._id])).size > 0) {
         return res.status(400).json({
           error: "Cannot change the category of a revoked pass.",
         });
@@ -709,7 +735,7 @@ exports.updateHolder = async (req, res) => {
 /**
  * Shared resolver for bulk category-tier updates. See the JSON endpoint below
  * for the full behaviour contract. Revoked passes are never touched: any
- * holder whose QRPass is revoked is excluded from phone/name resolution and
+ * holder whose passes are all revoked is excluded from phone/name resolution and
  * from the duplicate candidate lists, and a row whose ONLY match is revoked
  * is reported as "revoked".
  */
@@ -794,7 +820,7 @@ async function runCategoryUpdates(eventId, rows, apply) {
           emit("not_in_event", "That pass belongs to a different event.");
           continue;
         }
-        if (await QRPass.exists({ holderId: holder._id, status: "revoked" })) {
+        if ((await fullyRevokedHolders([holder._id])).size > 0) {
           summary.revoked++;
           result.holder = pickHolder(holder);
           emit("revoked", "This pass is revoked — its category cannot be edited.");
@@ -823,11 +849,7 @@ async function runCategoryUpdates(eventId, rows, apply) {
         }
 
         // Revoked passes are excluded from category editing entirely.
-        const revokedIds = await QRPass.find({
-          holderId: { $in: matches.map((m) => m._id) },
-          status: "revoked",
-        }).select("holderId");
-        const revokedSet = new Set(revokedIds.map((r) => String(r.holderId)));
+        const revokedSet = await fullyRevokedHolders(matches.map((m) => m._id));
         matches = matches.filter((m) => !revokedSet.has(String(m._id)));
         if (matches.length === 0) {
           summary.revoked++;
@@ -1029,7 +1051,7 @@ exports.deleteHolder = async (req, res) => {
       return res.status(400).json({ error: "Invalid holder id" });
     }
     await Holder.findByIdAndDelete(req.params.holderId);
-    await QRPass.deleteOne({ holderId: req.params.holderId });
+    await QRPass.deleteMany({ holderId: req.params.holderId });
     res.json({ success: true, message: "Holder deleted" });
   } catch (error) {
     console.error("Delete holder error:", error);
@@ -1485,15 +1507,20 @@ exports.exportHolders = async (req, res) => {
     // Single batch query
     const holderIds = holders.map((h) => h._id);
     const qrPasses = await QRPass.find({ holderId: { $in: holderIds } });
-    const qrMap = {};
-    for (const qp of qrPasses) {
-      qrMap[qp.holderId.toString()] = qp;
-    }
+    const byHolder = groupByHolder(qrPasses);
+    const istDate = (d) =>
+      d ? new Date(d).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) : "";
 
-    let csvOutput = "Name,Phone,Email,Category,QR ID,Status\n";
+    // Still one row per holder: QR ID / Status are the current (else newest)
+    // pass; holders with several passes get them listed in "Passes".
+    let csvOutput = "Name,Phone,Email,Category,QR ID,Status,Pass Count,Collected,Passes\n";
 
     for (const holder of holders) {
-      const qrPass = qrMap[holder._id.toString()];
+      const own = sortNewestFirst(byHolder.get(holder._id.toString()) || []);
+      const qrPass = primaryPass(own);
+      const passList = own.length > 1
+        ? own.map((p) => `${p.qrId} (${[p.windowed ? istDate(p.validFrom) : "", p.status, isCollected(p) ? "collected" : "not collected"].filter(Boolean).join(", ")})`).join("; ")
+        : "";
       // Quote every cell and neutralise spreadsheet formulas (=, +, -, @)
       const cell = (v) => {
         let s = String(v ?? "");
@@ -1505,7 +1532,10 @@ exports.exportHolders = async (req, res) => {
       csvOutput += `${cell(holder.email)},`;
       csvOutput += `${cell(holder.catId?.name)},`;
       csvOutput += `${cell(qrPass?.qrId)},`;
-      csvOutput += `${cell(qrPass?.status)}\n`;
+      csvOutput += `${cell(qrPass?.status)},`;
+      csvOutput += `${cell(own.length)},`;
+      csvOutput += `${cell(own.filter(isCollected).length)},`;
+      csvOutput += `${cell(passList)}\n`;
     }
 
     res.setHeader("Content-Type", "text/csv");
