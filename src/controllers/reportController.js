@@ -7,6 +7,7 @@ const EntryPoint = require("../models/EntryPoint");
 const ClientApp = require("../models/ClientApp");
 const mongoose = require("mongoose");
 const { escapeRegex } = require("../utils/regex");
+const { csvCell } = require("../utils/csv");
 const { isCollected, sortNewestFirst, groupByHolder, classifyNoShows, sessionRollup } = require("../utils/holderPasses");
 
 // eventId arrives as a query param on the analytics endpoints; "all"/empty means unscoped.
@@ -441,19 +442,14 @@ exports.exportReport = async (req, res) => {
     // One row per pass; session columns are filled for session (windowed) passes.
     let csv = "Name,Phone,Email,QR ID,Entry Points,Scans,Status,Collected,Session,Valid From (IST),Valid Until (IST)\n";
     const ist = (d) => (d ? new Date(d).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "");
-    // sessionKey carries a client-supplied ref: quote it and neutralise formulas.
-    const cell = (v) => {
-      let s = String(v ?? "");
-      if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-      return `"${s.replace(/"/g, '""')}"`;
-    };
+    const cell = csvCell;
 
     passes.forEach((pass) => {
-      csv += `"${pass.holderId?.name || ""}",`;
-      csv += `"${pass.holderId?.phone || ""}",`;
-      csv += `"${pass.holderId?.email || ""}",`;
-      csv += `"${pass.qrId}",`;
-      csv += `"${pass.entryPoints.map((ep) => ep.name).join("; ")}",`;
+      csv += `${cell(pass.holderId?.name)},`;
+      csv += `${cell(pass.holderId?.phone)},`;
+      csv += `${cell(pass.holderId?.email)},`;
+      csv += `${cell(pass.qrId)},`;
+      csv += `${cell(pass.entryPoints.map((ep) => ep.name).join("; "))},`;
       csv += `${pass.redemptionHistory.length},`;
       csv += `${pass.status},`;
       csv += `${isCollected(pass) ? "yes" : "no"},`;
@@ -839,7 +835,7 @@ exports.exportAnalytics = async (req, res) => {
       ...(sessionHolderIds ? { _id: { $in: sessionHolderIds } } : {}),
     };
 
-    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const esc = csvCell;
     let csv = "";
 
     if (angle === "preacher") {
@@ -1181,7 +1177,7 @@ exports.exportBahumanaAnnouncement = async (req, res) => {
       ? allHolders // everyone — attended (any session) + not yet attended
       : allHolders.filter((h) => attendedIdsThisSession.has(String(h._id))); // just this session's attendees
 
-    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const esc = csvCell;
 
     let csv = "S.No,Name,Phone,Category,Bahumana Tier,Seva Slot,Registered Venue,Attended?,Scan Station,Scanned Venue,Scan Session,Scan Time (IST)\n";
     rows.forEach((h, i) => {

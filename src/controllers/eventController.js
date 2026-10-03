@@ -258,6 +258,7 @@ exports.getEventDetails = async (req, res) => {
       QRPass.find({ eventId: event._id })
         .sort({ createdAt: -1 })
         .limit(10)
+        .select("-payloadSigned") // the signed token is a working pass; the page only needs who/when
         .populate("holderId", "name phone"),
     ]);
 
