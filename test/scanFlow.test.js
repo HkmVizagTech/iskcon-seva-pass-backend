@@ -103,6 +103,46 @@ test("live scan: same clientScanId again is idempotent (no second redeem)", asyn
   assert.strictEqual(state.redeems.length, 1);
 });
 
+test("live scan: windowed pass returns its window on granted and on expired; plain pass does not", async () => {
+  const validFrom = new Date(Date.now() - 2 * 3600e3);
+  const validUntil = new Date(Date.now() + 2 * 3600e3);
+  const windowedPass = (from, until) => ({
+    eventId: EVT, entryPoints: [EP], holderId: { _id: HOLDER, name: "Devotee" },
+    status: "active", redemptionHistory: [], windowed: true, validFrom: from, validUntil: until,
+  });
+
+  reset({ pass: windowedPass(validFrom, validUntil) });
+  const ok = await call(scanController.scanQR, volunteer(), {
+    qrData: goodToken(), epId: EP.toString(), venue: "Kailash", clientScanId: "w-1",
+  });
+  assert.strictEqual(ok.body.result, "granted");
+  assert.strictEqual(ok.body.windowed, true);
+  assert.strictEqual(ok.body.validFrom, validFrom.toISOString());
+  assert.strictEqual(ok.body.validUntil, validUntil.toISOString());
+  assert.strictEqual(ok.body.message, "Access granted");
+
+  const oldFrom = new Date(Date.now() - 30 * 3600e3);
+  const oldUntil = new Date(Date.now() - 26 * 3600e3);
+  reset({ pass: windowedPass(oldFrom, oldUntil) });
+  const late = await call(scanController.scanQR, volunteer(), {
+    qrData: goodToken(), epId: EP.toString(), venue: "Kailash", clientScanId: "w-2",
+  });
+  assert.strictEqual(late.body.result, "expired");
+  assert.strictEqual(late.body.success, false);
+  assert.match(late.body.message, /Coupon expired/);
+  assert.strictEqual(late.body.windowed, true);
+  assert.strictEqual(late.body.validFrom, oldFrom.toISOString());
+  assert.strictEqual(late.body.validUntil, oldUntil.toISOString());
+  assert.strictEqual(state.redeems.length, 0);
+
+  reset();
+  const plain = await call(scanController.scanQR, volunteer(), {
+    qrData: goodToken(), epId: EP.toString(), venue: "Kailash", clientScanId: "w-3",
+  });
+  assert.strictEqual(plain.body.result, "granted");
+  assert.ok(!("windowed" in plain.body) && !("validFrom" in plain.body) && !("validUntil" in plain.body));
+});
+
 test("live scan: venue outside the volunteer's assigned venues is rejected (403)", async () => {
   reset();
   const out = await call(scanController.scanQR, volunteer(), {

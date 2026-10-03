@@ -187,6 +187,9 @@ function verdictBody(validation) {
     categoryCode: validation.categoryCode || null,
     passType: validation.passType || null,
     isPrasadamCoupon: !!validation.isPrasadamCoupon,
+    ...(validation.windowed
+      ? { windowed: true, validFrom: validation.validFrom || null, validUntil: validation.validUntil || null }
+      : {}),
   };
 }
 

@@ -152,6 +152,35 @@ test("non-windowed passes still use the event window, untouched", async () => {
   } finally { restore(); }
 });
 
+test("windowed passes report their window (ISO) on granted, not_yet_valid and expired", async () => {
+  const pass = couponPass();
+  const restore = setup({ pass, event: standingEvent });
+  try {
+    const want = { windowed: true, validFrom: pass.validFrom.toISOString(), validUntil: pass.validUntil.toISOString() };
+    const pick = (r) => ({ windowed: r.windowed, validFrom: r.validFrom, validUntil: r.validUntil });
+    const ok = await qrService.validateQR(OPAQUE_ID, EP_ID.toString(), null, ago(36));
+    assert.strictEqual(ok.valid, true);
+    assert.deepStrictEqual(pick(ok), want);
+    const early = await qrService.validateQR(OPAQUE_ID, EP_ID.toString(), null, ago(60));
+    assert.strictEqual(early.reason, "not_yet_valid");
+    assert.deepStrictEqual(pick(early), want);
+    const late = await qrService.validateQR(OPAQUE_ID, EP_ID.toString());
+    assert.strictEqual(late.reason, "expired");
+    assert.deepStrictEqual(pick(late), want);
+  } finally { restore(); }
+});
+
+test("non-windowed passes carry no window fields", async () => {
+  const narrowEvent = { ...standingEvent, dateStart: ago(48), dateEnd: ago(24) };
+  const restore = setup({ pass: couponPass({ windowed: false, validFrom: undefined, validUntil: undefined }), event: narrowEvent });
+  try {
+    for (const at of [ago(36), undefined]) {
+      const res = await qrService.validateQR(OPAQUE_ID, EP_ID.toString(), null, at);
+      assert.ok(!("windowed" in res) && !("validFrom" in res) && !("validUntil" in res), JSON.stringify(res));
+    }
+  } finally { restore(); }
+});
+
 // ── opaque id rules ─────────────────────────────────────────────────────────
 test("only the unguessable id format is accepted bare; legacy sequential ids are not", async () => {
   let looked = false;

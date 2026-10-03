@@ -14,6 +14,11 @@ const QR_ID_MAX_ATTEMPTS = 5;
 // ISK-<event>-<type>-<12 base32 chars>; the entropy suffix is what makes it unguessable.
 const OPAQUE_QR_ID = /^ISK-[A-Za-z0-9_.-]{1,40}-[A-Z2-7]{12}$/;
 
+const isoOrNull = (d) => {
+  const t = d ? new Date(d) : null;
+  return t && !isNaN(t.getTime()) ? t.toISOString() : null;
+};
+
 class QRService {
   constructor() {
     this.secretKey = process.env.QR_SECRET_KEY;
@@ -237,6 +242,10 @@ class QRService {
         return { valid: false, reason: "invalid", message: "Pass is not active", ...typeInfo };
       }
       const qrPass = qrPassAny;
+      // A windowed pass reports its own window so the scanner can show which session it is for
+      const windowInfo = qrPass.windowed
+        ? { windowed: true, validFrom: isoOrNull(qrPass.validFrom), validUntil: isoOrNull(qrPass.validUntil) }
+        : {};
 
       // Venue restriction: if the pass was issued for specific venues only,
       // the scan must happen at one of them. Passes with no allowedVenues
@@ -330,6 +339,7 @@ class QRService {
             holderName: qrPass.holderId?.name,
             categoryName,
             ...typeInfo,
+            ...windowInfo,
           };
         }
         if (now.getTime() > endMs + CLOCK_SKEW_MS) {
@@ -342,6 +352,7 @@ class QRService {
             holderName: qrPass.holderId?.name,
             categoryName,
             ...typeInfo,
+            ...windowInfo,
           };
         }
       }
@@ -491,6 +502,7 @@ class QRService {
         } : null,
         categoryName,
         ...typeInfo,
+        ...windowInfo,
       };
     } catch (error) {
       return { valid: false, reason: "invalid", message: "Invalid QR code" };
