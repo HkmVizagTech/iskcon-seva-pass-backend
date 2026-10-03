@@ -68,14 +68,16 @@ const perClientLimiter = rateLimit({
 
 // Authenticates the caller as a client app and requires `scope`.
 //   router.post("/x", ...clientAuth("passes:issue"), handler)
+// `scope` may also be a list: any one of them is enough.
 function clientAuth(scope) {
-  if (scope && !SCOPES[scope]) throw new Error(`Unknown client scope: ${scope}`);
+  const needed = scope ? (Array.isArray(scope) ? scope : [scope]) : [];
+  for (const s of needed) if (!SCOPES[s]) throw new Error(`Unknown client scope: ${s}`);
   const authenticate = async (req, res, next) => {
     try {
       const client = await identify(req);
       if (!client) return res.status(401).json({ status: false, message: "Invalid API key" });
-      if (scope && !client.scopes.includes(scope)) {
-        return res.status(403).json({ status: false, message: `This API key is not allowed to use '${scope}'` });
+      if (needed.length && !needed.some((s) => client.scopes.includes(s))) {
+        return res.status(403).json({ status: false, message: `This API key is not allowed to use '${needed.join("' or '")}'` });
       }
       req.client = client;
       next();

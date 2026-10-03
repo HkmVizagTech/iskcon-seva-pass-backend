@@ -105,3 +105,14 @@ this system still decides "valid, once only, inside its window".
 * Response = the volunteer scanner's verdict: `result` granted | already_used | expired | not_yet_valid |
   not_included | revoked | invalid | duplicate, `holderName`, `categoryName`, `windowed`/`validFrom`/`validUntil`,
   and on `already_used` a `lastUsed: { at, station, by }`.
+
+## Cancel or move a session
+
+When your app cancels a session, or changes its time, the passes it already issued must follow:
+
+* `POST /api/integration/sessions/revoke` `{ event_id, session_ref }` → `{ revoked, already_collected }`.
+  Every active pass of that session stops scanning (`revoked` at the counter).
+* `POST /api/integration/sessions/window` `{ event_id, session_ref, valid_for_date?, valid_from?, valid_until? }`
+  → `{ updated, valid_from, valid_until }`. Every non-revoked pass of the session gets the new window.
+
+Either issuing scope (`prasadam:issue` or `passes:issue`) is enough; only your own sessions are touched.

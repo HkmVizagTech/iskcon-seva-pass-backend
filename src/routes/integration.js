@@ -3,6 +3,7 @@ const router = express.Router();
 const integrationController = require("../controllers/integrationController");
 const prasadamController = require("../controllers/prasadamIntegrationController");
 const clientScanController = require("../controllers/clientScanController");
+const clientSessionController = require("../controllers/clientSessionController");
 const { clientAuth, guardClientEvent } = require("../middleware/clientAuth");
 
 // ─── Client authentication ────────────────────────────────────────────────────
@@ -70,6 +71,14 @@ router.post("/passes", ...guarded("passes:issue"), prasadamController.issuePass)
 // prasadam:issue scope.
 router.post("/prasadam/qr", ...guarded("prasadam:issue"), prasadamController.issueSingle);
 router.post("/prasadam/qr/bulk", ...guarded("prasadam:issue"), prasadamController.issueBulk);
+
+// ─── Cancel / move a session the client issued passes for ────────────────────
+// POST /api/integration/sessions/revoke  { event_id, session_ref }
+// POST /api/integration/sessions/window  { event_id, session_ref, valid_for_date?, valid_from?, valid_until? }
+// Only the caller's own session (keys are namespaced per client).
+const issuers = ["prasadam:issue", "passes:issue"];
+router.post("/sessions/revoke", ...guarded(issuers), clientSessionController.revoke);
+router.post("/sessions/window", ...guarded(issuers), clientSessionController.window);
 
 // ─── Scan at a counter from a client app ─────────────────────────────────────
 // POST /api/integration/scan
