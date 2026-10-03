@@ -539,9 +539,10 @@ class QRService {
       {
         $push: {
           redemptionHistory: {
-            epId, scannedAt: new Date(), scannedBy: userId,
+            epId, scannedAt: new Date(), scannedBy: userId || undefined,
             stationLabel, venue: venue || undefined, result: "granted", groupCount,
             source: opts.source || "scanner",
+            ...(opts.client ? { client: opts.client, scannerName: opts.scannerName || undefined } : {}),
           },
         },
       },

@@ -86,3 +86,22 @@ node scripts/create-standing-event.js --code PRASADAM --name "Weekend Prasadam"
 Creates the event, its "Prasadam Coupon Counter" and the `PR` pass type. Then assign the counter to the
 volunteers who run it (dashboard → Volunteers). For another purpose, create another standing event and a
 client (or allowlist entry) for it; no code change.
+
+## Scan from your own app
+
+`POST /api/integration/scan` (scope `passes:scan`) lets an app run its own counter scanners while
+this system still decides "valid, once only, inside its window".
+
+```json
+{ "qr": "ISK-PRASADAM-PR-...", "event_id": "PRASADAM", "client_scan_id": "8f3c...",
+  "scanned_by": { "ref": "user-42", "name": "Ramesh", "phone": "9000000007" } }
+```
+
+* `station` (optional): an entry point id of that event, or a type — default `prasadam_coupon`.
+* `client_scan_id` (required, unique per scan): a retry with the same id returns the original verdict.
+* `scanned_by.ref` (required): your id for the person; the app is responsible for who may scan.
+* Only pass types in the key's `allowedPassTypes` are redeemed; others answer `not_included`
+  without revealing the holder.
+* Response = the volunteer scanner's verdict: `result` granted | already_used | expired | not_yet_valid |
+  not_included | revoked | invalid | duplicate, `holderName`, `categoryName`, `windowed`/`validFrom`/`validUntil`,
+  and on `already_used` a `lastUsed: { at, station, by }`.

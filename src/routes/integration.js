@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const integrationController = require("../controllers/integrationController");
 const prasadamController = require("../controllers/prasadamIntegrationController");
+const clientScanController = require("../controllers/clientScanController");
 const { clientAuth, guardClientEvent } = require("../middleware/clientAuth");
 
 // ─── Client authentication ────────────────────────────────────────────────────
@@ -69,6 +70,13 @@ router.post("/passes", ...guarded("passes:issue"), prasadamController.issuePass)
 // prasadam:issue scope.
 router.post("/prasadam/qr", ...guarded("prasadam:issue"), prasadamController.issueSingle);
 router.post("/prasadam/qr/bulk", ...guarded("prasadam:issue"), prasadamController.issueBulk);
+
+// ─── Scan at a counter from a client app ─────────────────────────────────────
+// POST /api/integration/scan
+// Body: { qr, event_id, station?, client_scan_id, scanned_by:{ref, name?, phone?}, venue? }
+// Same rules and verdicts as the volunteer scanner; only pass types the key is
+// allowed are redeemed. See controllers/clientScanController.js.
+router.post("/scan", ...guarded("passes:scan"), clientScanController.scan);
 
 // ─── QR pass details (live status + scan history) ────────────────────────────
 // GET /api/integration/qr/:qrId

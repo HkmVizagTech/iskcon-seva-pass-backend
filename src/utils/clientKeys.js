@@ -7,6 +7,7 @@ const SCOPES = {
   "events:write": "Change which pass types the devotee app may use",
   "passes:issue": "Issue passes (seva pass, volunteer QR, generic session passes)",
   "passes:read": "Read a pass's status and scan history",
+  "passes:scan": "Scan passes at a counter (the app names who scanned)",
   "prasadam:issue": "Issue prasadam coupons",
   "preachers:manage": "Create, list and remove preachers",
 };

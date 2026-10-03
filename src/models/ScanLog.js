@@ -16,11 +16,16 @@ const scanLogSchema = new mongoose.Schema({
     ref: "Holder",
     index: true,
   },
+  // A volunteer account — or, for scans made inside a registered client app
+  // (e.g. the community app's prasadam scanners), that app plus the person
+  // the app says scanned.
   scannedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
-    required: true,
+    required: function () { return !this.client; },
   },
+  client: { type: mongoose.Schema.Types.ObjectId, ref: "ClientApp" },
+  externalScanner: { ref: String, name: String, phone: String },
   stationLabel: {
     type: String,
     required: true,
@@ -49,7 +54,7 @@ const scanLogSchema = new mongoose.Schema({
     ],
     required: true,
   },
-  source: { type: String, enum: ['scanner','manual','offline'], default: 'scanner' },
+  source: { type: String, enum: ['scanner','manual','offline','client'], default: 'scanner' },
   notes: { type: String },
   deviceInfo: {
     deviceId: String,

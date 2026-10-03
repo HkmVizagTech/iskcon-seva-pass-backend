@@ -124,7 +124,9 @@ const qrPassSchema = new mongoose.Schema({
         ],
       },
       groupCount: Number,
-      source: { type: String, enum: ["scanner", "manual", "offline"] },
+      source: { type: String, enum: ["scanner", "manual", "offline", "client"] },
+      client: { type: mongoose.Schema.Types.ObjectId, ref: "ClientApp" },
+      scannerName: String,
     },
   ],
   version: {

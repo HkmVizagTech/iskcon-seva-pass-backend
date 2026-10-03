@@ -23,7 +23,7 @@ const ClientApp = require("../src/models/ClientApp");
 const { SCOPES, generateKey, hashKey, keyHint } = require("../src/utils/clientKeys");
 
 const PRESETS = {
-  prasadam: ["prasadam:issue", "passes:read"],
+  prasadam: ["prasadam:issue", "passes:read", "passes:scan"],
   "seva-pass-app": ["events:read", "events:write", "passes:issue", "passes:read", "preachers:manage"],
   full: Object.keys(SCOPES),
 };

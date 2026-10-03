@@ -4,7 +4,7 @@ const { SCOPES, generateKey, hashKey, keyHint } = require("../utils/clientKeys")
 
 // Starting points for the common consumers; scopes can still be edited after.
 const PRESETS = {
-  prasadam: ["prasadam:issue", "passes:read"],
+  prasadam: ["prasadam:issue", "passes:read", "passes:scan"],
   "seva-pass-app": ["events:read", "events:write", "passes:issue", "passes:read", "preachers:manage"],
   full: Object.keys(SCOPES),
 };

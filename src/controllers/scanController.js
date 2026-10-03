@@ -6,6 +6,7 @@ const EntryPoint = require("../models/EntryPoint");
 const Event = require("../models/Event");
 const mongoose = require("mongoose");
 const { isObjectId } = require("../utils/objectId");
+const { passTypeAllowed } = require("../middleware/clientAuth");
 const { isEventScoped, isEventAllowed, allowedEventIds } = require("../utils/issuePermissions");
 
 // ─── In-memory dedup map (optimisation only) ──────────────────────────────────
@@ -177,8 +178,19 @@ async function bumpCounter(epId, by) {
   }
 }
 
+// When / where / by whom a pass was last let in — so "already used" can say
+// "at 12:41, Prasadam Counter, by Ramesh".
+function lastUse(validation) {
+  const hist = validation.qrPass?.redemptionHistory;
+  if (validation.reason !== "already_used" || !Array.isArray(hist)) return null;
+  const last = hist.filter((h) => h.result === "granted").sort((a, b) => new Date(b.scannedAt) - new Date(a.scannedAt))[0];
+  return last ? { at: last.scannedAt || null, station: last.stationLabel || null, by: last.scannerName || null } : null;
+}
+
 function verdictBody(validation) {
+  const used = lastUse(validation);
   return {
+    ...(used ? { lastUsed: used } : {}),
     holder_name: validation.holderName,
     holderName: validation.holderName,
     subCategory: validation.subCategory || null,
@@ -201,22 +213,28 @@ async function processScan(ctx) {
     clientScanId, source = "scanner", scannedAt = new Date(),
     stale = false, useMemoryDedup = false,
   } = ctx;
-  const userId = user._id || user.userId;
+  // A scan from a registered client app (ctx.client) has no volunteer account:
+  // the app authenticated with its key, guarded the event, and names who scanned.
+  const client = ctx.client || null;
+  const clientId = client && !client.legacy ? client.id : undefined;
+  const userId = client ? null : (user._id || user.userId);
   const requestedGroupCount = normGroupCount(ctx.groupCount);
   const qrId = peekQrId(qrData);
   const offline = source === "offline";
   const baseLog = {
     qrId,
     epId,
-    scannedBy: userId,
+    ...(client ? { client: clientId, externalScanner: ctx.scanner || undefined } : { scannedBy: userId }),
     scannedAt,
     source,
     clientScanId,
     ...(offline ? { offlineSync: { isOffline: true, syncedAt: new Date() } } : {}),
   };
 
-  // Assigned station / event / venue
-  const scope = await checkVolunteerScope(user, epId, normVenue(ctx.venue));
+  // Assigned station / event / venue (volunteers); client apps were checked by the caller
+  const scope = client
+    ? { ok: true, venue: normVenue(ctx.venue) }
+    : await checkVolunteerScope(user, epId, normVenue(ctx.venue));
   const venue = scope.ok ? scope.venue : null;
   if (!scope.ok) {
     if (offline) {
@@ -301,6 +319,27 @@ async function processScan(ctx) {
   const finalStationLabel = stationLabel || validation.entryPoint?.stationLabel || String(epId);
   const validatedQrId = validation.payload?.q || qrId;
 
+  // A client app may only redeem — and only learn about — the pass types it is
+  // allowed (e.g. the community app: prasadam coupons only).
+  if (client && validation.categoryCode && !passTypeAllowed(client, validation.categoryCode)) {
+    releaseMemory();
+    await writeScanLog({
+      ...baseLog,
+      qrId: validatedQrId,
+      stationLabel: finalStationLabel,
+      venue,
+      result: "not_included",
+      groupCount: requestedGroupCount,
+      notes: `Pass type ${validation.categoryCode} not allowed for client ${client.slug}`,
+      deviceInfo: { ...cleanDeviceInfo(deviceInfo), groupCount: requestedGroupCount, ipAddress: ip },
+    });
+    return {
+      status: 200,
+      outcome: "not_included",
+      body: { success: false, result: "not_included", message: "This QR cannot be scanned here" },
+    };
+  }
+
   if (!validation.valid) {
     // Invalid scans shouldn't block future attempts
     releaseMemory();
@@ -340,6 +379,7 @@ async function processScan(ctx) {
       multiEntryAllowed: validation.entryPoint?.multiEntryAllowed,
       redemptionGroupEpIds: validation.redemptionGroupEpIds || null,
       source,
+      ...(client ? { client: clientId, scannerName: ctx.scanner?.name } : {}),
     },
   );
 
@@ -537,8 +577,13 @@ exports.getRecentScans = async (req, res) => {
       const cat = s.holderId?.catId || null;
       const categoryCode = cat?.catCode ? String(cat.catCode).toUpperCase() : null;
       const isPrasadamCoupon = categoryCode === "PR";
+      const o = s.toObject();
+      // Scans made in a client app have no volunteer account: show the app's scanner
+      if (!o.scannedBy && o.externalScanner) {
+        o.scannedBy = { name: `${o.externalScanner.name || o.externalScanner.phone || "App scanner"} (app)` };
+      }
       return {
-        ...s.toObject(),
+        ...o,
         passType: isPrasadamCoupon ? "prasadam_coupon" : "seva_pass",
         isPrasadamCoupon,
         categoryCode,
@@ -676,3 +721,6 @@ exports.syncOfflineScans = async (req, res) => {
     res.status(500).json({ error: "Failed to sync offline scans" });
   }
 };
+
+// Shared with the client-app scan endpoint (controllers/clientScanController.js).
+exports.processScan = processScan;
