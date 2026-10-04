@@ -23,6 +23,10 @@ const { sanitizeHtml } = require("../utils/html");
 const COMMON_HEADERS = {
   Accept: "application/json",
   "User-Agent": "Mozilla/5.0 (compatible; ISKCON-SevaPass/1.0; +https://harekrishnavizag.org)",
+  // The community app's festival endpoints accept its "volunteer system" key
+  // (admin Server page there) or a whitelisted IP. Railway's outbound IP is not
+  // fixed, so send the key whenever it is configured.
+  ...(process.env.THIRD_PARTY_API_KEY ? { "X-API-Key": process.env.THIRD_PARTY_API_KEY } : {}),
 };
 
 class ThirdPartyService {
