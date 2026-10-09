@@ -22,7 +22,9 @@ const scanLogSchema = new mongoose.Schema({
   scannedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
-    required: function () { return !this.client; },
+    // Not needed for app scans: a registered app (client) or the shared
+    // integration key, which has no ClientApp id but always names the scanner.
+    required: function () { return !this.client && !this.externalScanner?.ref; },
   },
   client: { type: mongoose.Schema.Types.ObjectId, ref: "ClientApp" },
   externalScanner: { ref: String, name: String, phone: String },
