@@ -153,6 +153,13 @@ mongoose
     } catch (err) {
       console.error("⚠️ Prasadam coupon lane backfill failed (continuing):", err.message);
     }
+    // Permanent events (default PRASADAM) with their coupon counter and PR type.
+    try {
+      const { runStandingEvents } = require("./migrations/standingEvents");
+      await runStandingEvents();
+    } catch (err) {
+      console.error("⚠️ Standing events check failed (continuing):", err.message);
+    }
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err.message);
