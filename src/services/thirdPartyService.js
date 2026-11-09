@@ -139,11 +139,10 @@ class ThirdPartyService {
       const passTypeMap = { SP: "sponsor", DN: "donor", INV: "invitee" };
       const passType = passTypeMap[(catCode || "").toUpperCase()] || "donor";
 
-      // Default seva_type per pass type, used only when the holder type on
-      // this event doesn't have its own communityAppSevaType set. Values are
-      // capitalized (first letter) to match the community app's expected
-      // display casing.
-      const DEFAULT_SEVA_TYPE_BY_TYPE = { sponsor: "Abhisekam", donor: "Darshan", invitee: "Darshan" };
+      // No fixed default seva name any more ("Abhisekam" / "Darshan" showed on
+      // every event). When the holder type has no communityAppSevaType, the
+      // event's own name is used. The community app requires seva_type, so it
+      // is never sent empty.
       const capitalizeFirst = (s) => {
         const str = String(s || "").trim();
         return str ? str.charAt(0).toUpperCase() + str.slice(1) : str;
@@ -155,7 +154,7 @@ class ThirdPartyService {
       const resolvedSevaType = capitalizeFirst(
         (typeof holderTypeSevaType === "string" && holderTypeSevaType.trim())
           ? holderTypeSevaType
-          : (DEFAULT_SEVA_TYPE_BY_TYPE[passType] || "Darshan")
+          : (event?.name || "Seva")
       );
 
       // devotee_mobile_number = the PREACHER's phone, so the community app
