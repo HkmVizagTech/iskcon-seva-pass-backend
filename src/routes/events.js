@@ -31,6 +31,31 @@ router.post(
   eventController.createEvent,
 );
 router.get("/", protect, eventController.getEvents);
+// VCC link — declared before "/:id" so "vcc" is not parsed as an event id.
+router.get(
+  "/vcc/coordinators",
+  protect,
+  authorize("super_admin", "event_admin"),
+  eventController.getVccCoordinators,
+);
+router.get(
+  "/:id/vcc",
+  protect,
+  authorize("super_admin", "event_admin"),
+  eventController.getVccStatus,
+);
+router.get(
+  "/:id/vcc/stats",
+  protect,
+  authorize("super_admin", "event_admin", "campaign_manager"),
+  eventController.getVccStats,
+);
+router.post(
+  "/:id/vcc-sync",
+  protect,
+  authorize("super_admin", "event_admin"),
+  eventController.syncEventToVcc,
+);
 router.get("/:id", protect, eventController.getEventDetails);
 router.patch(
   "/:id",

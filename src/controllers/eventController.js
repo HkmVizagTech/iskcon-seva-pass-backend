@@ -15,6 +15,7 @@ const {
 const { JHULAN, isJhulan, PRASADAM_COUPON } = require("../utils/entryPointTypes");
 const { escapeRegex } = require("../utils/regex");
 const { HOLDER_READ_ROLES } = require("../utils/roles");
+const vccService = require("../services/vccService");
 
 // Fields a client may set when creating an event (createdBy and _id are server-controlled).
 const CREATE_ALLOWED = [
@@ -112,9 +113,21 @@ exports.createEvent = async (req, res) => {
       { eventId: event._id, name: "Prasadam Coupon", catCode: "PR", entryPoints: prasadamEpIds, color: "#16A34A", icon: "🍛", isDefault: true, isActive: true },
     ]);
 
+    // VCC: create the same event there when the form asked for volunteers.
+    // A VCC failure never fails the QR event — it is recorded on vccSync and
+    // can be retried from the dashboard (POST /api/events/:id/vcc-sync).
+    let vccSync = null;
+    if (req.body.vcc?.enabled) {
+      vccSync = await vccService.pushEvent(event, req.body.vcc);
+      vccSync.enabled = true;
+      await vccService.recordSync(Event, event._id, vccSync);
+      event.vccSync = vccSync;
+    }
+
     res.status(201).json({
       success: true,
       event,
+      vccSync,
       message: "Event created with default entry points and holder types",
     });
   } catch (error) {
@@ -313,6 +326,10 @@ exports.updateEvent = async (req, res) => {
     const update = { $set };
     if (Object.keys($unset).length > 0) update.$unset = $unset;
 
+    const previous = $set.eventCode
+      ? await Event.findById(req.params.id).select("eventCode").lean()
+      : null;
+
     const event = await Event.findByIdAndUpdate(
       req.params.id,
       update,
@@ -321,10 +338,28 @@ exports.updateEvent = async (req, res) => {
 
     if (!event) return res.status(404).json({ error: "Event not found" });
 
+    // VCC: keep the linked VCC event's name/dates/venue in step. VCC is keyed
+    // by eventCode, so a code change is not pushed (it would create a second
+    // event there) — it is flagged instead.
+    let vccSync = null;
+    if (event.vccSync?.enabled) {
+      if ($set.eventCode && previous && previous.eventCode !== event.eventCode) {
+        vccSync = {
+          status: "failed",
+          error: `Event code changed from ${previous.eventCode} to ${event.eventCode}. Change it in VCC too, then click "Sync to VCC".`,
+          lastAttemptAt: new Date(),
+        };
+      } else {
+        vccSync = await vccService.pushEvent(event);
+      }
+      await vccService.recordSync(Event, event._id, vccSync);
+      Object.assign(event.vccSync, vccSync);
+    }
+
     // NOTE: No need to re-sign QR passes when dates change.
     // validateQR now reads event.dateStart/dateEnd from the live DB record,
     // so all existing QR passes immediately respect the new dates.
-    res.json({ success: true, event });
+    res.json({ success: true, event, vccSync });
   } catch (error) {
     console.error("Update event error:", error);
     res.status(500).json({ error: "Failed to update event" });
@@ -398,5 +433,90 @@ exports.deactivateEvent = async (req, res) => {
     res.json({ success: true, event });
   } catch (error) {
     res.status(500).json({ error: "Failed to deactivate event" });
+  }
+};
+
+// ─── VCC (Volunteer Care Cell) ─────────────────────────────────────────────
+
+// GET /api/events/vcc/coordinators — VCC users who can own an event.
+exports.getVccCoordinators = async (req, res) => {
+  if (!vccService.isEnabled()) {
+    return res.json({ enabled: false, coordinators: [] });
+  }
+  try {
+    const coordinators = await vccService.listCoordinators();
+    res.json({ enabled: true, coordinators });
+  } catch (error) {
+    res.status(502).json({ enabled: true, error: `Could not reach VCC: ${error.message}` });
+  }
+};
+
+// GET /api/events/:id/vcc — link state plus whether VCC has the event.
+exports.getVccStatus = async (req, res) => {
+  try {
+    const event = await Event.findById(req.params.id).select("eventCode vccSync").lean();
+    if (!event) return res.status(404).json({ error: "Event not found" });
+    let remote = null;
+    let remoteError = null;
+    if (vccService.isEnabled()) {
+      try {
+        remote = await vccService.getEvent(event.eventCode);
+      } catch (e) {
+        remoteError = e.message;
+      }
+    }
+    res.json({
+      enabled: vccService.isEnabled(),
+      vccUrl: vccService.baseUrl(),
+      vccSync: event.vccSync || { enabled: false },
+      existsInVcc: remote ? remote.exists : null,
+      vccEvent: remote?.event || null,
+      remoteError,
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to load VCC status" });
+  }
+};
+
+// POST /api/events/:id/vcc-sync — link an existing event to VCC, or retry.
+// Body (optional, needed the first time VCC creates the event):
+//   { coordinatorId, registrationStart, registrationEnd, photoRequired, status }
+// Body { enabled: false } unlinks (stops future syncs; VCC keeps its copy).
+exports.syncEventToVcc = async (req, res) => {
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    if (req.body?.enabled === false) {
+      await Event.updateOne({ _id: event._id }, { $set: { "vccSync.enabled": false } });
+      return res.json({ success: true, vccSync: { ...(event.vccSync?.toObject?.() || {}), enabled: false } });
+    }
+
+    const result = await vccService.pushEvent(event, req.body || {});
+    result.enabled = true;
+    await vccService.recordSync(Event, event._id, result);
+    const ok = result.status === "synced";
+    res.status(ok ? 200 : 502).json({ success: ok, vccSync: result, error: ok ? undefined : result.error });
+  } catch (error) {
+    console.error("VCC sync error:", error);
+    res.status(500).json({ error: "Failed to sync event to VCC" });
+  }
+};
+
+// GET /api/events/:id/vcc/stats — volunteer numbers from VCC for this event.
+exports.getVccStats = async (req, res) => {
+  try {
+    const event = await Event.findById(req.params.id).select("eventCode vccSync").lean();
+    if (!event) return res.status(404).json({ error: "Event not found" });
+    if (!vccService.isEnabled()) return res.json({ enabled: false });
+    if (!event.vccSync?.enabled) return res.json({ enabled: true, linked: false });
+    try {
+      const stats = await vccService.getStats(event.eventCode);
+      res.json({ enabled: true, linked: true, ...stats });
+    } catch (e) {
+      res.status(502).json({ enabled: true, linked: true, error: `Could not reach VCC: ${e.message}` });
+    }
+  } catch (error) {
+    res.status(500).json({ error: "Failed to load volunteer stats" });
   }
 };

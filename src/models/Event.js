@@ -31,6 +31,16 @@ const eventSchema = new mongoose.Schema({
   // register-volunteer API using this event_id string (e.g. "event_5").
   // If not set, no push happens for this event.
   thirdPartyEventId: { type: String, trim: true },
+  // VCC (Volunteer Care Cell) link. When enabled, this event is created in
+  // VCC under the same eventCode and kept in sync on edit (services/vccService).
+  vccSync: {
+    enabled: { type: Boolean, default: false },
+    status: { type: String, enum: ["pending", "synced", "failed"] },
+    error: String,
+    lastAttemptAt: Date,
+    syncedAt: Date,
+    vccEventObjectId: String,
+  },
   venue: [
     {
       name: String,
